@@ -13,46 +13,114 @@
  * limitations under the License.
  */
 
+import { Request, RequestHandler, Response, Router } from 'express'
+import Tracks from './tracks'
+import { Config, Context, Position } from './types'
+
+export interface ContextPosition {
+  context: Context
+  value: Position
+}
+
 interface App {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   debug: (...args: any) => void
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   error: (...args: any) => void
+  streambundle: {
+    getBus: (
+      path: string,
+    ) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      onValue: (cb: (x: any) => void) => () => void
+    }
+  }
+}
+
+interface Plugin {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  start: (c: any) => void
+  stop: () => void
+  signalKApiRoutes: (r: Router) => Router
+  id: string
+  name: string
+  description: string
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  schema: any
 }
 
 export default function (app: App): Plugin {
-  const debug =
-    app.debug ||
-    ((msg: string) => {
-      console.log(msg)
-    })
+  let onStop: (() => void)[] = []
+  let tracks: Tracks | undefined = undefined
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const plugin: any = {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    start: function (props: any) {
-      debug('start', props)
+  return {
+    start: function (configuration: Config) {
+      tracks = new Tracks(configuration, app.debug)
+      onStop.push(
+        app.streambundle
+          .getBus('navigation.position')
+          .onValue((update: ContextPosition): void => tracks?.newPosition(update.context, update.value)),
+      )
+      const pruneInterval = setInterval(tracks.prune.bind(tracks, 5 * 60 * 1000), 60 * 1000)
+      onStop.push(() => {
+        clearInterval(pruneInterval)
+      })
     },
 
     stop: function () {
-      debug('stop')
+      onStop.forEach((f) => {
+        try {
+          f()
+        } catch (err) {
+          app.error(err)
+        }
+      })
+      onStop = []
     },
 
-    started: false,
+    signalKApiRoutes: function (router: Router) {
+      const trackHandler: RequestHandler = (req: Request, res: Response) => {
+        tracks
+          ?.get(`vessels.${req.params.vesselId}`)
+          .then((d: Position[]) => {
+            res.json({
+              type: 'MultiLineString',
+              coordinates: [d.map((p: Position) => [p.longitude, p.latitude])],
+            })
+          })
+          .catch(() => {
+            res.status(404)
+            res.json({ message: `No track available for vessels.${req.params.vesselId}` })
+          })
+      }
+      router.get('/vessels/:vesselId/track', trackHandler.bind(this))
+      return router
+    },
+
     id: 'tracks',
     name: 'Tracks',
-    description: 'Accumulate in memory tracks and provide the track API',
+    description: 'Accumulate tracks in memory for the track API implementation',
     schema: {
       type: 'object',
       properties: {
-        port: {
+        resolution: {
           type: 'number',
-          title: 'Port',
-          default: 12345,
+          title: 'Track resolution (milliseconds)',
+          default: 60000,
+        },
+        pointsToKeep: {
+          type: 'number',
+          title: 'Points to keep',
+          description: 'How many trackpoints to keep for each track',
+          default: 60,
+        },
+        maxAge: {
+          type: 'number',
+          title: 'Maximum idle time (seconds)',
+          description: 'Tracks with no updates longer than this are removed',
+          default: 600,
         },
       },
     },
   }
-
-  return plugin
 }
