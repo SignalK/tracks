@@ -14,12 +14,15 @@
  */
 
 import { Request, RequestHandler, Response, Router } from 'express'
-import Tracks from './tracks'
-import { Config, Context, Position } from './types'
+import { Tracks as Tracks_, TrackAccumulator as TrackAccumulator_, TracksConfig } from './tracks'
+import { Context, LatLngTuple } from './types'
 
 export interface ContextPosition {
   context: Context
-  value: Position
+  value: {
+    latitude: number
+    longitude: number
+  }
 }
 
 interface App {
@@ -49,17 +52,19 @@ interface Plugin {
   schema: any
 }
 
-export default function (app: App): Plugin {
+export default function ThePlugin(app: App): Plugin {
   let onStop: (() => void)[] = []
-  let tracks: Tracks | undefined = undefined
+  let tracks: Tracks_ | undefined = undefined
 
   return {
-    start: function (configuration: Config) {
-      tracks = new Tracks(configuration, app.debug)
+    start: function (configuration: TracksConfig) {
+      tracks = new Tracks_(configuration, app.debug)
       onStop.push(
         app.streambundle
           .getBus('navigation.position')
-          .onValue((update: ContextPosition): void => tracks?.newPosition(update.context, update.value)),
+          .onValue((update: ContextPosition): void =>
+            tracks?.newPosition(update.context, [update.value.latitude, update.value.longitude]),
+          ),
       )
       const pruneInterval = setInterval(tracks.prune.bind(tracks, 5 * 60 * 1000), 60 * 1000)
       onStop.push(() => {
@@ -82,10 +87,10 @@ export default function (app: App): Plugin {
       const trackHandler: RequestHandler = (req: Request, res: Response) => {
         tracks
           ?.get(`vessels.${req.params.vesselId}`)
-          .then((d: Position[]) => {
+          .then((coordinates: LatLngTuple[]) => {
             res.json({
               type: 'MultiLineString',
-              coordinates: [d.map((p: Position) => [p.longitude, p.latitude])],
+              coordinates: [coordinates],
             })
           })
           .catch(() => {
@@ -124,3 +129,6 @@ export default function (app: App): Plugin {
     },
   }
 }
+
+export class Tracks extends Tracks_ {}
+export class TrackAccumulator extends TrackAccumulator_ {}

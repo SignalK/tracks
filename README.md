@@ -1,2 +1,3 @@
-# tracks
-Plugin for tracks accumulation and the track API
+# @signalk/tracks and @signalk/tracks-plugin
+This repo contains two npm modules:
+- @signalk/tracks - RxJs based module that accumulates
