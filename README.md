@@ -1,3 +1,4 @@
 # @signalk/tracks and @signalk/tracks-plugin
 This repo contains two npm modules:
-- @signalk/tracks - RxJs based module that accumulates
+- `@signalk/tracks` - RxJs based module that accumulates positions into a track, using a configured time resolution and retains a sliding window of points. Contains the code for both a Signal K server plugin that implements the track api and client side "TrackAccumulator" class that manages the track for a single vessel. TrackAccumulator can optionally bootstrap the track data from the server. The result is available as `Observable<LatLng[]>`.
+- `@signalk/tracks-plugin` Convenience module that exposes the plugin part of `@signalk/tracks`.
