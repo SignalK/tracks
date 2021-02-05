@@ -10,3 +10,5 @@ export interface Config {
   pointsToKeep: number
   maxAge: number
 }
+
+export interface VesselCollection { [key: string] : Position[] }

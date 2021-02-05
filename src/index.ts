@@ -15,12 +15,18 @@
 
 import { Request, RequestHandler, Response, Router } from 'express'
 import Tracks from './tracks'
-import { Config, Context, Position } from './types'
+import { Config, Context, Position, VesselCollection } from './types'
 
 export interface ContextPosition {
   context: Context
   value: Position
 }
+
+interface VesselTrack {
+  type: string,
+  coordinates: Array<Array<[number,number]>>
+}
+
 
 interface App {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -94,6 +100,27 @@ export default function (app: App): Plugin {
           })
       }
       router.get('/vessels/:vesselId/track', trackHandler.bind(this))
+
+      // return all vessels and their track
+      router.get('/tracks', (req: Request, res: Response)=> {
+        tracks
+          ?.getAll()
+          .then((d: VesselCollection) => {
+            let trks:{[key: string] : VesselTrack}= {}
+            Object.entries(d).forEach( (i:[Context, Position[]])=> {
+              trks[i[0]]= {
+                type: 'MultiLineString',
+                coordinates: [i[1].map((p: Position) => [p.longitude, p.latitude])]
+              }
+            })
+            res.json(trks)
+          })
+          .catch(() => {
+            res.status(404)
+            res.json({ message: `No track available for vessels.`})
+          })
+        }).bind(this)
+
       return router
     },
 
