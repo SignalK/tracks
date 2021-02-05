@@ -1,10 +1,14 @@
 import { ConnectableObservable, Observable, Subject } from 'rxjs'
 import { max, publishReplay, scan, shareReplay, take, throttleTime } from 'rxjs/operators'
-import { Config, Context, Position } from './types'
+import { Config, Context, Position, VesselCollection } from './types'
 
 interface tracksMap {
   [context: string]: TrackAccumulator
 }
+
+
+
+
 export default class Tracks {
   tracks: tracksMap = {}
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -26,6 +30,15 @@ export default class Tracks {
       (createIfMissing &&
         (this.tracks[context] = new TrackAccumulator(this.config.resolution, this.config.pointsToKeep)))
     )
+  }
+
+  // Return all vessels and their tracks
+  getAll(): Promise<VesselCollection> {
+    const res: VesselCollection= {}
+    Object.keys(this.tracks).forEach( (k:Context)=> {
+        this.get(k).then( (t:Position[])=> { res[k]= t } )
+    })
+    return Promise.resolve(res)
   }
 
   get(context: Context): Promise<Position[]> {
