@@ -33,11 +33,12 @@ export default class Tracks {
   }
 
   // Return all vessels and their tracks
-  getAll(): Promise<VesselCollection> {
+  async getAll(): Promise<VesselCollection> {
     const res: VesselCollection= {}
-    Object.keys(this.tracks).forEach( (k:Context)=> {
-        this.get(k).then( (t:Position[])=> { res[k]= t } )
-    })
+    let keys= Object.keys(this.tracks)
+    for( let k of keys) {
+      await this.get(k).then( (t:Position[])=> { res[k]= t } )
+    }
     return Promise.resolve(res)
   }
 
