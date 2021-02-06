@@ -15,7 +15,8 @@
 
 import { Request, RequestHandler, Response, Router } from 'express'
 import Tracks from './tracks'
-import { Config, Context, Position, VesselCollection } from './types'
+import { Config, Context, Position, VesselCollection, QueryParameters } from './types'
+import { validateParameters} from './utils'
 
 export interface ContextPosition {
   context: Context
@@ -41,6 +42,7 @@ interface App {
       onValue: (cb: (x: any) => void) => () => void
     }
   }
+  getSelfPath: (path: string) => void
 }
 
 interface Plugin {
@@ -58,6 +60,11 @@ interface Plugin {
 export default function (app: App): Plugin {
   let onStop: (() => void)[] = []
   let tracks: Tracks | undefined = undefined
+
+  function getVesselPosition():Position {
+    let p:any= app.getSelfPath('navigation.position');
+    return (p && p.value) ? p.value : null;
+  }
 
   return {
     start: function (configuration: Config) {
@@ -102,9 +109,11 @@ export default function (app: App): Plugin {
       router.get('/vessels/:vesselId/track', trackHandler.bind(this))
 
       // return all vessels and their track
-      router.get('/tracks', (req: Request, res: Response)=> {
+      router.get('/tracks/*', (req: Request, res: Response)=> {
+        let params: QueryParameters= validateParameters(req.query)
+        app.debug('** params **', params)
         tracks
-          ?.getAll()
+          ?.getAll(params, getVesselPosition())
           .then((d: VesselCollection) => {
             let trks:{[key: string] : VesselTrack}= {}
             Object.entries(d).forEach( (i:[Context, Position[]])=> {
@@ -148,6 +157,6 @@ export default function (app: App): Plugin {
           default: 600,
         },
       },
-    },
+    }
   }
 }
