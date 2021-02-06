@@ -1,6 +1,7 @@
 import { ConnectableObservable, Observable, Subject } from 'rxjs'
 import { max, publishReplay, scan, shareReplay, take, throttleTime } from 'rxjs/operators'
-import { Config, Context, Position, VesselCollection } from './types'
+import { Config, Context, Position, QueryParameters, VesselCollection } from './types'
+import { distanceTo, inBounds } from './utils'
 
 interface tracksMap {
   [context: string]: TrackAccumulator
@@ -33,11 +34,30 @@ export default class Tracks {
   }
 
   // Return all vessels and their tracks
-  async getAll(): Promise<VesselCollection> {
+  async getAll(params?: QueryParameters, position?: Position): Promise<VesselCollection> {
     const res: VesselCollection= {}
     let keys= Object.keys(this.tracks)
     for( let k of keys) {
-      await this.get(k).then( (t:Position[])=> { res[k]= t } )
+      await this.get(k).then( (t:Position[])=> {
+        // filter results based on supplied params
+        if(params) {
+          let lastPoint: any= (t.length!=0) ? t[t.length-1] : null
+          // within supplied bounded area
+          if(params.geobounds) { 
+            if(lastPoint && inBounds(lastPoint, params.geobounds)) {
+              res[k]= t 
+            }
+          }
+          // within supplied radius of vessel position
+          if(params.radius && position) { 
+            if(lastPoint && distanceTo(lastPoint, position)<= params.radius) {
+              res[k]= t 
+            }
+          }
+        }
+        else { res[k]= t }
+      })
+      .catch ( (err)=> { console.log(err) })
     }
     return Promise.resolve(res)
   }
