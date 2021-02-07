@@ -92,6 +92,7 @@ export default function (app: App): Plugin {
     },
 
     signalKApiRoutes: function (router: Router) {
+      // return supplied vessl id track
       const trackHandler: RequestHandler = (req: Request, res: Response) => {
         tracks
           ?.get(`vessels.${req.params.vesselId}`)
@@ -109,7 +110,7 @@ export default function (app: App): Plugin {
       router.get('/vessels/:vesselId/track', trackHandler.bind(this))
 
       // return all vessels and their track
-      router.get('/tracks/*', (req: Request, res: Response)=> {
+      const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
         let params: QueryParameters= validateParameters(req.query)
         app.debug('** params **', params)
         tracks
@@ -128,7 +129,9 @@ export default function (app: App): Plugin {
             res.status(404)
             res.json({ message: `No track available for vessels.`})
           })
-        }).bind(this)
+      }
+      router.get('/tracks', allTracksHandler.bind(this) )
+      router.get('/tracks/*', allTracksHandler.bind(this) )
 
       return router
     },
