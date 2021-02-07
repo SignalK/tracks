@@ -8,7 +8,8 @@ export interface Position {
 export interface Config {
   resolution: number
   pointsToKeep: number
-  maxAge: number
+  maxAge: number,
+  maxRadius: number
 }
 
 export interface VesselCollection { [key: string] : Position[] }

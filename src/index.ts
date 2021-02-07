@@ -92,7 +92,7 @@ export default function (app: App): Plugin {
     },
 
     signalKApiRoutes: function (router: Router) {
-      // return supplied vessl id track
+      // return supplied vessel id track
       const trackHandler: RequestHandler = (req: Request, res: Response) => {
         tracks
           ?.get(`vessels.${req.params.vesselId}`)
@@ -109,7 +109,7 @@ export default function (app: App): Plugin {
       }
       router.get('/vessels/:vesselId/track', trackHandler.bind(this))
 
-      // return all vessels and their track
+      // return all / filtered vessel tracks
       const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
         let params: QueryParameters= validateParameters(req.query)
         app.debug('** params **', params)
@@ -159,7 +159,13 @@ export default function (app: App): Plugin {
           description: 'Tracks with no updates longer than this are removed',
           default: 600,
         },
-      },
+        maxRadius: {
+          type: 'number',
+          title: 'Maximum Radius (meters) ',
+          description: 'Include only vessels with position within this range. 0= all vessels',
+          default: 50000,
+        }
+      }
     }
   }
 }
