@@ -33,33 +33,41 @@ export default class Tracks {
     )
   }
 
-  // Return all vessels and their tracks
+  // Return all / filtered vessels and their tracks
   async getAll(params?: QueryParameters, position?: Position): Promise<VesselCollection> {
     const res: VesselCollection= {}
     let keys= Object.keys(this.tracks)
     for( let k of keys) {
       await this.get(k).then( (t:Position[])=> {
         // filter results based on supplied params
-        if(params) {
-          let lastPoint: any= (t.length!=0) ? t[t.length-1] : null
-          // within supplied bounded area
-          if(params.geobounds) { 
-            if(lastPoint && inBounds(lastPoint, params.geobounds)) {
-              res[k]= t 
-            }
-          }
-          // within supplied radius of vessel position
-          if(params.radius && position) { 
-            if(lastPoint && distanceTo(lastPoint, position)<= params.radius) {
-              res[k]= t 
-            }
-          }
-        }
-        else { res[k]= t }
+        if(this.filterVessels(t, params, position)) { res[k]= t }
       })
       .catch ( (err)=> { console.log(err) })
     }
     return Promise.resolve(res)
+  }
+
+  // returns true if last track point passes filter tests
+  filterVessels(t:Position[], params?: QueryParameters, position?: Position): boolean {
+    let result: boolean= true
+    if(params && Object.keys(params).length!=0) {
+      let lastPoint: any= (t.length!=0) ? t[t.length-1] : null
+      // within supplied bounded area
+      if(params.geobounds) { 
+        if(lastPoint && inBounds(lastPoint, params.geobounds)) {
+          result= result && true
+        }
+        else { result= false }
+      }
+      // within supplied radius of vessel position
+      if(params.radius && position) { 
+        if(lastPoint && distanceTo(lastPoint, position)<= params.radius) {
+          result= result && true
+        }
+        else { result= false }
+      }
+    }
+    return result
   }
 
   get(context: Context): Promise<Position[]> {
