@@ -22,8 +22,9 @@ export function validateParameters(params: QueryParameters) {
         params.geobounds= (b.length==4) ? { sw: [b[0], b[1]], ne: [b[2], b[3] ]} : null
     }
     // radius in meters
-    params.radius= (!isNaN(params.radius)) ? parseFloat(params.radius) : null
-    
+    if(typeof params.geobounds !== 'undefined') {
+        params.radius= (!isNaN(params.radius)) ? parseFloat(params.radius) : null
+    }
     return params;
 }
 
