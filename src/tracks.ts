@@ -40,7 +40,7 @@ export default class Tracks {
     for( let k of keys) {
       await this.get(k).then( (t:Position[])=> {
         // filter results based on supplied params
-        if(this.filterVessels(t, params, position)) { res[k]= t }
+        if(this.applyFilters(t, params, position)) { res[k]= t }
       })
       .catch ( (err)=> { console.log(err) })
     }
@@ -48,7 +48,7 @@ export default class Tracks {
   }
 
   // returns true if last track point passes filter tests
-  filterVessels(t:Position[], params?: QueryParameters, position?: Position): boolean {
+  applyFilters(t:Position[], params?: QueryParameters, position?: Position): boolean {
     let result: boolean= true
     if(params && Object.keys(params).length!=0) {
       let lastPoint: any= (t.length!=0) ? t[t.length-1] : null
