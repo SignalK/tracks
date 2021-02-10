@@ -26,10 +26,11 @@ export default class Tracks {
   }
 
   getAccumulator(context: Context, createIfMissing = true): TrackAccumulator | undefined {
+    if(context.indexOf('vessels.')===-1) { return undefined }
     return (
       this.tracks[context] ||
-      (createIfMissing &&
-        (this.tracks[context] = new TrackAccumulator(this.config.resolution, this.config.pointsToKeep)))
+      ( createIfMissing  &&
+        (this.tracks[context] = new TrackAccumulator(this.config.resolution, this.config.pointsToKeep)) )
     )
   }
 
