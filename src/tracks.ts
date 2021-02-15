@@ -26,7 +26,7 @@ export default class Tracks {
   }
 
   getAccumulator(context: Context, createIfMissing = true): TrackAccumulator | undefined {
-    if(context.indexOf('vessels.')===-1) { return undefined }
+    if(context.indexOf('vessels.')===-1 && context.indexOf('aircraft.')===-1) { return undefined }
     return (
       this.tracks[context] ||
       ( createIfMissing  &&
