@@ -72,7 +72,7 @@ export default function ThePlugin(app: App): Plugin {
         app.streambundle
           .getBus('navigation.position')
           .onValue((update: ContextPosition): void =>
-            tracks?.newPosition(update.context, [update.value.latitude, update.value.longitude]),
+            tracks?.newPosition(update.context, [update.value.longitude, update.value.latitude]),
           ),
       )
       const pruneInterval = setInterval(tracks.prune.bind(tracks, 5 * 60 * 1000), 60 * 1000)
