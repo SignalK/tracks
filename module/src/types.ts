@@ -7,12 +7,15 @@ export interface Position {
   longitude: number
 }
 
-export interface VesselCollection { [key: string] : LatLngTuple[] }
-
-export interface GeoBounds {
-  ne: LatLngTuple;
-  sw: LatLngTuple;
+export interface VesselCollection {
+  [key: string]: LatLngTuple[]
 }
 
-export interface QueryParameters { [key: string] : any }
+export interface GeoBounds {
+  ne: LatLngTuple
+  sw: LatLngTuple
+}
 
+export interface QueryParameters {
+  [key: string]: any
+}

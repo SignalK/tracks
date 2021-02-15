@@ -24,7 +24,7 @@ export interface ContextPosition {
 }
 
 interface VesselTrack {
-  type: string,
+  type: string
   coordinates: Array<Array<LatLngTuple>>
 }
 
@@ -60,9 +60,9 @@ export default function ThePlugin(app: App): Plugin {
   let onStop: (() => void)[] = []
   let tracks: Tracks_ | undefined = undefined
 
-  function getVesselPosition():Position {
-    let p:any= app.getSelfPath('navigation.position');
-    return (p && p.value) ? p.value : null;
+  function getVesselPosition(): Position {
+    let p: any = app.getSelfPath('navigation.position')
+    return p && p.value ? p.value : null
   }
 
   return {
@@ -111,27 +111,27 @@ export default function ThePlugin(app: App): Plugin {
 
       // return all / filtered vessel tracks
       const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
-        let params: QueryParameters= validateParameters(req.query)
+        let params: QueryParameters = validateParameters(req.query)
         app.debug('** params **', params)
         tracks
           ?.getAll(params, getVesselPosition())
           .then((d: VesselCollection) => {
-            let trks:{[key: string] : VesselTrack}= {}
-            Object.entries(d).forEach( (i:[Context, LatLngTuple[]])=> {
-              trks[i[0]]= {
+            let trks: { [key: string]: VesselTrack } = {}
+            Object.entries(d).forEach((i: [Context, LatLngTuple[]]) => {
+              trks[i[0]] = {
                 type: 'MultiLineString',
-                coordinates: [i[1]]
+                coordinates: [i[1]],
               }
             })
             res.json(trks)
           })
           .catch(() => {
             res.status(404)
-            res.json({ message: `No track available for vessels.`})
+            res.json({ message: `No track available for vessels.` })
           })
       }
-      router.get('/tracks', allTracksHandler.bind(this) )
-      router.get('/tracks/*', allTracksHandler.bind(this) )
+      router.get('/tracks', allTracksHandler.bind(this))
+      router.get('/tracks/*', allTracksHandler.bind(this))
 
       return router
     },
@@ -164,9 +164,9 @@ export default function ThePlugin(app: App): Plugin {
           title: 'Maximum Radius (meters) ',
           description: 'Include only vessels with position within this range. 0= all vessels',
           default: 50000,
-        }
-      }
-    }
+        },
+      },
+    },
   }
 }
 
