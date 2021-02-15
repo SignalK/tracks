@@ -35,6 +35,9 @@ export class Tracks {
   }
 
   getAccumulator(context: Context, createIfMissing = true): TrackAccumulator | undefined {
+    if(context.indexOf('vessels.')===-1 && context.indexOf('aircraft.')===-1) {
+      return undefined 
+    }
     let result = this.tracks[context]
     if (!result && createIfMissing) {
       const accParams: AccumulatorParams = { ...this.config }
