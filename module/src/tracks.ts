@@ -1,6 +1,7 @@
 import { BehaviorSubject, combineLatest, ConnectableObservable, Observable, ReplaySubject, Subject } from 'rxjs'
 import { map, publishReplay, scan, take, throttleTime } from 'rxjs/operators'
-import { Context, LatLngTuple } from './types'
+import { Context, LatLngTuple, Position, QueryParameters, VesselCollection  } from './types'
+import { distanceTo, inBounds, latLonTupleToPosition } from './utils'
 
 interface tracksMap {
   [context: string]: TrackAccumulator
@@ -10,7 +11,8 @@ export interface TracksConfig {
   resolution: number
   pointsToKeep: number
   maxAge: number
-  fetchInitialTrack?: boolean
+  fetchInitialTrack?: boolean,
+  maxRadius: number
 }
 
 export class Tracks {
@@ -51,6 +53,44 @@ export class Tracks {
     } else {
       return Promise.reject()
     }
+  }
+
+    // Return all / filtered vessels and their tracks
+  async getAll(params?: QueryParameters, position?: Position): Promise<VesselCollection> {
+    const res: VesselCollection= {}
+    let keys= Object.keys(this.tracks)
+    for( let k of keys) {
+      await this.get(k).then( (t:LatLngTuple[])=> {
+        // filter results based on supplied params
+        if(this.applyFilters(t, params, position)) { res[k]= t }
+      })
+      .catch ( (err)=> { console.log(err) })
+    }
+    return Promise.resolve(res)
+  }
+
+  // returns true if last track point passes filter tests
+  applyFilters(t:LatLngTuple[], params?: QueryParameters, vesselPosition?: Position): boolean {
+    let result: boolean= true
+    if(params && Object.keys(params).length!=0) {
+      let lastPoint: any= (t.length!=0) ? t[t.length-1] : null
+      // within supplied bounded area
+      if(params.geobounds) { 
+        if(lastPoint && inBounds(lastPoint, params.geobounds)) {
+          result= result && true
+        }
+        else { result= false }
+      }
+      // within supplied radius of vessel position
+      if((this.config.maxRadius || params.radius) && vesselPosition) { 
+        let radius= (params.radius) ? params.radius : this.config.maxRadius
+        if(lastPoint && distanceTo(latLonTupleToPosition(lastPoint), vesselPosition)<= radius) {
+          result= result && true
+        }
+        else { result= false }
+      }
+    }
+    return result
   }
 
   prune(maxAge: number): void {
