@@ -5,17 +5,19 @@ import { LatLngTuple, GeoBounds, Position, QueryParameters } from './types'
 // ** check position is in bounds
 export function inBounds(position: LatLngTuple, bounds: GeoBounds): boolean {
   if (position && typeof position[0] == 'number' && typeof position[1] == 'number') {
+    let dlBounds= JSON.parse(JSON.stringify(bounds))
+    let dlPosition= [position[0],position[1]]
     // date line crossing?
-    if (bounds.sw[0] > 0 && bounds.ne[0] < 0) {
-      bounds.ne[0] = 360 + bounds.ne[0]
-      if (position[0] < 0) {
-        position[0] = 360 + position[0]
+    if (dlBounds.sw[0] > 0 && dlBounds.ne[0] < 0) {
+      dlBounds.ne[0] = 360 + dlBounds.ne[0]
+      if (dlPosition[0] < 0) {
+        dlPosition[0] = 360 + dlPosition[0]
       }
     }
-    return position[1] >= bounds.sw[1] &&
-      position[1] <= bounds.ne[1] &&
-      position[0] >= bounds.sw[0] &&
-      position[0] <= bounds.ne[0]
+    return dlPosition[1] >= dlBounds.sw[1] &&
+      dlPosition[1] <= dlBounds.ne[1] &&
+      dlPosition[0] >= dlBounds.sw[0] &&
+      dlPosition[0] <= dlBounds.ne[0]
       ? true
       : false
   } else {
@@ -48,6 +50,7 @@ export function validateParameters(params: QueryParameters) {
 
 //** Calculate the distance between two points in meters
 export function distanceTo(srcpt: Position, destpt: Position) {
+  console.log('**srcpt**', srcpt, '**destpt**', destpt)
   const Rk = 6371 // mean radius of the earth (km) at 39 degrees from the equator
 
   // convert coordinates to radians
@@ -73,7 +76,7 @@ const degreesToRadians = (value: number) => {
 
 export function latLonTupleToPosition(value: LatLngTuple): Position {
   return {
-    longitude: value[1],
-    latitude: value[0],
+    longitude: value[0],
+    latitude: value[1],
   }
 }
