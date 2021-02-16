@@ -91,9 +91,9 @@ export class Tracks {
         }
       }
       // within supplied radius of vessel position
-      if ((this.config.maxRadius || params.radius) && vesselPosition) {
+      if (vesselPosition) {
         let radius = params.radius ? params.radius : this.config.maxRadius
-        if (lastPoint && distanceTo(latLonTupleToPosition(lastPoint), vesselPosition) <= radius) {
+        if (radius && lastPoint && distanceTo(latLonTupleToPosition(lastPoint), vesselPosition) <= radius) {
           result = result && true
         } else {
           result = false
