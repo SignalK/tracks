@@ -50,7 +50,6 @@ export function validateParameters(params: QueryParameters) {
 
 //** Calculate the distance between two points in meters
 export function distanceTo(srcpt: Position, destpt: Position) {
-  console.log('**srcpt**', srcpt, '**destpt**', destpt)
   const Rk = 6371 // mean radius of the earth (km) at 39 degrees from the equator
 
   // convert coordinates to radians
