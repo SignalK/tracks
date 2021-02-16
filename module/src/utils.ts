@@ -18,9 +18,9 @@ export function inBounds(position: LatLngTuple, bounds: GeoBounds): boolean {
 
 // validate query parameters
 export function validateParameters(params: QueryParameters) {
-  // geobounds lon1,lat1,lon2,lat2
-  if (typeof params.geobounds !== 'undefined') {
-    let b: number[] = params.geobounds
+  // bounding box lon1,lat1,lon2,lat2
+  if (typeof params.bbox !== 'undefined') {
+    let b: number[] = params.bbox
       .split(',')
       .map((i: string | number) => {
         if (!isNaN(i as number)) {
@@ -30,7 +30,7 @@ export function validateParameters(params: QueryParameters) {
       .filter((i: number) => {
         if (typeof i === 'number') return i
       })
-    params.geobounds = b.length == 4 ? { sw: [b[0], b[1]], ne: [b[2], b[3]] } : null
+    params.bbox = b.length == 4 ? { sw: [b[0], b[1]], ne: [b[2], b[3]] } : null
   }
   // radius in meters
   if (typeof params.radius !== 'undefined') {

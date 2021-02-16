@@ -82,9 +82,9 @@ export class Tracks {
     let result: boolean = true
     if (params && Object.keys(params).length != 0) {
       let lastPoint: any = t.length != 0 ? t[t.length - 1] : null
-      // within supplied bounded area
-      if (params.geobounds) {
-        if (lastPoint && inBounds(lastPoint, params.geobounds)) {
+      // within supplied bounded box
+      if (params.bbox) {
+        if (lastPoint && inBounds(lastPoint, params.bbox)) {
           result = result && true
         } else {
           result = false

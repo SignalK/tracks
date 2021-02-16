@@ -34,7 +34,7 @@ _Note: This value overrides the `maxRadius` value specified in plugin configurat
 
 __Retrieve tracks for all vessels within a bounded area:__
 
-`/signalk/v1/api/tracks?geobounds=130,-35,139,-33`
+`/signalk/v1/api/tracks?bbox=130,-35,139,-33`
 
 _Bounded area is defined as `lon1, lat1, lon2, lat2`_
 
