@@ -5,6 +5,13 @@ import { LatLngTuple, GeoBounds, Position, QueryParameters } from './types'
 // ** check position is in bounds
 export function inBounds(position: LatLngTuple, bounds: GeoBounds): boolean {
   if (position && typeof position[0] == 'number' && typeof position[1] == 'number') {
+    // date line crossing?
+    if (bounds.sw[0] > 0 && bounds.ne[0] < 0) {
+      bounds.ne[0] = 360 + bounds.ne[0]
+      if (position[0] < 0) {
+        position[0] = 360 + position[0]
+      }
+    }
     return position[1] >= bounds.sw[1] &&
       position[1] <= bounds.ne[1] &&
       position[0] >= bounds.sw[0] &&
