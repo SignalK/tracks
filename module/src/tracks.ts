@@ -1,6 +1,7 @@
 import { BehaviorSubject, combineLatest, ConnectableObservable, Observable, ReplaySubject, Subject } from 'rxjs'
 import { map, publishReplay, scan, take, throttleTime } from 'rxjs/operators'
-import { Context, LatLngTuple } from './types'
+import { Context, LatLngTuple, Position, QueryParameters, VesselCollection } from './types'
+import { distanceTo, inBounds, latLonTupleToPosition, bboxDateLineAlign } from './utils'
 
 interface tracksMap {
   [context: string]: TrackAccumulator
@@ -11,6 +12,7 @@ export interface TracksConfig {
   pointsToKeep: number
   maxAge: number
   fetchInitialTrack?: boolean
+  maxRadius: number
 }
 
 export class Tracks {
@@ -33,6 +35,9 @@ export class Tracks {
   }
 
   getAccumulator(context: Context, createIfMissing = true): TrackAccumulator | undefined {
+    if (context.indexOf('vessels.') === -1 && context.indexOf('aircraft.') === -1) {
+      return undefined
+    }
     let result = this.tracks[context]
     if (!result && createIfMissing) {
       const accParams: AccumulatorParams = { ...this.config }
@@ -51,6 +56,55 @@ export class Tracks {
     } else {
       return Promise.reject()
     }
+  }
+
+  // Return all / filtered vessels and their tracks
+  async getAll(params?: QueryParameters, position?: Position): Promise<VesselCollection> {
+    const res: VesselCollection = {}
+    const keys = Object.keys(this.tracks)
+    if (params && params.bbox) {
+      // align bbox values for inBounds test
+      params.bbox = bboxDateLineAlign(params.bbox)
+    }
+    for (const k of keys) {
+      await this.get(k)
+        .then((t: LatLngTuple[]) => {
+          // filter results based on supplied params
+          if (this.applyFilters(t, params, position)) {
+            res[k] = t
+          }
+        })
+        .catch((err) => {
+          console.log(err)
+        })
+    }
+    return Promise.resolve(res)
+  }
+
+  // returns true if last track point passes filter tests
+  applyFilters(t: LatLngTuple[], params?: QueryParameters, vesselPosition?: Position): boolean {
+    let result = true
+    if (params && Object.keys(params).length != 0) {
+      const lastPoint: any = t.length != 0 ? t[t.length - 1] : null
+      // within supplied bounded box
+      if (params.bbox) {
+        if (lastPoint && inBounds(lastPoint, params.bbox)) {
+          result = result && true
+        } else {
+          result = false
+        }
+      }
+      // within supplied radius of vessel position
+      if (vesselPosition) {
+        const radius = params.radius ? params.radius : this.config.maxRadius
+        if (radius && lastPoint && distanceTo(latLonTupleToPosition(lastPoint), vesselPosition) <= radius) {
+          result = result && true
+        } else {
+          result = false
+        }
+      }
+    }
+    return result
   }
 
   prune(maxAge: number): void {
