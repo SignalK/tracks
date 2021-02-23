@@ -23,9 +23,11 @@ export interface ContextPosition {
   value: Position
 }
 
-interface VesselTrack {
-  type: string
-  coordinates: Array<Array<LatLngTuple>>
+interface AllTracksResult {
+  [context: string]: {
+    type: 'MultiLineString'
+    coordinates: LatLngTuple[][]
+  }
 }
 
 interface App {
@@ -115,14 +117,14 @@ export default function ThePlugin(app: App): Plugin {
         app.debug('** params **', params)
         tracks
           ?.getAll(params, getVesselPosition())
-          .then((d: TrackCollection) => {
-            const trks: { [key: string]: VesselTrack } = {}
-            Object.entries(d).forEach((i: [Context, LatLngTuple[]]) => {
-              trks[i[0]] = {
+          .then((tc: TrackCollection) => {
+            const trks = Object.entries(tc).reduce<AllTracksResult>((acc, [context, track]) => {
+              acc[context] = {
                 type: 'MultiLineString',
-                coordinates: [i[1]],
+                coordinates: [track],
               }
-            })
+              return acc
+            }, {})
             res.json(trks)
           })
           .catch(() => {
