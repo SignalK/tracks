@@ -1,6 +1,6 @@
 import { BehaviorSubject, combineLatest, ConnectableObservable, Observable, ReplaySubject, Subject } from 'rxjs'
 import { map, publishReplay, scan, take, throttleTime } from 'rxjs/operators'
-import { Context, LatLngTuple, Position, QueryParameters, VesselCollection } from './types'
+import { Context, LatLngTuple, Position, QueryParameters, TrackCollection } from './types'
 import { distanceTo, inBounds, latLonTupleToPosition, bboxDateLineAlign } from './utils'
 
 interface tracksMap {
@@ -59,8 +59,8 @@ export class Tracks {
   }
 
   // Return all / filtered vessels and their tracks
-  async getAll(params?: QueryParameters, position?: Position): Promise<VesselCollection> {
-    const res: VesselCollection = {}
+  async getAll(params?: QueryParameters, position?: Position): Promise<TrackCollection> {
+    const res: TrackCollection = {}
     const keys = Object.keys(this.tracks)
     if (params && params.bbox) {
       // align bbox values for inBounds test

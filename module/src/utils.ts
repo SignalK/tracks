@@ -1,6 +1,6 @@
 // ** utility functions **
 
-import { LatLngTuple, GeoBounds, Position, QueryParameters } from './types'
+import { LatLngTuple, GeoBounds, Position, QueryParameters, TrackParams } from './types'
 
 // ** Align bounding box valjues to reflect spanning the date line
 export function bboxDateLineAlign(bounds: GeoBounds) {
@@ -32,8 +32,9 @@ export function inBounds(position: LatLngTuple, bounds: GeoBounds): boolean {
 }
 
 // validate query parameters
-export function validateParameters(params: QueryParameters) {
+export function validateParameters(params: QueryParameters): TrackParams {
   // bounding box lon1,lat1,lon2,lat2
+  let bbox: GeoBounds | null = null
   if (typeof params.bbox !== 'undefined') {
     const b: number[] = params.bbox
       .split(',')
@@ -45,13 +46,15 @@ export function validateParameters(params: QueryParameters) {
       .filter((i: number) => {
         if (typeof i === 'number') return i
       })
-    params.bbox = b.length == 4 ? { sw: [b[0], b[1]], ne: [b[2], b[3]] } : null
+    bbox = b.length == 4 ? { sw: [b[0], b[1]], ne: [b[2], b[3]] } : null
   }
+
+  let radius: number | null = null
   // radius in meters
   if (typeof params.radius !== 'undefined') {
-    params.radius = !isNaN(params.radius) ? parseFloat(params.radius) : null
+    radius = !isNaN(params.radius) ? parseFloat(params.radius) : null
   }
-  return params
+  return { bbox, radius }
 }
 
 //** Calculate the distance between two points in meters

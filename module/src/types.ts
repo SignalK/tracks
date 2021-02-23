@@ -7,7 +7,7 @@ export interface Position {
   longitude: number
 }
 
-export interface VesselCollection {
+export interface TrackCollection {
   [key: string]: LatLngTuple[]
 }
 
@@ -18,4 +18,9 @@ export interface GeoBounds {
 
 export interface QueryParameters {
   [key: string]: any
+}
+
+export interface TrackParams {
+  bbox: GeoBounds | null
+  radius: number | null
 }

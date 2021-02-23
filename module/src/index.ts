@@ -15,7 +15,7 @@
 
 import { Request, RequestHandler, Response, Router } from 'express'
 import { Tracks as Tracks_, TrackAccumulator as TrackAccumulator_, TracksConfig } from './tracks'
-import { Context, LatLngTuple, Position, VesselCollection, QueryParameters } from './types'
+import { Context, LatLngTuple, Position, TrackCollection, QueryParameters } from './types'
 import { validateParameters } from './utils'
 
 export interface ContextPosition {
@@ -115,7 +115,7 @@ export default function ThePlugin(app: App): Plugin {
         app.debug('** params **', params)
         tracks
           ?.getAll(params, getVesselPosition())
-          .then((d: VesselCollection) => {
+          .then((d: TrackCollection) => {
             const trks: { [key: string]: VesselTrack } = {}
             Object.entries(d).forEach((i: [Context, LatLngTuple[]]) => {
               trks[i[0]] = {
