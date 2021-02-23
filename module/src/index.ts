@@ -61,7 +61,7 @@ export default function ThePlugin(app: App): Plugin {
   let tracks: Tracks_ | undefined = undefined
 
   function getVesselPosition(): Position {
-    let p: any = app.getSelfPath('navigation.position')
+    const p: any = app.getSelfPath('navigation.position')
     return p && p.value ? p.value : null
   }
 
@@ -111,12 +111,12 @@ export default function ThePlugin(app: App): Plugin {
 
       // return all / filtered vessel tracks
       const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
-        let params: QueryParameters = validateParameters(req.query)
+        const params: QueryParameters = validateParameters(req.query)
         app.debug('** params **', params)
         tracks
           ?.getAll(params, getVesselPosition())
           .then((d: VesselCollection) => {
-            let trks: { [key: string]: VesselTrack } = {}
+            const trks: { [key: string]: VesselTrack } = {}
             Object.entries(d).forEach((i: [Context, LatLngTuple[]]) => {
               trks[i[0]] = {
                 type: 'MultiLineString',
