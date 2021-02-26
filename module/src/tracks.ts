@@ -1,10 +1,15 @@
 import { BehaviorSubject, combineLatest, ConnectableObservable, Observable, ReplaySubject, Subject } from 'rxjs'
 import { map, publishReplay, scan, take, throttleTime } from 'rxjs/operators'
-import { Context, LatLngTuple, Position, QueryParameters, TrackCollection } from './types'
-import { distanceTo, inBounds, latLonTupleToPosition, bboxDateLineAlign } from './utils'
+import { Context, Debug, LatLngTuple, Position, QueryParameters, TrackCollection, TrackParams } from './types'
+import { createMatcher } from './utils'
 
 interface tracksMap {
   [context: string]: TrackAccumulator
+}
+
+interface VesselTrack {
+  context: string
+  track: LatLngTuple[]
 }
 
 export interface TracksConfig {
@@ -17,11 +22,9 @@ export interface TracksConfig {
 
 export class Tracks {
   tracks: tracksMap = {}
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  debug: any
+  debug: Debug
   config: TracksConfig
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(config: TracksConfig, debug: any) {
+  constructor(config: TracksConfig, debug: Debug) {
     this.config = config
     this.debug = debug
   }
@@ -58,53 +61,33 @@ export class Tracks {
     }
   }
 
-  // Return all / filtered vessels and their tracks
-  async getAll(params?: QueryParameters, position?: Position): Promise<TrackCollection> {
-    const res: TrackCollection = {}
-    const keys = Object.keys(this.tracks)
-    if (params && params.bbox) {
-      // align bbox values for inBounds test
-      params.bbox = bboxDateLineAlign(params.bbox)
-    }
-    for (const k of keys) {
-      await this.get(k)
-        .then((t: LatLngTuple[]) => {
-          // filter results based on supplied params
-          if (this.applyFilters(t, params, position)) {
-            res[k] = t
-          }
-        })
-        .catch((err) => {
-          console.log(err)
-        })
-    }
-    return Promise.resolve(res)
+  getAllTracks(): Promise<VesselTrack[]> {
+    return Promise.all(
+      Object.keys(this.tracks).map((context) =>
+        this.get(context).then((track) => ({
+          context,
+          track,
+        })),
+      ),
+    )
   }
 
-  // returns true if last track point passes filter tests
-  applyFilters(t: LatLngTuple[], params?: QueryParameters, vesselPosition?: Position): boolean {
-    let result = true
-    if (params && Object.keys(params).length != 0) {
-      const lastPoint: any = t.length != 0 ? t[t.length - 1] : null
-      // within supplied bounded box
-      if (params.bbox) {
-        if (lastPoint && inBounds(lastPoint, params.bbox)) {
-          result = result && true
-        } else {
-          result = false
+  // Return all / filtered vessels and their tracks
+  async getFilteredTracks(params: TrackParams, selfPosition?: LatLngTuple, debug?: Debug): Promise<TrackCollection> {
+    this.debug(params)
+    this.debug('Self position', selfPosition)
+    const matcher = createMatcher(params, selfPosition, debug)
+
+    return this.getAllTracks().then((contextTracks) => {
+      return contextTracks.reduce<TrackCollection>((acc, { context, track }) => {
+        const c = context as string
+        const t = track as LatLngTuple[]
+        if (matcher(t)) {
+          acc[c] = t
         }
-      }
-      // within supplied radius of vessel position
-      if (vesselPosition) {
-        const radius = params.radius ? params.radius : this.config.maxRadius
-        if (radius && lastPoint && distanceTo(latLonTupleToPosition(lastPoint), vesselPosition) <= radius) {
-          result = result && true
-        } else {
-          result = false
-        }
-      }
-    }
-    return result
+        return acc
+      }, {})
+    })
   }
 
   prune(maxAge: number): void {

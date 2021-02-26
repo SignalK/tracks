@@ -15,7 +15,7 @@
 
 import { Request, RequestHandler, Response, Router } from 'express'
 import { Tracks as Tracks_, TrackAccumulator as TrackAccumulator_, TracksConfig } from './tracks'
-import { Context, LatLngTuple, Position, TrackCollection, QueryParameters } from './types'
+import { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types'
 import { validateParameters } from './utils'
 
 export interface ContextPosition {
@@ -26,13 +26,12 @@ export interface ContextPosition {
 interface AllTracksResult {
   [context: string]: {
     type: 'MultiLineString'
-    coordinates: LatLngTuple[][]
+    coordinates: LngLatTuple[][]
   }
 }
 
 interface App {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  debug: (...args: any) => void
+  debug: Debug
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   error: (...args: any) => void
   streambundle: {
@@ -58,13 +57,16 @@ interface Plugin {
   schema: any
 }
 
+const toLngLat = ([lat, lng]: number[]): LngLatTuple => [lng, lat]
+
 export default function ThePlugin(app: App): Plugin {
   let onStop: (() => void)[] = []
   let tracks: Tracks_ | undefined = undefined
 
-  function getVesselPosition(): Position {
+  function getVesselPosition(): LatLngTuple | undefined {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const p: any = app.getSelfPath('navigation.position')
-    return p && p.value ? p.value : null
+    return p && p.value ? [p.value.latitude, p.value.longitude] : undefined
   }
 
   return {
@@ -74,7 +76,7 @@ export default function ThePlugin(app: App): Plugin {
         app.streambundle
           .getBus('navigation.position')
           .onValue((update: ContextPosition): void =>
-            tracks?.newPosition(update.context, [update.value.longitude, update.value.latitude]),
+            tracks?.newPosition(update.context, [update.value.latitude, update.value.longitude]),
           ),
       )
       const pruneInterval = setInterval(tracks.prune.bind(tracks, 5 * 60 * 1000), 60 * 1000)
@@ -101,7 +103,7 @@ export default function ThePlugin(app: App): Plugin {
           .then((coordinates: LatLngTuple[]) => {
             res.json({
               type: 'MultiLineString',
-              coordinates: [coordinates],
+              coordinates: [coordinates.map(toLngLat)],
             })
           })
           .catch(() => {
@@ -113,15 +115,14 @@ export default function ThePlugin(app: App): Plugin {
 
       // return all / filtered vessel tracks
       const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
-        const params: QueryParameters = validateParameters(req.query)
-        app.debug('** params **', params)
+        app.debug(req.query)
         tracks
-          ?.getAll(params, getVesselPosition())
+          ?.getFilteredTracks(validateParameters(req.query), getVesselPosition(), app.debug)
           .then((tc: TrackCollection) => {
             const trks = Object.entries(tc).reduce<AllTracksResult>((acc, [context, track]) => {
               acc[context] = {
                 type: 'MultiLineString',
-                coordinates: [track],
+                coordinates: [track.map(toLngLat)],
               }
               return acc
             }, {})

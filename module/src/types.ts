@@ -1,6 +1,7 @@
 export type Context = string
 
 export type LatLngTuple = [number, number]
+export type LngLatTuple = [number, number]
 
 export interface Position {
   latitude: number
@@ -17,10 +18,17 @@ export interface GeoBounds {
 }
 
 export interface QueryParameters {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   [key: string]: any
 }
 
 export interface TrackParams {
   bbox: GeoBounds | null
   radius: number | null
+}
+
+export interface Debug {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (...args: any): any
+  enabled: boolean
 }
