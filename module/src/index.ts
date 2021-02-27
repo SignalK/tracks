@@ -62,6 +62,7 @@ const toLngLat = ([lat, lng]: number[]): LngLatTuple => [lng, lat]
 export default function ThePlugin(app: App): Plugin {
   let onStop: (() => void)[] = []
   let tracks: Tracks_ | undefined = undefined
+  let defaultMaxRadius: number | undefined = undefined
 
   function getVesselPosition(): LatLngTuple | undefined {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -71,6 +72,7 @@ export default function ThePlugin(app: App): Plugin {
 
   return {
     start: function (configuration: TracksConfig) {
+      defaultMaxRadius = configuration.maxRadius ? Number(configuration.maxRadius) : undefined
       tracks = new Tracks_(configuration, app.debug)
       onStop.push(
         app.streambundle
@@ -117,7 +119,7 @@ export default function ThePlugin(app: App): Plugin {
       const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
         app.debug(req.query)
         tracks
-          ?.getFilteredTracks(validateParameters(req.query), getVesselPosition(), app.debug)
+          ?.getFilteredTracks(validateParameters(req.query, defaultMaxRadius), getVesselPosition(), app.debug)
           .then((tc: TrackCollection) => {
             const trks = Object.entries(tc).reduce<AllTracksResult>((acc, [context, track]) => {
               acc[context] = {
