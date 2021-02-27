@@ -1,9 +1,15 @@
 import { BehaviorSubject, combineLatest, ConnectableObservable, Observable, ReplaySubject, Subject } from 'rxjs'
 import { map, publishReplay, scan, take, throttleTime } from 'rxjs/operators'
-import { Context, LatLngTuple } from './types'
+import { Context, Debug, LatLngTuple, Position, QueryParameters, TrackCollection, TrackParams } from './types'
+import { createMatcher } from './utils'
 
 interface tracksMap {
   [context: string]: TrackAccumulator
+}
+
+interface VesselTrack {
+  context: string
+  track: LatLngTuple[]
 }
 
 export interface TracksConfig {
@@ -11,15 +17,14 @@ export interface TracksConfig {
   pointsToKeep: number
   maxAge: number
   fetchInitialTrack?: boolean
+  maxRadius: number
 }
 
 export class Tracks {
   tracks: tracksMap = {}
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  debug: any
+  debug: Debug
   config: TracksConfig
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(config: TracksConfig, debug: any) {
+  constructor(config: TracksConfig, debug: Debug) {
     this.config = config
     this.debug = debug
   }
@@ -33,6 +38,9 @@ export class Tracks {
   }
 
   getAccumulator(context: Context, createIfMissing = true): TrackAccumulator | undefined {
+    if (context.indexOf('vessels.') === -1 && context.indexOf('aircraft.') === -1) {
+      return undefined
+    }
     let result = this.tracks[context]
     if (!result && createIfMissing) {
       const accParams: AccumulatorParams = { ...this.config }
@@ -51,6 +59,35 @@ export class Tracks {
     } else {
       return Promise.reject()
     }
+  }
+
+  getAllTracks(): Promise<VesselTrack[]> {
+    return Promise.all(
+      Object.keys(this.tracks).map((context) =>
+        this.get(context).then((track) => ({
+          context,
+          track,
+        })),
+      ),
+    )
+  }
+
+  // Return all / filtered vessels and their tracks
+  async getFilteredTracks(params: TrackParams, selfPosition?: LatLngTuple, debug?: Debug): Promise<TrackCollection> {
+    this.debug(params)
+    this.debug('Self position', selfPosition)
+    const matcher = createMatcher(params, selfPosition, debug)
+
+    return this.getAllTracks().then((contextTracks) => {
+      return contextTracks.reduce<TrackCollection>((acc, { context, track }) => {
+        const c = context as string
+        const t = track as LatLngTuple[]
+        if (matcher(t)) {
+          acc[c] = t
+        }
+        return acc
+      }, {})
+    })
   }
 
   prune(maxAge: number): void {

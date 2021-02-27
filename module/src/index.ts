@@ -15,19 +15,23 @@
 
 import { Request, RequestHandler, Response, Router } from 'express'
 import { Tracks as Tracks_, TrackAccumulator as TrackAccumulator_, TracksConfig } from './tracks'
-import { Context, LatLngTuple } from './types'
+import { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types'
+import { validateParameters } from './utils'
 
 export interface ContextPosition {
   context: Context
-  value: {
-    latitude: number
-    longitude: number
+  value: Position
+}
+
+interface AllTracksResult {
+  [context: string]: {
+    type: 'MultiLineString'
+    coordinates: LngLatTuple[][]
   }
 }
 
 interface App {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  debug: (...args: any) => void
+  debug: Debug
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   error: (...args: any) => void
   streambundle: {
@@ -38,6 +42,7 @@ interface App {
       onValue: (cb: (x: any) => void) => () => void
     }
   }
+  getSelfPath: (path: string) => void
 }
 
 interface Plugin {
@@ -52,9 +57,17 @@ interface Plugin {
   schema: any
 }
 
+const toLngLat = ([lat, lng]: number[]): LngLatTuple => [lng, lat]
+
 export default function ThePlugin(app: App): Plugin {
   let onStop: (() => void)[] = []
   let tracks: Tracks_ | undefined = undefined
+
+  function getVesselPosition(): LatLngTuple | undefined {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const p: any = app.getSelfPath('navigation.position')
+    return p && p.value ? [p.value.latitude, p.value.longitude] : undefined
+  }
 
   return {
     start: function (configuration: TracksConfig) {
@@ -90,7 +103,7 @@ export default function ThePlugin(app: App): Plugin {
           .then((coordinates: LatLngTuple[]) => {
             res.json({
               type: 'MultiLineString',
-              coordinates: [coordinates],
+              coordinates: [coordinates.map(toLngLat)],
             })
           })
           .catch(() => {
@@ -99,6 +112,30 @@ export default function ThePlugin(app: App): Plugin {
           })
       }
       router.get('/vessels/:vesselId/track', trackHandler.bind(this))
+
+      // return all / filtered vessel tracks
+      const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
+        app.debug(req.query)
+        tracks
+          ?.getFilteredTracks(validateParameters(req.query), getVesselPosition(), app.debug)
+          .then((tc: TrackCollection) => {
+            const trks = Object.entries(tc).reduce<AllTracksResult>((acc, [context, track]) => {
+              acc[context] = {
+                type: 'MultiLineString',
+                coordinates: [track.map(toLngLat)],
+              }
+              return acc
+            }, {})
+            res.json(trks)
+          })
+          .catch(() => {
+            res.status(404)
+            res.json({ message: `No track available for vessels.` })
+          })
+      }
+      router.get('/tracks', allTracksHandler.bind(this))
+      router.get('/tracks/*', allTracksHandler.bind(this))
+
       return router
     },
 
@@ -124,6 +161,12 @@ export default function ThePlugin(app: App): Plugin {
           title: 'Maximum idle time (seconds)',
           description: 'Tracks with no updates longer than this are removed',
           default: 600,
+        },
+        maxRadius: {
+          type: 'number',
+          title: 'Maximum Radius (meters) ',
+          description: 'Include only vessels with position within this range. 0= all vessels',
+          default: 50000,
         },
       },
     },
