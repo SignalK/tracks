@@ -1,6 +1,6 @@
 {
   "name": "@signalk/tracks-plugin",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Plugin to keep track of tracks of vessels",
   "main": "index.js",
   "keywords": [
@@ -11,7 +11,7 @@
   "scripts": {},
   "license": "Apache-2.0",
   "dependencies": {
-    "@signalk/tracks": "^1.0.1"
+    "@signalk/tracks": "^2.0.0"
   },
   "devDependencies": {
     "@types/debug": "^4.1.5",
