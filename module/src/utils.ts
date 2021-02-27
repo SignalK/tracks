@@ -23,7 +23,7 @@ export function createInBounds(bounds: GeoBounds): (position: LatLngTuple | null
   }
 }
 
-export function validateParameters(params: QueryParameters): TrackParams {
+export function validateParameters(params: QueryParameters, defaultMaxRadius: number | undefined): TrackParams {
   // bounding box lon1,lat1,lon2,lat2
   let bbox: GeoBounds | null = null
   if (typeof params.bbox !== 'undefined') {
@@ -44,6 +44,8 @@ export function validateParameters(params: QueryParameters): TrackParams {
   // radius in meters
   if (typeof params.radius !== 'undefined') {
     radius = !isNaN(params.radius) ? parseFloat(params.radius) : null
+  } else if (defaultMaxRadius) {
+    radius = defaultMaxRadius
   }
   return { bbox, radius }
 }
