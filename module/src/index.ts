@@ -57,7 +57,22 @@ interface Plugin {
   schema: any
 }
 
+interface TracksPluginConfig {
+  resolution?: number
+  pointsToKeep?: number
+  maxAge?: number
+  maxRadius?: number
+}
+
 const toLngLat = ([lat, lng]: number[]): LngLatTuple => [lng, lat]
+
+const DEFAULT_RESOLUTION = 60000
+const DEFAULT_POINTS_TO_KEEP = 60 * 2 // 2 hours with default resolution
+const DEFAULT_MAX_AGE = 60 * 10 // ten minutes
+const DEFAULT_MAX_RADIUS = 50 * 1000 //50 kilometers
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const isNumeric = (x: any) => x - parseInt(x) + 1 >= 0
 
 export default function ThePlugin(app: App): Plugin {
   let onStop: (() => void)[] = []
@@ -71,9 +86,19 @@ export default function ThePlugin(app: App): Plugin {
   }
 
   return {
-    start: function (configuration: TracksConfig) {
-      defaultMaxRadius = configuration.maxRadius ? Number(configuration.maxRadius) : undefined
-      tracks = new Tracks_(configuration, app.debug)
+    start: function (config: TracksPluginConfig) {
+      const { resolution, pointsToKeep, maxAge, maxRadius } = config
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      defaultMaxRadius = maxRadius ? parseFloat(maxRadius as any) : undefined
+      tracks = new Tracks_(
+        {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          resolution: isNumeric(resolution) ? parseFloat(resolution as any) : DEFAULT_RESOLUTION,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          pointsToKeep: isNumeric(pointsToKeep) ? parseFloat(pointsToKeep as any) : DEFAULT_POINTS_TO_KEEP,
+        },
+        app.debug,
+      )
       onStop.push(
         app.streambundle
           .getBus('navigation.position')
@@ -81,7 +106,10 @@ export default function ThePlugin(app: App): Plugin {
             tracks?.newPosition(update.context, [update.value.latitude, update.value.longitude]),
           ),
       )
-      const pruneInterval = setInterval(tracks.prune.bind(tracks, 5 * 60 * 1000), 60 * 1000)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const theMaxAge = isNumeric(maxAge) ? parseFloat(maxAge as any) : DEFAULT_MAX_AGE
+
+      const pruneInterval = setInterval(tracks.prune.bind(tracks, theMaxAge * 1000), (theMaxAge * 1000) / 2)
       onStop.push(() => {
         clearInterval(pruneInterval)
       })
@@ -148,27 +176,27 @@ export default function ThePlugin(app: App): Plugin {
       type: 'object',
       properties: {
         resolution: {
-          type: 'number',
+          type: 'integer',
           title: 'Track resolution (milliseconds)',
-          default: 60000,
+          default: DEFAULT_RESOLUTION,
         },
         pointsToKeep: {
-          type: 'number',
+          type: 'integer',
           title: 'Points to keep',
           description: 'How many trackpoints to keep for each track',
-          default: 60,
+          default: DEFAULT_POINTS_TO_KEEP,
         },
         maxAge: {
-          type: 'number',
+          type: 'integer',
           title: 'Maximum idle time (seconds)',
           description: 'Tracks with no updates longer than this are removed',
-          default: 600,
+          default: DEFAULT_MAX_AGE,
         },
         maxRadius: {
-          type: 'number',
+          type: 'integer',
           title: 'Maximum Radius (meters) ',
           description: 'Include only vessels with position within this range. 0= all vessels',
-          default: 50000,
+          default: DEFAULT_MAX_RADIUS,
         },
       },
     },
