@@ -74,6 +74,11 @@ const DEFAULT_MAX_RADIUS = 50 * 1000 //50 kilometers
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const isNumeric = (x: any) => x - parseInt(x) + 1 >= 0
 
+const notAvailable = (res: Response) => {
+  res.status(404)
+  res.json({ message: `Tracks API not available because tracks plugin is not enabled` })
+}
+
 export default function ThePlugin(app: App): Plugin {
   let onStop: (() => void)[] = []
   let tracks: Tracks_ | undefined = undefined
@@ -128,6 +133,10 @@ export default function ThePlugin(app: App): Plugin {
 
     signalKApiRoutes: function (router: Router) {
       const trackHandler: RequestHandler = (req: Request, res: Response) => {
+        if (!tracks) {
+          notAvailable(res)
+          return
+        }
         tracks
           ?.get(`vessels.${req.params.vesselId}`)
           .then((coordinates: LatLngTuple[]) => {
@@ -146,6 +155,10 @@ export default function ThePlugin(app: App): Plugin {
       // return all / filtered vessel tracks
       const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
         app.debug(req.query)
+        if (!tracks) {
+          notAvailable(res)
+          return
+        }
         tracks
           ?.getFilteredTracks(validateParameters(req.query, defaultMaxRadius), getVesselPosition(), app.debug)
           .then((tc: TrackCollection) => {
