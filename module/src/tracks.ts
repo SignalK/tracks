@@ -15,9 +15,7 @@ interface VesselTrack {
 export interface TracksConfig {
   resolution: number
   pointsToKeep: number
-  maxAge: number
   fetchInitialTrack?: boolean
-  maxRadius: number
 }
 
 export class Tracks {
@@ -25,6 +23,7 @@ export class Tracks {
   debug: Debug
   config: TracksConfig
   constructor(config: TracksConfig, debug: Debug) {
+    debug(JSON.stringify(config))
     this.config = config
     this.debug = debug
   }
