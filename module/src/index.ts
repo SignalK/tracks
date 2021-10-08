@@ -17,6 +17,7 @@ import { Request, RequestHandler, Response, Router } from 'express'
 import { Tracks as Tracks_, TrackAccumulator as TrackAccumulator_, TracksConfig } from './tracks'
 import { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types'
 import { validateParameters } from './utils'
+import * as openApi from './openApi.json'
 
 export interface ContextPosition {
   context: Context
@@ -54,7 +55,8 @@ interface Plugin {
   name: string
   description: string
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  schema: any
+  schema: any,
+  openApiPaths: () => object
 }
 
 interface TracksPluginConfig {
@@ -181,6 +183,9 @@ export default function ThePlugin(app: App): Plugin {
 
       return router
     },
+
+    openApiPaths: () => openApi.paths,
+
 
     id: 'tracks',
     name: 'Tracks',
