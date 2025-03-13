@@ -1,10 +1,11 @@
-import { BehaviorSubject, combineLatest, ConnectableObservable, Observable, ReplaySubject, Subject } from 'rxjs'
+import { BehaviorSubject, combineLatest, ConnectableObservable, Observable, Subject } from 'rxjs'
 import { map, publishReplay, scan, take, throttleTime } from 'rxjs/operators'
-import { Context, Debug, LatLngTuple, Position, QueryParameters, TrackCollection, TrackParams } from './types'
+import { Debug, LatLngTuple, TrackCollection, TrackParams } from './types'
+import { Context } from '@signalk/server-api'
 import { createMatcher } from './utils'
 
 interface tracksMap {
-  [context: string]: TrackAccumulator
+  [context: Context]: TrackAccumulator
 }
 
 interface VesselTrack {
@@ -18,7 +19,13 @@ export interface TracksConfig {
   fetchInitialTrack?: boolean
 }
 
-export class Tracks {
+export interface TracksDB {
+  getFilteredTracks(params: TrackParams, selfPosition?: LatLngTuple, debug?: Debug): Promise<TrackCollection>
+  newPosition(context: Context, position: LatLngTuple): void
+  get(context: Context): Promise<LatLngTuple[]>
+}
+
+export class Tracks implements TracksDB {
   tracks: tracksMap = {}
   debug: Debug
   config: TracksConfig
@@ -63,7 +70,7 @@ export class Tracks {
   getAllTracks(): Promise<VesselTrack[]> {
     return Promise.all(
       Object.keys(this.tracks).map((context) =>
-        this.get(context).then((track) => ({
+        this.get(context as Context).then((track) => ({
           context,
           track,
         })),
@@ -82,10 +89,10 @@ export class Tracks {
         const c = context as string
         const t = track as LatLngTuple[]
         if (matcher(t)) {
-          acc[c] = t
+          acc[c as Context] = [t]
         }
         return acc
-      }, {})
+      }, {} as TrackCollection)
     })
   }
 
@@ -94,7 +101,7 @@ export class Tracks {
     const deleted: string[] = []
     Object.entries(this.tracks).forEach(([key, value]) => {
       if (value.latestLatLngTuple < cutoff) {
-        delete this.tracks[key]
+        delete this.tracks[key as Context]
         deleted.push(key)
       }
     })
@@ -133,7 +140,7 @@ export class TrackAccumulator {
     connectable.connect()
 
     if (fetchTrackFor) {
-      fetchTrack(fetchTrackFor).then((trackGEOJson) => {
+      fetchTrack(fetchTrackFor as Context).then((trackGEOJson) => {
         if (trackGEOJson && trackGEOJson.coordinates && trackGEOJson.coordinates[0]) {
           this.initialTrack.next(trackGEOJson.coordinates[0])
         }

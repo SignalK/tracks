@@ -1,4 +1,4 @@
-export type Context = string
+import { Context } from '@signalk/server-api'
 
 export type LatLngTuple = [number, number]
 export type LngLatTuple = [number, number]
@@ -9,7 +9,7 @@ export interface Position {
 }
 
 export interface TrackCollection {
-  [key: string]: LatLngTuple[]
+  [key: Context]: LatLngTuple[][]
 }
 
 export interface GeoBounds {
