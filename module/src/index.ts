@@ -255,5 +255,5 @@ export default function ThePlugin(app: App): Plugin {
   }
 }
 
-export class Tracks extends Tracks_ { }
-export class TrackAccumulator extends TrackAccumulator_ { }
+export class Tracks extends Tracks_ {}
+export class TrackAccumulator extends TrackAccumulator_ {}

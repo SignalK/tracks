@@ -72,7 +72,6 @@ const parseInfluxLine = (line: string) => {
     timestamp,
   }
 
-
   fields.forEach((field) => {
     const [key, value] = field.split('=')
     parsed.fields[key] = value

@@ -1,5 +1,6 @@
 import Database, { Database as BetterSqlite3Database, Statement } from 'better-sqlite3'
 import { s2, geojson } from 's2js'
+const toToken = s2.cellid.toToken
 import path from 'path'
 import { getSqDist, simplify } from './simplify'
 import { TracksDB } from './tracks'
@@ -19,9 +20,9 @@ export class SqliteTrackDb implements TracksDB {
   db: BetterSqlite3Database
   insertStmt: Statement
   selfContext: Context
-  constructor(selfId: string, dataDir: string) {
+  constructor(selfId: string, dataDir: string, dbName = 'tracks.db') {
     this.selfContext = `vessels.${selfId}` as Context
-    this.db = new Database(path.join(dataDir, 'tracks.db'))
+    this.db = new Database(path.join(dataDir, dbName))
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS positions (
           timestamp INTEGER,
@@ -33,12 +34,13 @@ export class SqliteTrackDb implements TracksDB {
     this.insertStmt = this.db.prepare('INSERT INTO positions (timestamp, lat, lon, s2cell) VALUES (?, ?, ?, ?)')
   }
   get(context: Context): Promise<LatLngTuple[]> {
-    console.log(context)
     if (context !== this.selfContext && context !== 'vessels.self' && context !== 'self') {
       return Promise.resolve([])
     }
     //fetch rows that are not older than 1 hour
-    const rows = this.db.prepare('select lat, lon from positions where timestamp > ?').all(Date.now() - 3600000) as {
+    const rows = this.db
+      .prepare('select lat, lon from positions where timestamp > ?')
+      .all(Date.now() - 60 * 60 * 1000) as {
       lat: number
       lon: number
     }[]
@@ -47,6 +49,8 @@ export class SqliteTrackDb implements TracksDB {
 
   newPosition(context: Context, position: LatLngTuple, timestamp: number = Date.now()): void {
     const cellId = Number(s2.Cell.fromLatLng(s2.LatLng.fromDegrees(position[0], position[1])).id)
+    // debug && debug(position)
+    // debug && debug(BigInt(cellId), ' * ', cellId.toString(2), ' ', toToken(BigInt(cellId)))
     this.insertStmt.run(timestamp, position[0], position[1], cellId)
   }
 
@@ -59,11 +63,6 @@ export class SqliteTrackDb implements TracksDB {
     const bbox = params.bbox ?? boundingBoxFromGeoLocation(selfPosition || [0, 0], params.radius || 1000)
     debug && debug(JSON.stringify(bbox))
 
-    if (!selfPosition) {
-      return Promise.reject()
-    }
-    const selfCell = Number(s2.Cell.fromLatLng(s2.LatLng.fromDegrees(selfPosition[0], selfPosition[1])).id)
-    console.log(selfCell, 'S', selfCell.toString(2))
     let positions: DbRow[] = []
     if (bbox !== null) {
       const query = getBBoxQuery(bbox, debug)
@@ -98,7 +97,7 @@ export class SqliteTrackDb implements TracksDB {
       segments.push(currentSegment)
     }
 
-    const threshold = bbox !== null ? getSqDist([bbox.sw[0], bbox.sw[1]], [bbox.ne[0], bbox.ne[1]]) / 1000 : 0.001
+    const threshold = bbox !== null ? getSqDist([bbox.sw[0], bbox.sw[1]], [bbox.ne[0], bbox.ne[1]]) / 100000 : 0.001
     const tracks = segments.reduce<LatLngTuple[][]>((acc, segment) => {
       acc.push(
         simplify(
@@ -131,20 +130,24 @@ const getBBoxQuery = ({ sw, ne }: GeoBounds, debug?: Debug): string => {
       ],
     ],
   } as Polygon
-  debug && debug(JSON.stringify(linestring))
+  // debug && debug(JSON.stringify(linestring))
   const covering = coverer.covering(linestring)
+  debug && debug(covering.map(toToken).join(','))
 
   // Convert covering to range queries
   const rangeQueries = covering.map((cellId) => {
     const start = lowerBoundForContainedCellIds(cellId)
     const end = upperBoundForContainedCellIds(cellId)
+    debug && debug(start, ' L ', start.toString(2), ' ', toToken(start))
+    debug && debug(cellId, ' I ', cellId.toString(2), ' ', toToken(cellId))
+    debug && debug(end, ' U ', end.toString(2))
     return `(s2cell >= ${start} AND s2cell <= ${end})`
   })
 
   const whereClause = rangeQueries.join('\n OR \n')
   const query = `SELECT * FROM positions WHERE ${whereClause} ORDER BY timestamp`
 
-  debug?.(`Query: ${query}`)
+  // debug?.(`Query: ${query}`)
   return query
 }
 
@@ -193,55 +196,43 @@ function boundingBoxFromGeoLocation(position: LatLngTuple, radius: number): GeoB
 }
 
 const upperBoundForContainedCellIds = (cellId: bigint) => {
-  let temp = cellId
-  let mask = 1n
-
-  // flip trailing zeroes
-  while ((temp & 1n) === 0n) {
-    cellId |= mask
-    mask <<= 1n
-    temp >>= 1n
+  if (typeof cellId !== 'bigint') {
+    throw new Error('Input must be a bigint.')
   }
 
-  // move mask one more time, over the trailing marker bit
-  // of the original cellId to the actual least significant
-  // bit of the cell id and flip also that
-  mask <<= 1n
-  cellId |= mask
-  return cellId
+  if (cellId === 0n) {
+    // If input is 0, the "least significant one bit" doesn't exist.
+    // We can define the result as having the first two bits set to 1.
+    return 2n
+  }
+
+  // Find the position of the least significant one bit
+  let lsOnePosition = 0
+  let temp = cellId
+  while ((temp & 1n) === 0n) {
+    temp >>= 1n
+    lsOnePosition++
+  }
+
+  // Set the bit to the left of the LSB one to one
+  const bitToLeftMask = 1n << BigInt(lsOnePosition + 1)
+  const resultWithLeftBitSet = cellId | bitToLeftMask
+
+  // Set all bits to the right of the LSB to one
+  const rightBitsMask = (1n << BigInt(lsOnePosition)) - 1n
+  const finalResult = resultWithLeftBitSet | rightBitsMask
+
+  return finalResult
 }
 
 const lowerBoundForContainedCellIds = (cellId: bigint) => {
   if (typeof cellId !== 'bigint') {
-    throw new TypeError('Input must be a bigint.')
+    throw new Error('Input must be a bigint.')
   }
 
   if (cellId === 0n) {
-    return 2n // If input is 0, set the 2nd bit to 1.
+    return 0n
   }
 
-  let temp = cellId
-  let leastSignificantOneIndex = -1
-  let index = 0
-
-  while (temp > 0n) {
-    if ((temp & 1n) === 1n) {
-      leastSignificantOneIndex = index
-      break
-    }
-    temp >>= 1n
-    index++
-  }
-
-  if (leastSignificantOneIndex === -1) {
-    return 2n // If no 1 bit found, same as input 0
-  }
-
-  // Flip the least significant 1 to 0
-  const flipped = cellId & ~(1n << BigInt(leastSignificantOneIndex))
-
-  // Set the next most significant bit to 1
-  const nextBitSet = flipped | (1n << BigInt(leastSignificantOneIndex + 1))
-
-  return nextBitSet
+  return cellId & (cellId - 1n)
 }
