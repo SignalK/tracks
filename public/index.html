@@ -1,141 +1,152 @@
 <!DOCTYPE html>
 <html>
-<head>
+  <head>
     <title>Track API Demo App</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"
+    />
     <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
     <style>
-        #map { height: 500px; width: 100%; }
+      #map {
+        height: 500px;
+        width: 100%;
+      }
     </style>
-</head>
-<body>
+  </head>
+  <body>
     <div id="map"></div>
 
     <form id="dataForm">
-        <label for="radius">Radius (meters):</label>
-        <input type="number" id="radius" name="radius" value="1000"><br><br>
-        <label for="coordinates">Position:</label>
-        <input type="text" id="coordinates" name="coordinates" readonly><br><br>
+      <label for="radius">Radius (meters):</label>
+      <input type="number" id="radius" name="radius" value="1000" /><br /><br />
+      <label for="coordinates">Position:</label>
+      <input
+        type="text"
+        id="coordinates"
+        name="coordinates"
+        readonly
+      /><br /><br />
     </form>
 
     <script>
-        // Get saved map view from localStorage or use default
-        const defaultView = { center: [60.0, 26.0], zoom: 8 };
-        const savedView = JSON.parse(localStorage.getItem('mapView')) || defaultView;
-        
-        var map = L.map('map').setView(savedView.center, savedView.zoom);
+      // Get saved map view from localStorage or use default
+      const defaultView = { center: [60.0, 26.0], zoom: 8 };
+      const savedView =
+        JSON.parse(localStorage.getItem("mapView")) || defaultView;
 
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        }).addTo(map);
+      var map = L.map("map").setView(savedView.center, savedView.zoom);
 
-        var circle;
-        var layerGroup = L.layerGroup().addTo(map);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      }).addTo(map);
 
-        document.getElementById('dataForm').addEventListener('input', function() {
-            var radius = document.getElementById('radius').value;
-            if (radius) {
-                updateCircle(map.getCenter());
-                fetchData();
-            }
-        });
+      var circle;
+      var layerGroup = L.layerGroup().addTo(map);
 
-        function updateCircle(latlng) {
-            if (circle) {
-                map.removeLayer(circle);
-            }
-            var radius = document.getElementById('radius').value;
-            if (radius) {
-                circle = L.circle(latlng, { radius: radius }).addTo(map);
-            }
-        }
-
-        map.on('moveend zoomend', function() {
-            const center = map.getCenter();
-            const zoom = map.getZoom();
-            localStorage.setItem('mapView', JSON.stringify({
-                center: [center.lat, center.lng],
-                zoom: zoom
-            }));
+      document
+        .getElementById("dataForm")
+        .addEventListener("input", function () {
+          var radius = document.getElementById("radius").value;
+          if (radius) {
             updateCircle(map.getCenter());
             fetchData();
+          }
         });
 
-        var layerGroup = L.layerGroup().addTo(map); // Layer group for API results
-
-        function fetchData() {
-            var radius = document.getElementById('radius').value;
-            var center = map.getCenter();
-
-            if (!radius) return;
-
-            const bounds = map.getBounds();
-            const southWest = bounds.getSouthWest();
-            const northEast = bounds.getNorthEast();
-            const bbox = `${southWest.lat},${southWest.lng},${northEast.lat},${northEast.lng}`;
-            // fetch(`/signalk/v1/api/tracks?radius=${radius}`)
-            fetch(`/signalk/v1/api/tracks?bbox=${bbox}`)
-                .then(response => response.json())
-                .then(_data => {
-                    layerGroup.clearLayers();
-                    const data = Object.values(_data)[0]
-                    if (data.type === 'MultiLineString') {
-                        L.geoJSON(data, {
-                            style: {
-                                color: 'blue',
-                                weight: 2
-                            }
-                        }).addTo(layerGroup);
-                    }
-                })
-                .catch(error => console.error('Error fetching API 1:', error));
-
-
+      function updateCircle(latlng) {
+        if (circle) {
+          map.removeLayer(circle);
         }
-
-
-
-        // Event listener for form changes
-        document.getElementById('dataForm').addEventListener('input', function() {
-            var radius = document.getElementById('radius').value;
-            if (radius) {
-                updateCircle(map.getCenter());
-                fetchData();
-            }
-        });
-
-        // Function to update the circle on the map
-        function updateCircle(latlng) {
-            if (circle) {
-                map.removeLayer(circle);
-            }
-            var radius = document.getElementById('radius').value;
-            if (radius) {
-                circle = L.circle(latlng, { radius: radius }).addTo(map);
-            }
-            // Remove the setView call to prevent re-centering
+        var radius = document.getElementById("radius").value;
+        if (radius) {
+          circle = L.circle(latlng, { radius: radius }).addTo(map);
         }
+      }
 
-        // Event listener for map moveend and zoomend
-        map.on('moveend zoomend', function() {
-            updateCircle(map.getCenter()); // Update circle to new center
+      map.on("moveend zoomend", function () {
+        const center = map.getCenter();
+        const zoom = map.getZoom();
+        localStorage.setItem(
+          "mapView",
+          JSON.stringify({
+            center: [center.lat, center.lng],
+            zoom: zoom,
+          })
+        );
+        updateCircle(map.getCenter());
+        fetchData();
+      });
+
+      var layerGroup = L.layerGroup().addTo(map); // Layer group for API results
+
+      function fetchData() {
+        console.trace()
+        var radius = document.getElementById("radius").value;
+        var center = map.getCenter();
+
+        if (!radius) return;
+
+        const bounds = map.getBounds();
+        const southWest = bounds.getSouthWest();
+        const northEast = bounds.getNorthEast();
+        const bbox = `${southWest.lat},${southWest.lng},${northEast.lat},${northEast.lng}`;
+        // fetch(`/signalk/v1/api/tracks?radius=${radius}`)
+        fetch(`/signalk/v1/api/tracks?bbox=${bbox}`)
+          .then((response) => response.json())
+          .then((_data) => {
+            layerGroup.clearLayers();
+            const data = Object.values(_data)[0];
+            if (data.type === "MultiLineString") {
+              L.geoJSON(data, {
+                style: {
+                  color: "blue",
+                  weight: 2,
+                },
+              }).addTo(layerGroup);
+            }
+          })
+          .catch((error) => console.error("Error fetching API 1:", error));
+      }
+
+      // Event listener for form changes
+      document
+        .getElementById("dataForm")
+        .addEventListener("input", function () {
+          var radius = document.getElementById("radius").value;
+          if (radius) {
+            updateCircle(map.getCenter());
             fetchData();
+          }
         });
 
-        // Replace the click handler
-        map.on('click', function(e) {
-            const lat = e.latlng.lat.toFixed(4);
-            const lng = e.latlng.lng.toFixed(4);
-            document.getElementById('coordinates').value = `${lat}, ${lng}`;
-        });
+      // Function to update the circle on the map
+      function updateCircle(latlng) {
+        if (circle) {
+          map.removeLayer(circle);
+        }
+        var radius = document.getElementById("radius").value;
+        if (radius) {
+          circle = L.circle(latlng, { radius: radius }).addTo(map);
+        }
+        // Remove the setView call to prevent re-centering
+      }
 
-        // Replace the moveend handler
-        map.on('moveend', function() {
-            const center = map.getCenter();
-            document.getElementById('coordinates').value = 
-                `${center.lat.toFixed(4)}, ${center.lng.toFixed(4)}`;
-        });
+      // Replace the click handler
+      map.on("click", function (e) {
+        const lat = e.latlng.lat.toFixed(4);
+        const lng = e.latlng.lng.toFixed(4);
+        document.getElementById("coordinates").value = `${lat}, ${lng}`;
+      });
 
+      // Replace the moveend handler
+      map.on("moveend", function () {
+        const center = map.getCenter();
+        document.getElementById("coordinates").value = `${center.lat.toFixed(
+          4
+        )}, ${center.lng.toFixed(4)}`;
+      });
     </script>
-</body>
+  </body>
 </html>

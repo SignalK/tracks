@@ -1,7 +1,7 @@
 import Database, { Database as BetterSqlite3Database, Statement } from 'better-sqlite3'
 import { s2, geojson } from 's2js'
-const toToken = s2.cellid.toToken
 import path from 'path'
+import fs from 'fs'
 import { getSqDist, simplify } from './simplify'
 import { TracksDB } from './tracks'
 import { Debug, GeoBounds, LatLngTuple, TrackCollection, TrackParams } from './types'
@@ -16,10 +16,17 @@ interface DbRow {
   s2cell: number
 }
 
+interface TableInfo {
+  name: string
+  type: string
+}
+
 export class SqliteTrackDb implements TracksDB {
   db: BetterSqlite3Database
   insertStmt: Statement
   selfContext: Context
+  databases: BetterSqlite3Database[] = []
+
   constructor(selfId: string, dataDir: string, dbName = 'tracks.db') {
     this.selfContext = `vessels.${selfId}` as Context
     this.db = new Database(path.join(dataDir, dbName))
@@ -32,7 +39,52 @@ export class SqliteTrackDb implements TracksDB {
       );
       CREATE INDEX IF NOT EXISTS idx_s2cell ON positions(s2cell);`)
     this.insertStmt = this.db.prepare('INSERT INTO positions (timestamp, lat, lon, s2cell) VALUES (?, ?, ?, ?)')
+
+    this.openValidDatabases(dataDir)
   }
+
+  openValidDatabases(dataDir: string): void {
+    const files = fs.readdirSync(dataDir)
+    this.databases = files.map(file => {
+      if (file.endsWith('.db')) {
+        try {
+          const dbPath = path.join(dataDir, file)
+          const db = new Database(dbPath)
+
+          const tableInfo = db.prepare("SELECT name, type FROM pragma_table_info('positions')").all() as TableInfo[]
+          const expectedColumns = {
+            timestamp: 'INTEGER',
+            lat: 'REAL',
+            lon: 'REAL',
+            s2cell: 'INTEGER'
+          }
+          const hasCorrectStructure = Object.entries(expectedColumns).every(([name, type]) => {
+            return tableInfo.some(col => col.name === name && col.type === type)
+          })
+
+          if (!hasCorrectStructure) {
+            console.warn(`Database ${file} doesn't have the correct table structure, initializing...`)
+            return
+          }
+          return db
+        } catch (error) {
+          console.error(`Failed to open or verify database ${file}:`, error)
+        }
+      }
+    }).filter(db => db !== undefined) as BetterSqlite3Database[]
+  }
+
+  close(): void {
+    this.db.close()
+    this.databases.forEach(db => {
+      try {
+        db.close()
+      } catch (error) {
+        console.error('Error closing database:', error)
+      }
+    })
+  }
+
   get(context: Context): Promise<LatLngTuple[]> {
     if (context !== this.selfContext && context !== 'vessels.self' && context !== 'self') {
       return Promise.resolve([])
@@ -41,16 +93,14 @@ export class SqliteTrackDb implements TracksDB {
     const rows = this.db
       .prepare('select lat, lon from positions where timestamp > ?')
       .all(Date.now() - 60 * 60 * 1000) as {
-      lat: number
-      lon: number
-    }[]
+        lat: number
+        lon: number
+      }[]
     return Promise.resolve(rows.map((row) => [row.lat, row.lon]))
   }
 
   newPosition(context: Context, position: LatLngTuple, timestamp: number = Date.now()): void {
     const cellId = Number(s2.Cell.fromLatLng(s2.LatLng.fromDegrees(position[0], position[1])).id)
-    // debug && debug(position)
-    // debug && debug(BigInt(cellId), ' * ', cellId.toString(2), ' ', toToken(BigInt(cellId)))
     this.insertStmt.run(timestamp, position[0], position[1], cellId)
   }
 
@@ -63,13 +113,23 @@ export class SqliteTrackDb implements TracksDB {
     const bbox = params.bbox ?? boundingBoxFromGeoLocation(selfPosition || [0, 0], params.radius || 1000)
     debug && debug(JSON.stringify(bbox))
 
-    let positions: DbRow[] = []
-    if (bbox !== null) {
-      const query = getBBoxQuery(bbox, debug)
-      debug?.(`Query: ${query}`)
-      positions = this.db.prepare(query).all() as DbRow[]
-    }
-    debug?.(`Found ${positions.length} positions`)
+    const tracks = this.queryAllDbs(bbox, debug)
+
+    const result = {} as { [key: Context]: LatLngTuple[][] }
+    result[this.selfContext] = tracks
+    return Promise.resolve(result)
+  }
+
+  private queryAllDbs(bbox: GeoBounds, debug: Debug | undefined) {
+    const query = getBBoxQuery(bbox, debug)
+    const threshold = bbox !== null ? getSqDist([bbox.sw[0], bbox.sw[1]], [bbox.ne[0], bbox.ne[1]]) / 100000 : 0.001
+    debug?.(`Query: ${query}`)
+    return this.databases.map(db => this.queryDb(db, query, threshold, debug)).flat()
+  }
+
+  private queryDb(db: BetterSqlite3Database, query: string, threshold: number, debug: Debug | undefined): LatLngTuple[][] {
+    let positions = db.prepare(query).all() as DbRow[]
+    debug?.(`Found ${positions.length} positions in ${db.name}`)
 
     // Group tracks into segments with 5 min (300000ms) threshold
     const segments: DbRow[][] = []
@@ -97,20 +157,16 @@ export class SqliteTrackDb implements TracksDB {
       segments.push(currentSegment)
     }
 
-    const threshold = bbox !== null ? getSqDist([bbox.sw[0], bbox.sw[1]], [bbox.ne[0], bbox.ne[1]]) / 100000 : 0.001
     const tracks = segments.reduce<LatLngTuple[][]>((acc, segment) => {
       acc.push(
         simplify(
           segment.map((row) => [row.lat, row.lon]),
-          threshold,
-        ),
+          threshold
+        )
       )
       return acc
     }, [])
-
-    const result = {} as { [key: Context]: LatLngTuple[][] }
-    result[this.selfContext] = tracks
-    return Promise.resolve(result)
+    return tracks
   }
 }
 
@@ -130,18 +186,13 @@ const getBBoxQuery = ({ sw, ne }: GeoBounds, debug?: Debug): string => {
       ],
     ],
   } as Polygon
-  // debug && debug(JSON.stringify(linestring))
   const covering = coverer.covering(linestring)
-  debug && debug(covering.map(toToken).join(','))
 
   // Convert covering to range queries
   const rangeQueries = covering.map((cellId) => {
     const start = lowerBoundForContainedCellIds(cellId)
     const end = upperBoundForContainedCellIds(cellId)
-    debug && debug(start, ' L ', start.toString(2), ' ', toToken(start))
-    debug && debug(cellId, ' I ', cellId.toString(2), ' ', toToken(cellId))
-    debug && debug(end, ' U ', end.toString(2))
-    return `(s2cell >= ${start} AND s2cell <= ${end})`
+    return `(s2cell BETWEEN ${start} <= s2cell AND ${end})`
   })
 
   const whereClause = rangeQueries.join('\n OR \n')

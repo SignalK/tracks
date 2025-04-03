@@ -7,6 +7,12 @@ This repo contains two npm modules:
 # Tracks
 Plugin for tracks accumulation and the track API
 
+# In memory vs in database
+
+If you activate the `Use Db` option the data is written to a Sqlite database and persisted over server restarts. Otherwise the accumulated track data is lost when the server is restarted.
+
+The plugin supports one write database and several read databases. It creates the default write database named `tracks.db` under SK settings directory in directory `plugin-config-data/tracks/`. If you place databases that have track data in the same structure they are used for retrieving track data. This allows you to create a track database for each season/trip and store them separately.
+
 
 # Usage:
 
