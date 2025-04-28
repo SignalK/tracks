@@ -4,7 +4,8 @@
   "description": "Plugin to keep track of tracks of vessels",
   "main": "index.js",
   "keywords": [
-    "signalk-node-server-plugin"
+    "signalk-node-server-plugin",
+    "signalk-webapp"
   ],
   "author": "Teppo Kurki <teppo.kurki@iki.fi>",
   "repository": "https://github.com/SignalK/tracks",
