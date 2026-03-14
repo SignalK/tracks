@@ -90,28 +90,45 @@ const DEFAULT_RESOLUTION = 60000
 const DEFAULT_POINTS_TO_KEEP = 60 * 2 // 2 hours with default resolution
 const DEFAULT_MAX_AGE = 60 * 10 // ten minutes
 const DEFAULT_MAX_RADIUS = 50 * 1000 //50 kilometers
-const BOOTSTRAP_RETRY_DELAYS = [2000, 5000, 10000] // 2s, 5s, 10s — allows history provider time to initialize
+
+// Bootstrap retry configuration:
+// First attempt after 5s (sufficient for warm restarts where InfluxDB is already running).
+// Subsequent attempts every 15s, up to 18 total (~260s window), covering cold boot scenarios
+// where InfluxDB may take 2+ minutes to accept connections after systemd reports it active.
+const BOOTSTRAP_INITIAL_DELAY = 5000
+const BOOTSTRAP_RETRY_DELAY = 15000
+const BOOTSTRAP_MAX_ATTEMPTS = 18
+
+// If getHistoryApi() reports "no provider configured" this many times consecutively,
+// assume no history provider plugin is installed and stop retrying.
+const BOOTSTRAP_MAX_NO_PROVIDER = 3
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const isNumeric = (x: any) => x - parseInt(x) + 1 >= 0
 
 const notAvailable = (res: Response) => {
   res.status(404)
-  res.json({ message: `Tracks API not available because tracks plugin is not enabled` })
+  res.json({ message: 'Tracks API not available because tracks plugin is not enabled' })
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+const sleep = (ms: number): Promise<void> => new Promise(function (resolve) { return setTimeout(resolve, ms) })
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const errorDetail = (err: any): string =>
-  err && err.stack ? err.stack : String(err)
+var errorDetail = function (err: any): string {
+  return err && err.stack ? err.stack : String(err)
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+var isNoProviderError = function (err: any): boolean {
+  return String(err).indexOf('No history') !== -1 && String(err).indexOf('provider') !== -1
+}
 
 async function bootstrapSelfTrack(
   app: App,
   tracks: Tracks_,
   config: TracksPluginConfig,
 ): Promise<void> {
-  const debug = app.debug
+  var debug = app.debug
 
   if (!app.getHistoryApi) {
     debug('getHistoryApi not available on server, skipping track bootstrap')
@@ -124,22 +141,32 @@ async function bootstrapSelfTrack(
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const resolution = isNumeric(config.resolution) ? parseFloat(config.resolution as any) : DEFAULT_RESOLUTION
+  var resolution = isNumeric(config.resolution) ? parseFloat(config.resolution as any) : DEFAULT_RESOLUTION
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const pointsToKeep = isNumeric(config.pointsToKeep) ? parseFloat(config.pointsToKeep as any) : DEFAULT_POINTS_TO_KEEP
-  const timespanMs = resolution * pointsToKeep
-  const resolutionSecs = Math.max(1, Math.round(resolution / 1000))
+  var pointsToKeep = isNumeric(config.pointsToKeep) ? parseFloat(config.pointsToKeep as any) : DEFAULT_POINTS_TO_KEEP
+  var timespanMs = resolution * pointsToKeep
+  var resolutionSecs = Math.max(1, Math.round(resolution / 1000))
 
   debug(
-    'Track bootstrap: requesting ' + Math.round(timespanMs / 1000 / 60) + ' minutes of history at ' + resolutionSecs + 's resolution',
+    'Track bootstrap: requesting ' + Math.round(timespanMs / 1000 / 60) +
+    ' minutes of history at ' + resolutionSecs + 's resolution' +
+    ' (max ' + BOOTSTRAP_MAX_ATTEMPTS + ' attempts)',
   )
 
-  for (var attempt = 0; attempt < BOOTSTRAP_RETRY_DELAYS.length; attempt++) {
-    debug('Track bootstrap attempt ' + (attempt + 1) + '/' + BOOTSTRAP_RETRY_DELAYS.length + ', waiting ' + BOOTSTRAP_RETRY_DELAYS[attempt] + 'ms...')
-    await sleep(BOOTSTRAP_RETRY_DELAYS[attempt])
+  var noProviderCount = 0
+
+  for (var attempt = 1; attempt <= BOOTSTRAP_MAX_ATTEMPTS; attempt++) {
+    var delay = attempt === 1 ? BOOTSTRAP_INITIAL_DELAY : BOOTSTRAP_RETRY_DELAY
+    debug(
+      'Track bootstrap attempt ' + attempt + '/' + BOOTSTRAP_MAX_ATTEMPTS +
+      ', waiting ' + (delay / 1000) + 's...',
+    )
+    await sleep(delay)
 
     try {
       var historyApi = await app.getHistoryApi!()
+      noProviderCount = 0 // provider resolved — reset counter
+
       var to = new Date()
       var from = new Date(to.getTime() - timespanMs)
 
@@ -174,7 +201,9 @@ async function bootstrapSelfTrack(
         if (positions.length > 0) {
           tracks.initialTrack(app.selfContext, positions)
           debug(
-            'Track bootstrap complete: loaded ' + positions.length + ' positions for self (' + Math.round(timespanMs / 1000 / 60) + ' min window)',
+            'Track bootstrap complete: loaded ' + positions.length +
+            ' positions for self (' + Math.round(timespanMs / 1000 / 60) +
+            ' min window) on attempt ' + attempt,
           )
           return
         }
@@ -183,10 +212,31 @@ async function bootstrapSelfTrack(
       debug('History API returned no position data for bootstrap')
       return // API responded successfully but no data — do not retry
     } catch (err) {
-      debug('Track bootstrap attempt ' + (attempt + 1) + '/' + BOOTSTRAP_RETRY_DELAYS.length + ' failed: ' + errorDetail(err))
-      if (attempt === BOOTSTRAP_RETRY_DELAYS.length - 1) {
+      if (isNoProviderError(err)) {
+        noProviderCount++
+        debug(
+          'Track bootstrap attempt ' + attempt + '/' + BOOTSTRAP_MAX_ATTEMPTS +
+          ': no history provider registered yet (' + noProviderCount + '/' + BOOTSTRAP_MAX_NO_PROVIDER + ')',
+        )
+        if (noProviderCount >= BOOTSTRAP_MAX_NO_PROVIDER) {
+          debug(
+            'No history provider registered after ' + BOOTSTRAP_MAX_NO_PROVIDER +
+            ' consecutive checks — no provider plugin appears to be installed. Giving up.',
+          )
+          return
+        }
+      } else {
+        noProviderCount = 0 // different error — provider exists but not ready
+        debug(
+          'Track bootstrap attempt ' + attempt + '/' + BOOTSTRAP_MAX_ATTEMPTS +
+          ' failed: ' + errorDetail(err),
+        )
+      }
+
+      if (attempt === BOOTSTRAP_MAX_ATTEMPTS) {
         app.error(
-          'Track bootstrap from History API failed after ' + BOOTSTRAP_RETRY_DELAYS.length + ' attempts. Tracks will start empty and accumulate from live data.',
+          'Track bootstrap from History API failed after ' + BOOTSTRAP_MAX_ATTEMPTS +
+          ' attempts. Tracks will start empty and accumulate from live data.',
         )
       }
     }
