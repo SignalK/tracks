@@ -30,6 +30,23 @@ interface AllTracksResult {
   }
 }
 
+// Minimal History API types (from @signalk/server-api)
+// Defined locally to avoid a hard dependency on a specific server-api version
+interface HistoryApi {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  getValues(query: any): Promise<HistoryValuesResponse>
+}
+
+interface HistoryValuesResponse {
+  context: string
+  range: { from: string; to: string }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  values: any[]
+  // Each element: [timestamp_string, [lon, lat]]
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: any[]
+}
+
 interface App {
   debug: Debug
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -43,6 +60,8 @@ interface App {
     }
   }
   getSelfPath: (path: string) => void
+  selfContext: string
+  getHistoryApi?: () => Promise<HistoryApi>
 }
 
 interface Plugin {
@@ -62,6 +81,7 @@ interface TracksPluginConfig {
   pointsToKeep?: number
   maxAge?: number
   maxRadius?: number
+  bootstrapFromHistory?: boolean
 }
 
 const toLngLat = ([lat, lng]: number[]): LngLatTuple => [lng, lat]
@@ -70,6 +90,7 @@ const DEFAULT_RESOLUTION = 60000
 const DEFAULT_POINTS_TO_KEEP = 60 * 2 // 2 hours with default resolution
 const DEFAULT_MAX_AGE = 60 * 10 // ten minutes
 const DEFAULT_MAX_RADIUS = 50 * 1000 //50 kilometers
+const BOOTSTRAP_RETRY_DELAYS = [2000, 5000, 10000] // 2s, 5s, 10s — allows history provider time to initialize
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const isNumeric = (x: any) => x - parseInt(x) + 1 >= 0
@@ -77,6 +98,99 @@ const isNumeric = (x: any) => x - parseInt(x) + 1 >= 0
 const notAvailable = (res: Response) => {
   res.status(404)
   res.json({ message: `Tracks API not available because tracks plugin is not enabled` })
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const errorDetail = (err: any): string =>
+  err && err.stack ? err.stack : String(err)
+
+async function bootstrapSelfTrack(
+  app: App,
+  tracks: Tracks_,
+  config: TracksPluginConfig,
+): Promise<void> {
+  const debug = app.debug
+
+  if (!app.getHistoryApi) {
+    debug('getHistoryApi not available on server, skipping track bootstrap')
+    return
+  }
+
+  if (!app.selfContext) {
+    debug('selfContext not available, skipping track bootstrap')
+    return
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const resolution = isNumeric(config.resolution) ? parseFloat(config.resolution as any) : DEFAULT_RESOLUTION
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pointsToKeep = isNumeric(config.pointsToKeep) ? parseFloat(config.pointsToKeep as any) : DEFAULT_POINTS_TO_KEEP
+  const timespanMs = resolution * pointsToKeep
+  const resolutionSecs = Math.max(1, Math.round(resolution / 1000))
+
+  debug(
+    'Track bootstrap: requesting ' + Math.round(timespanMs / 1000 / 60) + ' minutes of history at ' + resolutionSecs + 's resolution',
+  )
+
+  for (var attempt = 0; attempt < BOOTSTRAP_RETRY_DELAYS.length; attempt++) {
+    debug('Track bootstrap attempt ' + (attempt + 1) + '/' + BOOTSTRAP_RETRY_DELAYS.length + ', waiting ' + BOOTSTRAP_RETRY_DELAYS[attempt] + 'ms...')
+    await sleep(BOOTSTRAP_RETRY_DELAYS[attempt])
+
+    try {
+      var historyApi = await app.getHistoryApi!()
+      var to = new Date()
+      var from = new Date(to.getTime() - timespanMs)
+
+      var response: HistoryValuesResponse = await historyApi.getValues({
+        context: app.selfContext,
+        from: from.toISOString(),
+        to: to.toISOString(),
+        pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
+        resolution: resolutionSecs,
+      })
+
+      if (response && response.data && response.data.length > 0) {
+        // History API returns [timestamp, [lon, lat]]
+        // Convert to [lat, lng] for LatLngTuple
+        var positions: LatLngTuple[] = response.data
+          .filter(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            function (d: any) {
+              return (
+                Array.isArray(d) &&
+                d.length >= 2 &&
+                Array.isArray(d[1]) &&
+                d[1].length === 2 &&
+                typeof d[1][0] === 'number' &&
+                typeof d[1][1] === 'number'
+              )
+            },
+          )
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .map(function (d: any) { return [d[1][1], d[1][0]] as LatLngTuple })
+
+        if (positions.length > 0) {
+          tracks.initialTrack(app.selfContext, positions)
+          debug(
+            'Track bootstrap complete: loaded ' + positions.length + ' positions for self (' + Math.round(timespanMs / 1000 / 60) + ' min window)',
+          )
+          return
+        }
+      }
+
+      debug('History API returned no position data for bootstrap')
+      return // API responded successfully but no data — do not retry
+    } catch (err) {
+      debug('Track bootstrap attempt ' + (attempt + 1) + '/' + BOOTSTRAP_RETRY_DELAYS.length + ' failed: ' + errorDetail(err))
+      if (attempt === BOOTSTRAP_RETRY_DELAYS.length - 1) {
+        app.error(
+          'Track bootstrap from History API failed after ' + BOOTSTRAP_RETRY_DELAYS.length + ' attempts. Tracks will start empty and accumulate from live data.',
+        )
+      }
+    }
+  }
 }
 
 export default function ThePlugin(app: App): Plugin {
@@ -118,6 +232,13 @@ export default function ThePlugin(app: App): Plugin {
       onStop.push(() => {
         clearInterval(pruneInterval)
       })
+
+      // Bootstrap self track from History API (async, non-blocking)
+      if (config.bootstrapFromHistory !== false) {
+        bootstrapSelfTrack(app, tracks, config).catch(function (err) {
+          app.error('Unexpected error in track bootstrap: ' + err)
+        })
+      }
     },
 
     stop: function () {
@@ -210,6 +331,13 @@ export default function ThePlugin(app: App): Plugin {
           title: 'Maximum Radius (meters) ',
           description: 'Include only vessels with position within this range. 0= all vessels',
           default: DEFAULT_MAX_RADIUS,
+        },
+        bootstrapFromHistory: {
+          type: 'boolean',
+          title: 'Load historical tracks on startup',
+          description:
+            'On startup, load historical position data from the History API (requires a history provider such as signalk-to-influxdb2). Tracks will be available immediately after restart instead of starting empty.',
+          default: true,
         },
       },
     },
