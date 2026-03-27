@@ -1,0 +1,99 @@
+{
+    "openapi": "3.0.2",
+    "info": {
+      "title": "Signal K Tracks API",
+      "version": "1.x"
+    },
+    "servers": [
+    ],
+    "paths": {
+      "/tracks": {
+        "get": {
+          "description": "Retrieve tracks for multiple vessels",
+          "parameters": [
+            {
+              "name": "bbox",
+              "description": "Filter vessels by their latest position by bounding box. Comma delimited list of coordinates degrees in order west,south,east,north",
+              "required": false,
+              "in": "query",
+              "example": "51.28,-0.489,51.686,0.236",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "radius",
+              "description": "Filter vessels by maximum distance (radius) from self's latest position, in meters",
+              "required": false,
+              "in": "query",
+              "example": "9260",
+              "schema": {
+                "type": "number"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Object keyed by contextIds and geoJSON multilinestrings as values",
+              "content": {
+                "application/json": {
+                  "example": {
+                    "vessels.urn:mrn:signalk:uuid:a2b5edc0-5f8f-41c3-b3d0-47604c693f64": {
+                      "type": "MultiLineString",
+                      "coordinates": [
+                        [
+                          [
+                            24.736677,
+                            59.7250108
+                          ],
+                          [
+                            24.7368,
+                            59.72502
+                          ]
+                        ]
+                      ]
+                    },
+                    "vessels.urn:mrn:imo:mmsi:230055555": {
+                      "type": "MultiLineString",
+                      "coordinates": [
+                        [
+                          [
+                            24.736645,
+                            59.7249883
+                          ]
+                        ]
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/vessels/{context}/track": {
+        "get": {
+          "description": "Track of an individual vessel",
+          "parameters": [
+            {
+              "name": "context",
+              "required": true,
+              "in": "path",
+              "example": "urn:mrn:imo:mmsi:123456789",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": ""
+            },
+            "404": {
+              "description": ""
+            }
+          }
+        }
+      }
+    }
+  }
