@@ -23,7 +23,9 @@ export class Tracks {
   debug: Debug
   config: TracksConfig
   constructor(config: TracksConfig, debug: Debug) {
-    debug(JSON.stringify(config))
+    if (debug.enabled) {
+      debug(JSON.stringify(config))
+    }
     this.config = config
     this.debug = debug
   }
