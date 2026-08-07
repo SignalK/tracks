@@ -16,7 +16,7 @@
 import { Request, RequestHandler, Response, Router } from 'express'
 import { Tracks as Tracks_, TrackAccumulator as TrackAccumulator_, TracksConfig } from './tracks'
 import { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types'
-import { validateParameters } from './utils'
+import { resolveContext, validateParameters } from './utils'
 
 export interface ContextPosition {
   context: Context
@@ -308,8 +308,9 @@ export default function ThePlugin(app: App): Plugin {
           notAvailable(res)
           return
         }
+        const context = resolveContext(req.params.vesselId, app.selfContext)
         tracks
-          ?.get(`vessels.${req.params.vesselId}`)
+          ?.get(context)
           .then((coordinates: LatLngTuple[]) => {
             res.json({
               type: 'MultiLineString',
@@ -318,7 +319,7 @@ export default function ThePlugin(app: App): Plugin {
           })
           .catch(() => {
             res.status(404)
-            res.json({ message: `No track available for vessels.${req.params.vesselId}` })
+            res.json({ message: `No track available for ${context}` })
           })
       }
       router.get('/vessels/:vesselId/track', trackHandler.bind(this))
