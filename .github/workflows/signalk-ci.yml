@@ -1,0 +1,71 @@
+# ─────────────────────────────────────────────────────────────
+# SignalK Plugin CI
+#
+# Calls the shared SignalK reusable workflow, which builds and
+# tests this plugin across Linux x64, Linux arm64, macOS and
+# Windows. The plugin is a plain Node module plus an Express
+# router, so the integration slot (which starts a server and
+# installs the plugin into it) stays off — `npm test` already
+# covers the pure logic, and the plugin's own start()/stop()
+# path is exercised by the Signal K plugin registry.
+# ─────────────────────────────────────────────────────────────
+
+name: SignalK Plugin CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+  workflow_dispatch:
+    inputs:
+      test-command:
+        description: Command to run tests
+        required: false
+        default: npm test
+        type: string
+      build-command:
+        description: Command to build the plugin
+        required: false
+        default: npm run build --if-present
+        type: string
+      node-versions:
+        description: 'JSON array of Node versions, example: ["20","22","24"]'
+        required: false
+        default: '["22","24"]'
+        type: string
+      enable-armv7:
+        description: Run armv7 (Cerbo GX) tests via QEMU
+        required: false
+        default: false
+        type: boolean
+      enable-signalk-integration:
+        description: Start SignalK server and install plugin for integration testing
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  # ── Automatic runs (push / pull request) ──────────────────
+  test-plugin-auto:
+    if: ${{ github.event_name != 'workflow_dispatch' }}
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@master
+    with:
+      test-command: npm test
+      build-command: npm run build --if-present
+      node-versions: '["22","24"]'
+      enable-armv7: false
+      enable-signalk-integration: false
+
+  # ── Manual runs (workflow_dispatch with custom inputs) ────
+  test-plugin-manual:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@master
+    with:
+      test-command: ${{ inputs.test-command }}
+      build-command: ${{ inputs.build-command }}
+      node-versions: ${{ inputs.node-versions }}
+      enable-armv7: ${{ inputs.enable-armv7 }}
+      enable-signalk-integration: ${{ inputs.enable-signalk-integration }}
