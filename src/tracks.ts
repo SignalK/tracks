@@ -1,9 +1,10 @@
-import { BehaviorSubject, combineLatest, ConnectableObservable, Observable, ReplaySubject, Subject } from 'rxjs'
-import { map, publishReplay, scan, take, throttleTime } from 'rxjs/operators'
-import { Context, Debug, LatLngTuple, Position, QueryParameters, TrackCollection, TrackParams } from './types'
-import { createMatcher } from './utils'
+import { BehaviorSubject, combineLatest, connectable, firstValueFrom, ReplaySubject, Subject } from 'rxjs'
+import type { Connectable, Observable } from 'rxjs'
+import { map, scan, throttleTime } from 'rxjs/operators'
+import type { Context, Debug, LatLngTuple, TrackCollection, TrackParams } from './types.js'
+import { createMatcher } from './utils.js'
 
-interface tracksMap {
+interface TracksMap {
   [context: string]: TrackAccumulator
 }
 
@@ -19,7 +20,7 @@ export interface TracksConfig {
 }
 
 export class Tracks {
-  tracks: tracksMap = {}
+  tracks: TracksMap = {}
   debug: Debug
   config: TracksConfig
   constructor(config: TracksConfig, debug: Debug) {
@@ -44,10 +45,9 @@ export class Tracks {
     }
     let result = this.tracks[context]
     if (!result && createIfMissing) {
-      const accParams: AccumulatorParams = { ...this.config }
-      if (this.config.fetchInitialTrack) {
-        accParams.fetchTrackFor = context
-      }
+      const accParams: AccumulatorParams = this.config.fetchInitialTrack
+        ? { ...this.config, fetchTrackFor: context }
+        : { ...this.config }
       result = this.tracks[context] = new TrackAccumulator(accParams)
     }
     return result
@@ -56,9 +56,11 @@ export class Tracks {
   get(context: Context): Promise<LatLngTuple[]> {
     const accumulator = this.getAccumulator(context, false)
     if (accumulator) {
-      return accumulator.track.pipe(take(1)).toPromise()
+      // Rejects with EmptyError if the stream completes without emitting; the
+      // route handlers turn that into the same 404 as an unknown context.
+      return firstValueFrom(accumulator.track)
     } else {
-      return Promise.reject()
+      return Promise.reject(new Error(`No track accumulator for ${context}`))
     }
   }
 
@@ -81,10 +83,8 @@ export class Tracks {
 
     return this.getAllTracks().then((contextTracks) => {
       return contextTracks.reduce<TrackCollection>((acc, { context, track }) => {
-        const c = context as string
-        const t = track as LatLngTuple[]
-        if (matcher(t)) {
-          acc[c] = t
+        if (matcher(track)) {
+          acc[context] = track
         }
         return acc
       }, {})
@@ -101,7 +101,7 @@ export class Tracks {
       }
     })
     if (this.debug.enabled) {
-      this.debug(`deleted tracks for ${deleted}`)
+      this.debug(`deleted tracks for ${deleted.join(', ')}`)
     }
   }
 }
@@ -116,28 +116,33 @@ export class TrackAccumulator {
   initialTrack: Subject<LatLngTuple[]> = new BehaviorSubject<LatLngTuple[]>([])
   input: Subject<LatLngTuple> = new Subject()
   latestLatLngTuple = 0
-  accumulatedTrack: Observable<LatLngTuple[]>
+  accumulatedTrack: Connectable<LatLngTuple[]>
   track: Observable<LatLngTuple[]>
 
   constructor({ resolution, pointsToKeep, fetchTrackFor }: AccumulatorParams) {
-    this.accumulatedTrack = this.input.pipe(
-      throttleTime(resolution),
-      scan<LatLngTuple, LatLngTuple[]>((acc, position) => {
-        acc.push(position)
-        return acc.slice(Math.max(0, acc.length - pointsToKeep))
-      }, []),
-      publishReplay(1),
+    // rxjs 7 replaces the publishReplay operator + ConnectableObservable cast
+    // with an explicit connectable(); the ReplaySubject(1) connector preserves
+    // the replay-latest behaviour a late subscriber depends on.
+    this.accumulatedTrack = connectable(
+      this.input.pipe(
+        throttleTime(resolution),
+        scan<LatLngTuple, LatLngTuple[]>((acc, position) => {
+          acc.push(position)
+          return acc.slice(Math.max(0, acc.length - pointsToKeep))
+        }, []),
+      ),
+      { connector: () => new ReplaySubject<LatLngTuple[]>(1), resetOnDisconnect: false },
     )
     this.track = combineLatest([this.initialTrack, this.accumulatedTrack]).pipe(
       map(([initialTrack, accumulatedTrack]) => [...initialTrack, ...accumulatedTrack]),
     )
-    const connectable = this.accumulatedTrack as ConnectableObservable<LatLngTuple[]>
-    connectable.connect()
+    this.accumulatedTrack.connect()
 
     if (fetchTrackFor) {
-      fetchTrack(fetchTrackFor).then((trackGEOJson) => {
-        if (trackGEOJson && trackGEOJson.coordinates && trackGEOJson.coordinates[0]) {
-          this.initialTrack.next(trackGEOJson.coordinates[0])
+      void fetchTrack(fetchTrackFor).then((trackGEOJson) => {
+        const coordinates = trackGEOJson?.coordinates?.[0]
+        if (coordinates) {
+          this.initialTrack.next(coordinates)
         }
       })
     }
@@ -153,12 +158,18 @@ export class TrackAccumulator {
   }
 }
 
-const fetchTrack = (context: Context) => {
+interface TrackGeoJson {
+  coordinates?: LatLngTuple[][]
+}
+
+// Browser-side helper for the exported TrackAccumulator: only reachable when a
+// webapp constructs one with fetchInitialTrack, never on the server.
+const fetchTrack = (context: Context): Promise<TrackGeoJson> => {
   const contextParts = context.split('.')
   if (contextParts[0] !== 'vessels') {
     return Promise.resolve({})
   }
   return fetch(`/signalk/v1/api/vessels/${contextParts[1]}/track`, {
     credentials: 'include',
-  }).then((r) => (r.status === 200 ? r.json() : Promise.resolve({})))
+  }).then((r) => (r.status === 200 ? (r.json() as Promise<TrackGeoJson>) : Promise.resolve({})))
 }

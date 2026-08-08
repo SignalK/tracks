@@ -2,25 +2,62 @@
   "name": "@signalk/tracks-plugin",
   "version": "2.0.2",
   "description": "Plugin to keep track of tracks of vessels",
-  "main": "index.js",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "//main": "Signal K resolves an installed plugin by directory. Node's CJS directory resolution and the server's esm-resolve fallback both read `main`, not `exports`, so dropping this makes the plugin unloadable.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "keywords": [
-    "signalk-node-server-plugin"
+    "signalk-node-server-plugin",
+    "signalk-category-utility"
   ],
   "author": "Teppo Kurki <teppo.kurki@iki.fi>",
-  "repository": "https://github.com/SignalK/tracks",
-  "workspaces": [
-    "module"
-  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SignalK/tracks.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SignalK/tracks/issues"
+  },
+  "homepage": "https://github.com/SignalK/tracks#readme",
+  "engines": {
+    "node": ">=20.19"
+  },
   "scripts": {
-    "build": "npm run build --workspace @signalk/tracks",
-    "test": "npm test --workspace @signalk/tracks"
+    "build": "vite build",
+    "watch": "vite build --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm run build"
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "@signalk/tracks": "^2.0.1"
+    "rxjs": "^7.8.2"
   },
   "devDependencies": {
-    "@types/debug": "^4.1.5",
-    "prettier": "2.2.1"
+    "@eslint/js": "^10.0.1",
+    "@types/express": "^4.17.23",
+    "@types/node": "^22.18.0",
+    "eslint": "^10.8.1",
+    "eslint-config-prettier": "^10.1.8",
+    "jiti": "^2.7.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.66.0",
+    "vite": "^7.1.12",
+    "vite-plugin-dts": "^4.5.4",
+    "vitest": "^3.2.4"
   }
 }

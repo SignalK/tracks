@@ -17,10 +17,11 @@ export interface GeoBounds {
   sw: LatLngTuple
 }
 
-export interface QueryParameters {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  [key: string]: any
-}
+/**
+ * Express `req.query` shape: a value may be absent, a single string, or repeated
+ * into an array when the same key appears more than once in the query string.
+ */
+export type QueryParameters = Record<string, unknown>
 
 export interface TrackParams {
   bbox: GeoBounds | null
@@ -28,7 +29,6 @@ export interface TrackParams {
 }
 
 export interface Debug {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (...args: any): any
+  (...args: unknown[]): void
   enabled: boolean
 }

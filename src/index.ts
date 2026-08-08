@@ -13,10 +13,10 @@
  * limitations under the License.
  */
 
-import { Request, RequestHandler, Response, Router } from 'express'
-import { Tracks as Tracks_, TrackAccumulator as TrackAccumulator_, TracksConfig } from './tracks'
-import { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types'
-import { resolveContext, validateParameters } from './utils'
+import type { Request, RequestHandler, Response, Router } from 'express'
+import { Tracks as Tracks_ } from './tracks.js'
+import type { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types.js'
+import { resolveContext, validateParameters } from './utils.js'
 
 export interface ContextPosition {
   context: Context
@@ -32,48 +32,47 @@ interface AllTracksResult {
 
 // Minimal History API types (from @signalk/server-api)
 // Defined locally to avoid a hard dependency on a specific server-api version
+interface HistoryValuesQuery {
+  context: string
+  from: string
+  to: string
+  pathSpecs: { path: string; aggregate: string }[]
+  resolution: number
+}
+
 interface HistoryApi {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  getValues(query: any): Promise<HistoryValuesResponse>
+  getValues(query: HistoryValuesQuery): Promise<HistoryValuesResponse>
 }
 
 interface HistoryValuesResponse {
   context: string
   range: { from: string; to: string }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  values: any[]
-  // Each element: [timestamp_string, [lon, lat]]
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  data: any[]
+  values: unknown[]
+  /** Each element: [timestamp_string, [lon, lat]] */
+  data: unknown[]
 }
 
 interface App {
   debug: Debug
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  error: (...args: any) => void
+  error: (...args: unknown[]) => void
   streambundle: {
-    getBus: (
-      path: string,
-    ) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      onValue: (cb: (x: any) => void) => () => void
+    getBus: (path: string) => {
+      onValue: (cb: (x: ContextPosition) => void) => () => void
     }
   }
-  getSelfPath: (path: string) => void
+  getSelfPath: (path: string) => unknown
   selfContext: string
   getHistoryApi?: () => Promise<HistoryApi>
 }
 
 interface Plugin {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  start: (c: any) => void
+  start: (c: TracksPluginConfig) => void
   stop: () => void
   signalKApiRoutes: (r: Router) => Router
   id: string
   name: string
   description: string
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  schema: any
+  schema: Record<string, unknown>
 }
 
 interface TracksPluginConfig {
@@ -84,7 +83,7 @@ interface TracksPluginConfig {
   bootstrapFromHistory?: boolean
 }
 
-const toLngLat = ([lat, lng]: number[]): LngLatTuple => [lng, lat]
+const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
 
 const DEFAULT_RESOLUTION = 60000
 const DEFAULT_POINTS_TO_KEEP = 60 * 2 // 2 hours with default resolution
@@ -103,34 +102,50 @@ const BOOTSTRAP_MAX_ATTEMPTS = 18
 // assume no history provider plugin is installed and stop retrying.
 const BOOTSTRAP_MAX_NO_PROVIDER = 3
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const isNumeric = (x: any) => x - parseInt(x) + 1 >= 0
+/**
+ * Config values arrive from the plugin UI as numbers, but a hand-edited
+ * settings file can supply strings. Accept both, reject anything non-finite so
+ * a bad value falls back to the default instead of poisoning arithmetic with NaN.
+ */
+const toNumber = (value: unknown): number | undefined => {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
 
 const notAvailable = (res: Response) => {
   res.status(404)
   res.json({ message: 'Tracks API not available because tracks plugin is not enabled' })
 }
 
-const sleep = (ms: number): Promise<void> => new Promise(function (resolve) { return setTimeout(resolve, ms) })
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-var errorDetail = function (err: any): string {
-  return err && err.stack ? err.stack : String(err)
+const errorDetail = (err: unknown): string => (err instanceof Error && err.stack ? err.stack : String(err))
+
+const isNoProviderError = (err: unknown): boolean => {
+  const text = String(err)
+  return text.includes('No history') && text.includes('provider')
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-var isNoProviderError = function (err: any): boolean {
-  return String(err).indexOf('No history') !== -1 && String(err).indexOf('provider') !== -1
-}
+/** History API rows are [timestamp, [lon, lat]]; keep only well-formed ones. */
+const isHistoryPositionRow = (row: unknown): row is [string, [number, number]] =>
+  Array.isArray(row) &&
+  row.length >= 2 &&
+  Array.isArray(row[1]) &&
+  row[1].length === 2 &&
+  typeof row[1][0] === 'number' &&
+  typeof row[1][1] === 'number'
 
-async function bootstrapSelfTrack(
-  app: App,
-  tracks: Tracks_,
-  config: TracksPluginConfig,
-): Promise<void> {
-  var debug = app.debug
+async function bootstrapSelfTrack(app: App, tracks: Tracks_, config: TracksPluginConfig): Promise<void> {
+  const { debug } = app
+  const getHistoryApi = app.getHistoryApi
 
-  if (!app.getHistoryApi) {
+  if (!getHistoryApi) {
     debug('getHistoryApi not available on server, skipping track bootstrap')
     return
   }
@@ -140,37 +155,32 @@ async function bootstrapSelfTrack(
     return
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  var resolution = isNumeric(config.resolution) ? parseFloat(config.resolution as any) : DEFAULT_RESOLUTION
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  var pointsToKeep = isNumeric(config.pointsToKeep) ? parseFloat(config.pointsToKeep as any) : DEFAULT_POINTS_TO_KEEP
-  var timespanMs = resolution * pointsToKeep
-  var resolutionSecs = Math.max(1, Math.round(resolution / 1000))
+  const resolution = toNumber(config.resolution) ?? DEFAULT_RESOLUTION
+  const pointsToKeep = toNumber(config.pointsToKeep) ?? DEFAULT_POINTS_TO_KEEP
+  const timespanMs = resolution * pointsToKeep
+  const resolutionSecs = Math.max(1, Math.round(resolution / 1000))
+  const timespanMinutes = Math.round(timespanMs / 1000 / 60)
 
   debug(
-    'Track bootstrap: requesting ' + Math.round(timespanMs / 1000 / 60) +
-    ' minutes of history at ' + resolutionSecs + 's resolution' +
-    ' (max ' + BOOTSTRAP_MAX_ATTEMPTS + ' attempts)',
+    `Track bootstrap: requesting ${timespanMinutes} minutes of history at ${resolutionSecs}s resolution ` +
+      `(max ${BOOTSTRAP_MAX_ATTEMPTS} attempts)`,
   )
 
-  var noProviderCount = 0
+  let noProviderCount = 0
 
-  for (var attempt = 1; attempt <= BOOTSTRAP_MAX_ATTEMPTS; attempt++) {
-    var delay = attempt === 1 ? BOOTSTRAP_INITIAL_DELAY : BOOTSTRAP_RETRY_DELAY
-    debug(
-      'Track bootstrap attempt ' + attempt + '/' + BOOTSTRAP_MAX_ATTEMPTS +
-      ', waiting ' + (delay / 1000) + 's...',
-    )
+  for (let attempt = 1; attempt <= BOOTSTRAP_MAX_ATTEMPTS; attempt++) {
+    const delay = attempt === 1 ? BOOTSTRAP_INITIAL_DELAY : BOOTSTRAP_RETRY_DELAY
+    debug(`Track bootstrap attempt ${attempt}/${BOOTSTRAP_MAX_ATTEMPTS}, waiting ${delay / 1000}s...`)
     await sleep(delay)
 
     try {
-      var historyApi = await app.getHistoryApi!()
+      const historyApi = await getHistoryApi()
       noProviderCount = 0 // provider resolved — reset counter
 
-      var to = new Date()
-      var from = new Date(to.getTime() - timespanMs)
+      const to = new Date()
+      const from = new Date(to.getTime() - timespanMs)
 
-      var response: HistoryValuesResponse = await historyApi.getValues({
+      const response = await historyApi.getValues({
         context: app.selfContext,
         from: from.toISOString(),
         to: to.toISOString(),
@@ -178,32 +188,17 @@ async function bootstrapSelfTrack(
         resolution: resolutionSecs,
       })
 
-      if (response && response.data && response.data.length > 0) {
-        // History API returns [timestamp, [lon, lat]]
-        // Convert to [lat, lng] for LatLngTuple
-        var positions: LatLngTuple[] = response.data
-          .filter(
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            function (d: any) {
-              return (
-                Array.isArray(d) &&
-                d.length >= 2 &&
-                Array.isArray(d[1]) &&
-                d[1].length === 2 &&
-                typeof d[1][0] === 'number' &&
-                typeof d[1][1] === 'number'
-              )
-            },
-          )
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          .map(function (d: any) { return [d[1][1], d[1][0]] as LatLngTuple })
+      if (response?.data && response.data.length > 0) {
+        // History API returns [timestamp, [lon, lat]]; flip to [lat, lng] for LatLngTuple.
+        const positions: LatLngTuple[] = response.data
+          .filter(isHistoryPositionRow)
+          .map(([, [lon, lat]]): LatLngTuple => [lat, lon])
 
         if (positions.length > 0) {
           tracks.initialTrack(app.selfContext, positions)
           debug(
-            'Track bootstrap complete: loaded ' + positions.length +
-            ' positions for self (' + Math.round(timespanMs / 1000 / 60) +
-            ' min window) on attempt ' + attempt,
+            `Track bootstrap complete: loaded ${positions.length} positions for self ` +
+              `(${timespanMinutes} min window) on attempt ${attempt}`,
           )
           return
         }
@@ -215,28 +210,25 @@ async function bootstrapSelfTrack(
       if (isNoProviderError(err)) {
         noProviderCount++
         debug(
-          'Track bootstrap attempt ' + attempt + '/' + BOOTSTRAP_MAX_ATTEMPTS +
-          ': no history provider registered yet (' + noProviderCount + '/' + BOOTSTRAP_MAX_NO_PROVIDER + ')',
+          `Track bootstrap attempt ${attempt}/${BOOTSTRAP_MAX_ATTEMPTS}: no history provider registered yet ` +
+            `(${noProviderCount}/${BOOTSTRAP_MAX_NO_PROVIDER})`,
         )
         if (noProviderCount >= BOOTSTRAP_MAX_NO_PROVIDER) {
           debug(
-            'No history provider registered after ' + BOOTSTRAP_MAX_NO_PROVIDER +
-            ' consecutive checks — no provider plugin appears to be installed. Giving up.',
+            `No history provider registered after ${BOOTSTRAP_MAX_NO_PROVIDER} consecutive checks — ` +
+              'no provider plugin appears to be installed. Giving up.',
           )
           return
         }
       } else {
         noProviderCount = 0 // different error — provider exists but not ready
-        debug(
-          'Track bootstrap attempt ' + attempt + '/' + BOOTSTRAP_MAX_ATTEMPTS +
-          ' failed: ' + errorDetail(err),
-        )
+        debug(`Track bootstrap attempt ${attempt}/${BOOTSTRAP_MAX_ATTEMPTS} failed: ${errorDetail(err)}`)
       }
 
       if (attempt === BOOTSTRAP_MAX_ATTEMPTS) {
         app.error(
-          'Track bootstrap from History API failed after ' + BOOTSTRAP_MAX_ATTEMPTS +
-          ' attempts. Tracks will start empty and accumulate from live data.',
+          `Track bootstrap from History API failed after ${BOOTSTRAP_MAX_ATTEMPTS} attempts. ` +
+            'Tracks will start empty and accumulate from live data.',
         )
       }
     }
@@ -249,45 +241,44 @@ export default function ThePlugin(app: App): Plugin {
   let defaultMaxRadius: number | undefined = undefined
 
   function getVesselPosition(): LatLngTuple | undefined {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const p: any = app.getSelfPath('navigation.position')
-    return p && p.value ? [p.value.latitude, p.value.longitude] : undefined
+    const p = app.getSelfPath('navigation.position')
+    if (p && typeof p === 'object' && 'value' in p) {
+      const { value } = p as { value?: Partial<Position> }
+      if (typeof value?.latitude === 'number' && typeof value.longitude === 'number') {
+        return [value.latitude, value.longitude]
+      }
+    }
+    return undefined
   }
 
   return {
     start: function (config: TracksPluginConfig) {
       const { resolution, pointsToKeep, maxAge, maxRadius } = config
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      defaultMaxRadius = maxRadius ? parseFloat(maxRadius as any) : undefined
+      defaultMaxRadius = toNumber(maxRadius)
       tracks = new Tracks_(
         {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          resolution: isNumeric(resolution) ? parseFloat(resolution as any) : DEFAULT_RESOLUTION,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          pointsToKeep: isNumeric(pointsToKeep) ? parseFloat(pointsToKeep as any) : DEFAULT_POINTS_TO_KEEP,
+          resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
+          pointsToKeep: toNumber(pointsToKeep) ?? DEFAULT_POINTS_TO_KEEP,
         },
         app.debug,
       )
       onStop.push(
-        app.streambundle
-          .getBus('navigation.position')
-          .onValue((update: ContextPosition): void => {
-            if (!update.value || update.value.latitude == null || update.value.longitude == null) return
-            tracks?.newPosition(update.context, [update.value.latitude, update.value.longitude])
-          }),
+        app.streambundle.getBus('navigation.position').onValue((update: ContextPosition): void => {
+          if (!update.value || update.value.latitude == null || update.value.longitude == null) return
+          tracks?.newPosition(update.context, [update.value.latitude, update.value.longitude])
+        }),
       )
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const theMaxAge = isNumeric(maxAge) ? parseFloat(maxAge as any) : DEFAULT_MAX_AGE
+      const theMaxAge = toNumber(maxAge) ?? DEFAULT_MAX_AGE
 
-      const pruneInterval = setInterval(tracks.prune.bind(tracks, theMaxAge * 1000), (theMaxAge * 1000) / 2)
+      const pruneInterval = setInterval(() => tracks?.prune(theMaxAge * 1000), (theMaxAge * 1000) / 2)
       onStop.push(() => {
         clearInterval(pruneInterval)
       })
 
       // Bootstrap self track from History API (async, non-blocking)
       if (config.bootstrapFromHistory !== false) {
-        bootstrapSelfTrack(app, tracks, config).catch(function (err) {
-          app.error('Unexpected error in track bootstrap: ' + err)
+        bootstrapSelfTrack(app, tracks, config).catch((err: unknown) => {
+          app.error(`Unexpected error in track bootstrap: ${errorDetail(err)}`)
         })
       }
     },
@@ -309,9 +300,9 @@ export default function ThePlugin(app: App): Plugin {
           notAvailable(res)
           return
         }
-        const context = resolveContext(req.params.vesselId, app.selfContext)
+        const context = resolveContext(String(req.params.vesselId), app.selfContext)
         tracks
-          ?.get(context)
+          .get(context)
           .then((coordinates: LatLngTuple[]) => {
             res.json({
               type: 'MultiLineString',
@@ -323,7 +314,7 @@ export default function ThePlugin(app: App): Plugin {
             res.json({ message: `No track available for ${context}` })
           })
       }
-      router.get('/vessels/:vesselId/track', trackHandler.bind(this))
+      router.get('/vessels/:vesselId/track', trackHandler)
 
       // return all / filtered vessel tracks
       const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
@@ -333,7 +324,7 @@ export default function ThePlugin(app: App): Plugin {
           return
         }
         tracks
-          ?.getFilteredTracks(validateParameters(req.query, defaultMaxRadius), getVesselPosition(), app.debug)
+          .getFilteredTracks(validateParameters(req.query, defaultMaxRadius), getVesselPosition(), app.debug)
           .then((tc: TrackCollection) => {
             const trks = Object.entries(tc).reduce<AllTracksResult>((acc, [context, track]) => {
               acc[context] = {
@@ -349,8 +340,10 @@ export default function ThePlugin(app: App): Plugin {
             res.json({ message: `No track available for vessels.` })
           })
       }
-      router.get('/tracks', allTracksHandler.bind(this))
-      router.get('/tracks/*', allTracksHandler.bind(this))
+      router.get('/tracks', allTracksHandler)
+      // Express 4 path syntax: the Signal K server mounts plugin routers on
+      // express 4, where a bare `*` is the wildcard (express 5 renamed it).
+      router.get('/tracks/*', allTracksHandler)
 
       return router
     },
@@ -396,5 +389,6 @@ export default function ThePlugin(app: App): Plugin {
   }
 }
 
-export class Tracks extends Tracks_ {}
-export class TrackAccumulator extends TrackAccumulator_ {}
+export { Tracks, TrackAccumulator } from './tracks.js'
+export type { TracksConfig } from './tracks.js'
+export type * from './types.js'
