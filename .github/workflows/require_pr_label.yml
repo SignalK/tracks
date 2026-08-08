@@ -35,8 +35,12 @@ jobs:
           mode: exactly
           count: 1
           labels: 'feature, enhancement, fix, bug, documentation, dependencies, skip-changelog'
+          # {{ applied }} lists the labels the PR currently has. Note
+          # {{ errorString }} is only the quantifier — "exactly", "at least",
+          # "at most" — so it reads as nonsense outside a phrase like
+          # "requires {{ errorString }} {{ count }} of".
           message: >
-            This PR needs exactly one release-notes label, and has {{ errorString }}.
+            This PR needs exactly one release-notes label, and has: {{ applied }}.
             Pick the section it should appear under in the release notes:
             feature/enhancement, fix/bug, documentation, dependencies —
             or skip-changelog if it should not appear at all.
