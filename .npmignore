@@ -4,3 +4,5 @@ module
 # Repo tooling — not part of the published plugin.
 .github
 .gitattributes
+AGENTS.md
+CLAUDE.md
