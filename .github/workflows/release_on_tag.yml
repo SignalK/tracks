@@ -6,18 +6,14 @@
 # so release notes come from the commit history rather than a
 # hand-maintained CHANGELOG file.
 #
-# Only v* tags (the published plugin wrapper) produce a Release.
-# The repo also carries m* tags for the @signalk/tracks module, but
-# the two streams interleave chronologically — m2.0.1 sits between
-# v2.0.1 and v2.0.2 — and generate_release_notes picks the previous
-# tag across all of them, so releasing both prefixes would give each
-# one a diff measured against the other's tag. Since both packages
-# are cut from the same commits, the v* stream alone describes the
-# history without double-reporting it.
+# Only v* tags produce a Release. The repo also carries historical m*
+# tags from when @signalk/tracks was published as a separate module;
+# generate_release_notes picks the previous tag across all of them, so
+# those older m* tags still bound the diff for the first v* release cut
+# after this comment was written.
 #
-# Publishing to npm stays manual: the two packages version
-# independently, so one tag cannot express which to publish, and a
-# mis-tagged push should not be able to publish on its own.
+# Publishing to npm stays manual, so a mis-tagged push cannot publish
+# on its own.
 # ─────────────────────────────────────────────────────────────
 
 name: Release on tag

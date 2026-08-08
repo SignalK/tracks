@@ -4,43 +4,44 @@ Track accumulation for Signal K: an in-memory sliding window of vessel positions
 
 These guidelines are written for AI coding assistants, but they apply equally to human contributors. Where something looks overly specific, it's a guardrail for AI tools — humans should use judgment and follow the spirit.
 
-## Two packages, one repo
+## One package
 
-| Path | Package | What |
-|------|---------|------|
-| `module/` | `@signalk/tracks` | The implementation: the RxJS accumulator, the plugin, the API routes, and a client-side `TrackAccumulator` |
-| `/` (root) | `@signalk/tracks-plugin` | A four-line wrapper whose entire body is `module.exports = require('@signalk/tracks').default` |
+The repo publishes a single package, `@signalk/tracks-plugin`: the position accumulator, the plugin, the API routes, and a client-side `TrackAccumulator`.
 
-The root package is what users install from the App Store; `module/` is what it depends on. They version **independently** — the tag list carries `v<version>` for the wrapper and `m<version>` for the module.
+It was formerly two — a `module/` workspace publishing `@signalk/tracks` plus a four-line root wrapper — which is why the tag list carries historical `m<version>` tags alongside `v<version>`. Only `v*` tags are cut now.
 
-`module/` is declared as an npm workspace, so a single `npm ci` at the root installs both. That matters beyond convenience: CI sandboxes and the Signal K plugin registry run build and test steps **without network access**, so anything not installed by that one root install isn't available when the build runs.
-
-The published wrapper tarball is four files (`index.js`, `package.json`, `README.md`, `LICENSE`). If you change packaging, verify with `npm pack --dry-run` that `module/` hasn't leaked in.
+The package is **ESM only** (`"type": "module"`) and ships only `dist/`.
 
 ## Build and test
 
 ```bash
-npm ci          # installs root + module/ (workspace)
-npm run build   # tsc in module/
-npm test        # mocha in module/
+npm ci
+npm run build      # vite library build -> dist/index.js + rolled-up index.d.ts
+npm test           # vitest
+npm run typecheck  # tsc --noEmit (the build itself does not typecheck)
+npm run lint       # eslint flat config
+npm run format     # prettier --write
 ```
 
-Both root scripts delegate to the `module/` workspace. `tsconfig.json` sets `strict`; keep it on.
+`tsconfig.json` is strict and then some — `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitReturns`, `noUnusedLocals`. Keep them on; they caught real bugs when they went in.
+
+Vite transpiles without type checking, so **`npm run build` passing does not mean the types are sound.** CI runs `typecheck` separately and so should you.
 
 ## Architecture
 
 - **Storage is in-memory and bounded.** `Tracks` keeps a `TrackAccumulator` per context, each fed by an RxJS `scan` that slices its buffer to `pointsToKeep`. Nothing is written to disk. A server restart loses every track that isn't re-hydrated at startup.
 - **History is the persistence story.** `bootstrapSelfTrack()` calls `app.getHistoryApi()` on startup and refills the buffer from a history provider (signalk-questdb, signalk-to-influxdb2, …). Retries are deliberately patient — a cold boot may need minutes before a provider answers — and it gives up quietly after `BOOTSTRAP_MAX_NO_PROVIDER` "no provider" replies, because most installs have none. **The plugin must stay fully functional with no history provider installed.**
-- **`/tracks` is a spatial query.** `radius` and `bbox` filter by *last* track position. This is the one thing the core v2 History API cannot answer — it has no spatial predicate — and it's the reason this plugin exists as more than a cache.
+- **`/tracks` is a spatial query.** `radius` and `bbox` filter by _last_ track position. This is the one thing the core v2 History API cannot answer — it has no spatial predicate — and it's the reason this plugin exists as more than a cache.
 - **Contexts are fully qualified.** Positions are accumulated under the context carried by the delta, which for the own vessel is `vessels.urn:mrn:...`, never `vessels.self`. Resolve the `self` alias against `app.selfContext` before any lookup — forgetting this is [#18](https://github.com/SignalK/tracks/issues/18).
 - **Coordinate order flips at the boundary.** Internally positions are `[lat, lng]` (`LatLngTuple`); GeoJSON output is `[lng, lat]` via `toLngLat`. Check which side of that boundary you're on before "fixing" an order that looks wrong.
+- **`throttleTime` thins on the leading edge.** A burst of positions inside one `resolution` window contributes exactly one point, and the rest are dropped, not buffered. Tests that feed positions synchronously see a single point unless they advance fake timers past `resolution`.
 
 ## Code quality
 
 - **Scope discipline.** Make only the change requested or clearly necessary. A bug fix doesn't need the surrounding code cleaned up.
-- **Self-documenting code.** Comments explain *why*, not *what*. No echo comments.
-- **TypeScript with real types.** Avoid `any`. Prefer a pure, testable helper in `utils.ts` over logic inlined in a route handler — that's what makes it reachable from `utils.test.ts`.
-- **Tests.** New behaviour needs a test in `module/src/*.test.ts`. Test behaviour, not implementation.
+- **Self-documenting code.** Comments explain _why_, not _what_. No echo comments.
+- **TypeScript with real types.** Avoid `any`; prefer `unknown` plus narrowing at the boundary. Prefer a pure, testable helper in `utils.ts` over logic inlined in a route handler — that's what makes it reachable from `utils.test.ts`.
+- **Tests.** New behaviour needs a test in `src/*.test.ts`. Test behaviour, not implementation.
 
 ## Contributing
 
@@ -52,7 +53,10 @@ Both root scripts delegate to the `module/` workspace. `tsconfig.json` sets `str
 
 ## Traps worth knowing
 
-- **`npm test` used to fail on a clean checkout.** ts-node 9 can't drive TypeScript ≥ 4.7 (it calls `resolveTypeReferenceDirective` with the old signature) and mocha dies before loading a test. Fixed by moving to ts-node 10 — if you see that error again, check whether something pinned it back.
-- **`@types/node` is unpinned and transitive,** arriving via `@types/express`. A TypeScript too old to parse the current `@types/node` produces ~50 errors that all point into `node_modules` and none at your code. Read the paths before you start debugging your own change.
-- **The README documents the wrong path for a single vessel.** It says `/signalk/v1/api/tracks/<vesselId>`; the route is `/signalk/v1/api/vessels/<vesselId>/track` ([#12](https://github.com/SignalK/tracks/issues/12)).
-- **Releases only fire on `v*` tags.** The `m*` module tags interleave chronologically with `v*`, and `generate_release_notes` picks the previous tag across all of them, so releasing both prefixes would measure each against the other's tag.
+- **`main` is load-bearing, despite `exports`.** The Signal K server resolves an installed plugin _by directory_ ([`importOrRequire`](https://github.com/SignalK/signalk-server/blob/master/src/modules.ts)). Node's CJS directory resolution reads `main`, not `exports`, and so does the server's `esm-resolve` fallback — with `exports` alone the resolver returns `undefined` and the plugin fails to load with a bare `MODULE_NOT_FOUND`. Keep both fields pointing at `dist/index.js`.
+- **ESM-only needs Node >= 20.19.** That is the release where `require()` learned to load ES modules; below it the server's loader path cannot reach this plugin. Hence `engines.node`.
+- **The plugin must keep a default export.** The server's `import()` fallback returns `module.default` with no `?? mod`, so a named-only export loads as `undefined`.
+- **The Signal K server runs express 4.** Route patterns use express 4 syntax — a bare `*` wildcard, not express 5's `*splat`. Pin `@types/express` to v4 so the types match the runtime.
+- **Publish only `dist/`.** `files` in `package.json` is an allowlist; the package once shipped at 174 MB unpacked because a denylist `.npmignore` failed to exclude `node_modules`. Verify with `npm pack --dry-run` — expect a handful of files and tens of KB.
+- **`connectable()` resets by default.** rxjs 7 replaced `publishReplay` + `ConnectableObservable`; its `connectable()` defaults to `resetOnDisconnect: true`, which would drop the accumulated buffer when the last subscriber leaves. The explicit `resetOnDisconnect: false` preserves the old behaviour and a test pins it.
+- **The README used to document the wrong path for a single vessel** ([#12](https://github.com/SignalK/tracks/issues/12)) — the route is `/signalk/v1/api/vessels/<vesselId>/track`, not `/signalk/v1/api/tracks/<vesselId>`.
