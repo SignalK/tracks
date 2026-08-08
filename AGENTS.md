@@ -48,7 +48,7 @@ Vite transpiles without type checking, so **`npm run build` passing does not mea
 - **One logical change per PR.** Refactors and behaviour changes go in separate PRs.
 - **Angular conventional commits:** `<type>(<scope>): <subject>` — `feat | fix | docs | ci | chore | refactor | test | perf`. Imperative, no trailing period.
 - **PR titles become release notes.** Releases are generated from merged PR titles by `.github/workflows/release_on_tag.yml`, so write the title as the line you'd want a user to read in the changelog. There is no CHANGELOG file to maintain.
-- **Label the PR so it lands in the right section.** `.github/release.yml` groups the notes: `feature`/`enhancement` → 🚀 Features, `bug`/`fix` → 🐛 Fixes, `documentation` → 📖 Documentation, `dependencies` → 📦 Dependencies. An unlabelled PR still appears, under Other. `skip-changelog` omits it entirely — for changes with nothing to tell a user.
+- **Every PR needs exactly one release-notes label**, enforced by `.github/workflows/require_pr_label.yml`. `.github/release.yml` groups the notes: `feature`/`enhancement` → 🚀 Features, `bug`/`fix` → 🐛 Fixes, `documentation` → 📖 Documentation, `dependencies` → 📦 Dependencies. `skip-changelog` omits the PR entirely — for changes with nothing to tell a user. The two files list the same labels on purpose: adding one to the gate without a matching category in `release.yml` puts the PR back in the uncategorised "Other" bucket the gate exists to prevent.
 - **Branch from latest `main`.** Hyphens in branch names, not slashes.
 - **CI must be green.** `.github/workflows/signalk-ci.yml` calls the canonical `SignalK/signalk-server` reusable workflow across Linux x64/arm64, macOS and Windows on Node 22 and 24.
 
