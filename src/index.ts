@@ -15,7 +15,10 @@
 
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
+import { join } from 'node:path'
 import { Tracks as Tracks_ } from './tracks.js'
+import { SqliteTrackStore } from './sqliteStore.js'
+import type { TrackStore } from './store.js'
 import { parseTrackQuery, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types.js'
@@ -67,6 +70,8 @@ interface App {
   }
   getSelfPath: (path: string) => unknown
   selfContext: string
+  /** Plugin-private directory for persistent data; absent on older servers. */
+  getDataDirPath?: () => string
   /** Resolves the named provider, or the configured default when omitted. */
   getHistoryApi?: (providerId?: string) => Promise<HistoryApi>
   config?: {
@@ -91,15 +96,48 @@ interface Plugin {
    * position bus, which throttles against the wall clock. The Signal K server
    * does not use this.
    */
-  getTracks: () => Tracks_ | undefined
+  getTracks: () => TrackStore | undefined
 }
+
+/**
+ * Where tracks come from when the server starts.
+ *
+ * - `memory`: start empty, accumulate from the position bus only.
+ * - `history`: refill from a History provider at startup, then accumulate.
+ * - `sqlite`: persist to disk, so a restart resumes from what was recorded.
+ *
+ * One setting rather than a boolean per source: they are alternatives, and as
+ * independent booleans a user could enable two and have the same positions
+ * loaded twice.
+ */
+export type TrackSource = 'memory' | 'history' | 'sqlite'
 
 interface TracksPluginConfig {
   resolution?: number
   pointsToKeep?: number
   maxAge?: number
   maxRadius?: number
+  source?: TrackSource
+  /** @deprecated superseded by `source`; still honoured for existing configs. */
   bootstrapFromHistory?: boolean
+  /** Days of history to keep when `source` is `sqlite`. 0 keeps everything. */
+  retentionDays?: number
+}
+
+/**
+ * Resolve the effective source, honouring the setting this replaced.
+ *
+ * `bootstrapFromHistory` shipped as a boolean defaulting to true, so an
+ * installed plugin has it saved in its config either way. Reading `source`
+ * first and only then falling back keeps those installs working: an explicit
+ * `false` still means "do not touch the History API", and everything else
+ * lands on the old default of `history`.
+ */
+export const resolveSource = (config: TracksPluginConfig): TrackSource => {
+  if (config.source) {
+    return config.source
+  }
+  return config.bootstrapFromHistory === false ? 'memory' : 'history'
 }
 
 const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
@@ -185,7 +223,7 @@ const historyRowTimestamp = (row: unknown): number => {
   return Number.isNaN(parsed) ? 0 : parsed
 }
 
-async function bootstrapSelfTrack(app: App, tracks: Tracks_, config: TracksPluginConfig): Promise<void> {
+async function bootstrapSelfTrack(app: App, tracks: TrackStore, config: TracksPluginConfig): Promise<void> {
   const { debug } = app
   const getHistoryApi = app.getHistoryApi
 
@@ -312,7 +350,7 @@ async function bootstrapSelfTrack(app: App, tracks: Tracks_, config: TracksPlugi
 
 export default function ThePlugin(app: App): Plugin {
   let onStop: (() => void)[] = []
-  let tracks: Tracks_ | undefined = undefined
+  let tracks: TrackStore | undefined = undefined
   let defaultMaxRadius: number | undefined = undefined
 
   function getVesselPosition(): LatLngTuple | undefined {
@@ -330,13 +368,34 @@ export default function ThePlugin(app: App): Plugin {
     start: function (config: TracksPluginConfig) {
       const { resolution, pointsToKeep, maxAge, maxRadius } = config
       defaultMaxRadius = toNumber(maxRadius)
-      tracks = new Tracks_(
-        {
-          resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
-          pointsToKeep: toNumber(pointsToKeep) ?? DEFAULT_POINTS_TO_KEEP,
-        },
-        app.debug,
-      )
+      const source = resolveSource(config)
+
+      // getDataDirPath is what makes the file the server's to manage (backed up
+      // and removed with the plugin). Without it there is nowhere safe to
+      // write, so fall back to memory rather than guessing at a path.
+      const dataDir = source === 'sqlite' ? app.getDataDirPath?.() : undefined
+      if (source === 'sqlite' && !dataDir) {
+        app.error('source is sqlite but this server provides no plugin data directory; using memory instead')
+      }
+
+      // Always a fresh store, as before this setting existed: a restart must
+      // not keep an accumulator built with a resolution the user has since
+      // changed, and for sqlite the previous handle has been closed by stop().
+      tracks = dataDir
+        ? new SqliteTrackStore(
+            {
+              file: join(dataDir, 'tracks.db'),
+              retention: (toNumber(config.retentionDays) ?? 0) * 24 * 60 * 60 * 1000,
+            },
+            app.debug,
+          )
+        : new Tracks_(
+            {
+              resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
+              pointsToKeep: toNumber(pointsToKeep) ?? DEFAULT_POINTS_TO_KEEP,
+            },
+            app.debug,
+          )
       onStop.push(
         app.streambundle.getBus('navigation.position').onValue((update: ContextPosition): void => {
           if (!update.value || update.value.latitude == null || update.value.longitude == null) return
@@ -357,8 +416,10 @@ export default function ThePlugin(app: App): Plugin {
         clearInterval(pruneInterval)
       })
 
-      // Bootstrap self track from History API (async, non-blocking)
-      if (config.bootstrapFromHistory !== false) {
+      // Bootstrap self track from History API (async, non-blocking).
+      // Only for `history`: a sqlite store already holds what it recorded, and
+      // refilling it from a provider would duplicate those positions.
+      if (source === 'history') {
         bootstrapSelfTrack(app, tracks, config).catch((err: unknown) => {
           app.error(`Unexpected error in track bootstrap: ${errorDetail(err)}`)
         })
@@ -374,6 +435,18 @@ export default function ThePlugin(app: App): Plugin {
         }
       })
       onStop = []
+      // Release the file handle a sqlite store holds, so a plugin restart does
+      // not leak it and the WAL gets checkpointed.
+      //
+      // The store itself stays in place: stop() leaves the routes mounted and
+      // keeps serving what was already accumulated, which routes.test.ts pins.
+      // Only a store that needs closing is affected, and it is replaced
+      // wholesale on the next start().
+      try {
+        tracks?.close?.()
+      } catch (err) {
+        app.error(err)
+      }
     },
 
     signalKApiRoutes: function (router: Router) {
@@ -489,12 +562,20 @@ export default function ThePlugin(app: App): Plugin {
           description: 'Include only vessels with position within this range. 0= all vessels',
           default: DEFAULT_MAX_RADIUS,
         },
-        bootstrapFromHistory: {
-          type: 'boolean',
-          title: 'Load historical tracks on startup',
+        source: {
+          type: 'string',
+          title: 'Where tracks come from after a restart',
           description:
-            'On startup, load historical position data from the History API (requires a history provider such as signalk-to-influxdb2). Tracks will be available immediately after restart instead of starting empty.',
-          default: true,
+            'In memory only: start empty and accumulate from live positions. History API: refill on startup from a history provider such as signalk-to-influxdb2 or signalk-questdb. SQLite: record positions to a database file so they survive a restart with no other plugin required.',
+          enum: ['memory', 'history', 'sqlite'],
+          enumNames: ['In memory only', 'Load from the History API on startup', 'Record to a SQLite database'],
+          default: 'history',
+        },
+        retentionDays: {
+          type: 'integer',
+          title: 'Days of track history to keep (SQLite only)',
+          description: 'Positions older than this are deleted. 0 keeps everything.',
+          default: 0,
         },
       },
     },
