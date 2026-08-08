@@ -503,4 +503,5 @@ export default function ThePlugin(app: App): Plugin {
 
 export { Tracks, TrackAccumulator } from './tracks.js'
 export type { TracksConfig } from './tracks.js'
+export type { TrackStore } from './store.js'
 export type * from './types.js'
