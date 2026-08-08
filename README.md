@@ -2,11 +2,21 @@
 
 Signal K server plugin that accumulates vessel positions into tracks and implements the track API.
 
-Positions are accumulated into a per-vessel sliding window using a configured time resolution, held
-in memory. On startup the plugin can rehydrate the own vessel's track from a history provider (such
-as `signalk-to-influxdb2` or `signalk-questdb`) so tracks are available immediately after a restart
-instead of starting empty. It works with no history provider installed — tracks simply build up from
-live data.
+Positions are accumulated into a per-vessel sliding window using a configured time resolution. The
+**Where tracks come from after a restart** setting chooses what happens to them:
+
+| Setting   | Behaviour                                                                                                                                                  |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `history` | _(default)_ Held in memory, and the own vessel's track is refilled on startup from a history provider such as `signalk-to-influxdb2` or `signalk-questdb`. |
+| `sqlite`  | Recorded to a database file in the plugin's data directory, so every vessel's track survives a restart with no other plugin required.                      |
+| `memory`  | Held in memory only; tracks start empty after a restart.                                                                                                   |
+
+All three work with no other plugin installed — with `history` and no provider present, tracks simply
+build up from live data. `sqlite` also takes a retention setting, in days, for how long to keep
+positions.
+
+This replaces the earlier `bootstrapFromHistory` checkbox. Existing configurations keep working:
+the setting is still read, with `false` mapping to `memory` and anything else to `history`.
 
 The package also exports a client side `TrackAccumulator` class that manages the track for a single
 vessel, exposing the result as `Observable<LatLngTuple[]>`.
