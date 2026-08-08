@@ -7,6 +7,8 @@
 # hand-maintained CHANGELOG file — and then publishes that same
 # commit to npm.
 #
+# .github/release.yml groups those titles into sections by PR label.
+#
 # Publishing from the tag is what keeps the npm version and the
 # repository in step. Publishing by hand let them drift, which is
 # https://github.com/SignalK/tracks/issues/17.
