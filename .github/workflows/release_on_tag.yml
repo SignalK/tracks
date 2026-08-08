@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────
+# Release on tag
+#
+# Turns a pushed tag into a GitHub Release whose notes are
+# generated from the PR titles merged since the previous tag —
+# so release notes come from the commit history rather than a
+# hand-maintained CHANGELOG file.
+#
+# Only v* tags (the published plugin wrapper) produce a Release.
+# The repo also carries m* tags for the @signalk/tracks module, but
+# the two streams interleave chronologically — m2.0.1 sits between
+# v2.0.1 and v2.0.2 — and generate_release_notes picks the previous
+# tag across all of them, so releasing both prefixes would give each
+# one a diff measured against the other's tag. Since both packages
+# are cut from the same commits, the v* stream alone describes the
+# history without double-reporting it.
+#
+# Publishing to npm stays manual: the two packages version
+# independently, so one tag cannot express which to publish, and a
+# mis-tagged push should not be able to publish on its own.
+# ─────────────────────────────────────────────────────────────
+
+name: Release on tag
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
