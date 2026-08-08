@@ -1,5 +1,23 @@
 import { expect } from 'chai'
-import { createInBounds } from './utils'
+import { createInBounds, resolveContext } from './utils'
+
+const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
+
+describe('resolveContext', () => {
+  it('resolves the self alias to the self context', () => {
+    expect(resolveContext('self', SELF)).to.equal(SELF)
+    expect(resolveContext('vessels.self', SELF)).to.equal(SELF)
+  })
+  it('qualifies a bare vessel id', () => {
+    expect(resolveContext('urn:mrn:imo:mmsi:987654321', SELF)).to.equal('vessels.urn:mrn:imo:mmsi:987654321')
+  })
+  it('leaves an already qualified context alone', () => {
+    expect(resolveContext('vessels.urn:mrn:imo:mmsi:987654321', SELF)).to.equal('vessels.urn:mrn:imo:mmsi:987654321')
+  })
+  it('falls back to the literal id when selfContext is unavailable', () => {
+    expect(resolveContext('self', undefined)).to.equal('vessels.self')
+  })
+})
 
 describe('inBounds', () => {
   it('works for bounds', () => {

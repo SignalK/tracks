@@ -89,6 +89,17 @@ function lastPoint(track: LatLngTuple[]): LatLngTuple | null {
   return track.length ? track[track.length - 1] : null
 }
 
+// Positions are accumulated under the context carried by the delta, which for
+// the own vessel is always the fully qualified context (vessels.urn:mrn:...),
+// never the literal `vessels.self`. Resolve the `self` alias the rest of the
+// Signal K HTTP API accepts so a lookup for it can hit.
+export function resolveContext(vesselId: string, selfContext?: string): string {
+  if ((vesselId === 'self' || vesselId === 'vessels.self') && selfContext) {
+    return selfContext
+  }
+  return vesselId.startsWith('vessels.') ? vesselId : `vessels.${vesselId}`
+}
+
 export function createMatcher(
   params: TrackParams,
   selfPosition?: LatLngTuple,
