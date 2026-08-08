@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────
+# Require a release-notes label on every pull request
+#
+# .github/release.yml groups the generated release notes by label, so an
+# unlabelled PR silently lands in "Other". Every PR merged before this
+# workflow existed did exactly that. Fail the check instead, while the PR is
+# still open and labelling it costs nothing.
+#
+# The accepted labels are exactly the ones release.yml categorises, so a PR
+# that passes this check cannot end up uncategorised. Keep the two in step:
+# adding a label here without a category there reintroduces the silent
+# fallthrough this is meant to prevent.
+# ─────────────────────────────────────────────────────────────
+
+name: Pull Request Labels
+
+on:
+  pull_request:
+    types: [opened, labeled, unlabeled, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Dependabot applies `dependencies` itself, but not before this first runs
+    # on `opened`, so the check would fail and then pass on the relabel. Skip
+    # it: those PRs are categorised by author in release.yml regardless.
+    if: github.actor != 'dependabot[bot]'
+    steps:
+      - uses: mheap/github-action-required-labels@v5
+        with:
+          mode: exactly
+          count: 1
+          labels: 'feature, enhancement, fix, bug, documentation, dependencies, skip-changelog'
+          message: >
+            This PR needs exactly one release-notes label, and has {{ errorString }}.
+            Pick the section it should appear under in the release notes:
+            feature/enhancement, fix/bug, documentation, dependencies —
+            or skip-changelog if it should not appear at all.
