@@ -24,6 +24,34 @@ export function createInBounds(bounds: GeoBounds): (position: LatLngTuple | null
 }
 
 /**
+ * Split a bounds that crosses the antimeridian into two that do not.
+ *
+ * A bounds wraps when its west edge is numerically greater than its east edge
+ * (sw lng 179, ne lng -179): the box runs 179 -> 180 -> -179, the short way
+ * across the Pacific. `createInBounds` handles that directly with its +360
+ * arithmetic, but anything that has to describe the box *geometrically* cannot
+ * — a GeoJSON polygon with those corners is read as a band going the long way
+ * round, and an S2 covering of it comes back empty, which turns "vessels near
+ * Fiji" into a silent no results rather than an error.
+ *
+ * Returns one bounds unchanged when there is no wrap, so callers can always
+ * iterate the result.
+ */
+export function splitAtAntimeridian(bounds: GeoBounds): GeoBounds[] {
+  const west = bounds.sw[LNG]
+  const east = bounds.ne[LNG]
+  if (west <= east) {
+    return [bounds]
+  }
+  const south = bounds.sw[LAT]
+  const north = bounds.ne[LAT]
+  return [
+    { sw: [south, west], ne: [north, 180] },
+    { sw: [south, -180], ne: [north, east] },
+  ]
+}
+
+/**
  * Express gives a repeated query parameter as an array. Take the first value so
  * `?radius=1&radius=2` degrades to a usable number rather than a parse failure.
  */

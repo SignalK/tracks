@@ -1,19 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import { Tracks } from './tracks.js'
+import { SqliteTrackStore } from './sqliteStore.js'
 import type { TrackStore } from './store.js'
 import type { Context } from './types.js'
 
 const debug = Object.assign(() => {}, { enabled: false })
 const ctx = 'vessels.urn:mrn:signalk:uuid:test' as Context
 
-const newStore = (): TrackStore => new Tracks({ resolution: 0, pointsToKeep: 100 }, debug)
-
 /**
  * Contract tests for TrackStore, written against the interface rather than the
- * class. A second implementation should be able to run this same suite — which
- * is the point of extracting the interface at all.
+ * class, and run against every implementation. Divergence between the two
+ * stores is the failure mode this suite exists to catch: a user switching
+ * `source` should not see their tracks answer differently.
  */
-describe('TrackStore contract', () => {
+const implementations: [string, () => TrackStore][] = [
+  ['Tracks (in-memory)', () => new Tracks({ resolution: 0, pointsToKeep: 100 }, debug)],
+  ['SqliteTrackStore (:memory:)', () => new SqliteTrackStore({ file: ':memory:' }, debug)],
+]
+
+describe.each(implementations)('TrackStore contract: %s', (_name, newStore) => {
   it('reads back a recorded position', async () => {
     const store = newStore()
     store.newPosition(ctx, [60, 25], 1000)
