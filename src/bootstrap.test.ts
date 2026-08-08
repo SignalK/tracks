@@ -139,6 +139,84 @@ describe('bootstrap from the History API', () => {
   })
 })
 
+describe('provider selection', () => {
+  /**
+   * The server's default history provider falls back to whichever plugin
+   * registered first until the configured one is up. An early bootstrap could
+   * therefore be answered by a provider with no positions — verified on a live
+   * server, where `kip` answered with 0 rows while signalk-questdb held 121.
+   */
+  it('asks for the configured provider by name', async () => {
+    const asked: (string | undefined)[] = []
+    const debug: Debug = Object.assign(() => undefined, { enabled: false })
+    vi.useFakeTimers()
+    const plugin = ThePlugin({
+      debug,
+      error: () => undefined,
+      selfContext: SELF,
+      getSelfPath: () => undefined,
+      streambundle: { getBus: () => ({ onValue: () => () => undefined }) },
+      config: { settings: { historyApi: { defaultProvider: 'signalk-questdb' } } },
+      getHistoryApi: (providerId?: string) => {
+        asked.push(providerId)
+        return Promise.resolve({
+          getValues: () =>
+            Promise.resolve({
+              context: SELF,
+              range: { from: '', to: '' },
+              values: [],
+              data: [['2026-08-08T16:34:00.000000Z', { latitude: 1, longitude: 1 }]],
+            }),
+        })
+      },
+    })
+    plugin.start({ resolution: 0, pointsToKeep: 10, maxAge: 600, bootstrapFromHistory: true })
+    stop = () => plugin.stop()
+    await vi.advanceTimersByTimeAsync(6000)
+
+    expect(asked).toEqual(['signalk-questdb'])
+  })
+
+  it('retries when a provider answers with no data instead of giving up', async () => {
+    let call = 0
+    const debug: Debug = Object.assign(() => undefined, { enabled: false })
+    vi.useFakeTimers()
+    const plugin = ThePlugin({
+      debug,
+      error: () => undefined,
+      selfContext: SELF,
+      getSelfPath: () => undefined,
+      streambundle: { getBus: () => ({ onValue: () => () => undefined }) },
+      getHistoryApi: () =>
+        Promise.resolve({
+          getValues: () => {
+            call++
+            // first answer is empty, as a not-yet-ready provider gives
+            return Promise.resolve({
+              context: SELF,
+              range: { from: '', to: '' },
+              values: [],
+              data: call === 1 ? [] : [['2026-08-08T16:34:00.000000Z', { latitude: 5, longitude: 5 }]],
+            })
+          },
+        }),
+    })
+    plugin.start({ resolution: 0, pointsToKeep: 10, maxAge: 600, bootstrapFromHistory: true })
+    stop = () => plugin.stop()
+
+    const app = express()
+    app.use(API, plugin.signalKApiRoutes(express.Router()))
+
+    await vi.advanceTimersByTimeAsync(6000) // first attempt: empty
+    await vi.advanceTimersByTimeAsync(16000) // retry: has data
+    vi.useRealTimers()
+
+    expect(call).toBeGreaterThan(1)
+    const res = await request(app).get(`${API}/self/track`).expect(200)
+    expect(coords(res.body)).toEqual([[5, 5]])
+  })
+})
+
 describe('bootstrap resilience', () => {
   it('does not throw when the server has no History API', async () => {
     const debug: Debug = Object.assign(() => undefined, { enabled: false })

@@ -67,7 +67,13 @@ interface App {
   }
   getSelfPath: (path: string) => unknown
   selfContext: string
-  getHistoryApi?: () => Promise<HistoryApi>
+  /** Resolves the named provider, or the configured default when omitted. */
+  getHistoryApi?: (providerId?: string) => Promise<HistoryApi>
+  config?: {
+    settings?: {
+      historyApi?: { defaultProvider?: string }
+    }
+  }
 }
 
 interface Plugin {
@@ -193,6 +199,8 @@ async function bootstrapSelfTrack(app: App, tracks: Tracks_, config: TracksPlugi
     return
   }
 
+  const configuredProvider = app.config?.settings?.historyApi?.defaultProvider
+
   const resolution = toNumber(config.resolution) ?? DEFAULT_RESOLUTION
   const pointsToKeep = toNumber(config.pointsToKeep) ?? DEFAULT_POINTS_TO_KEEP
   const timespanMs = resolution * pointsToKeep
@@ -212,7 +220,12 @@ async function bootstrapSelfTrack(app: App, tracks: Tracks_, config: TracksPlugi
     await sleep(delay)
 
     try {
-      const historyApi = await getHistoryApi()
+      // Ask for the configured provider by name. Without this the server hands
+      // back whichever provider registered first until the configured one is
+      // up, and an early bootstrap gets answered by a plugin that has no
+      // positions — indistinguishable from "no history exists". Naming it makes
+      // the not-yet-registered case a rejection, which the retry loop handles.
+      const historyApi = await getHistoryApi(configuredProvider)
       noProviderCount = 0 // provider resolved — reset counter
 
       const to = new Date()
@@ -253,8 +266,21 @@ async function bootstrapSelfTrack(app: App, tracks: Tracks_, config: TracksPlugi
         }
       }
 
-      debug('History API returned no position data for bootstrap')
-      return // API responded successfully but no data — do not retry
+      // An empty response is not proof there is no history. The server's
+      // default history provider falls back to whichever plugin registered
+      // first until the configured one is up, so an early bootstrap can be
+      // answered by the wrong provider — one that legitimately has no
+      // positions. Retrying costs a few seconds and is the difference between
+      // a restored track and an empty one.
+      debug(
+        `History API returned no position data on attempt ${attempt}/${BOOTSTRAP_MAX_ATTEMPTS}; ` +
+          'the configured provider may not have registered yet',
+      )
+      if (attempt === BOOTSTRAP_MAX_ATTEMPTS) {
+        debug('History API returned no position data for bootstrap')
+        return
+      }
+      continue
     } catch (err) {
       if (isNoProviderError(err)) {
         noProviderCount++
