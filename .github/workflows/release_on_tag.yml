@@ -1,19 +1,20 @@
 # ─────────────────────────────────────────────────────────────
-# Release on tag
+# Release and publish on tag
 #
-# Turns a pushed tag into a GitHub Release whose notes are
+# Turns a pushed v* tag into a GitHub Release whose notes are
 # generated from the PR titles merged since the previous tag —
 # so release notes come from the commit history rather than a
-# hand-maintained CHANGELOG file.
+# hand-maintained CHANGELOG file — and then publishes that same
+# commit to npm.
 #
-# Only v* tags produce a Release. The repo also carries historical m*
-# tags from when @signalk/tracks was published as a separate module;
-# generate_release_notes picks the previous tag across all of them, so
-# those older m* tags still bound the diff for the first v* release cut
-# after this comment was written.
+# Publishing from the tag is what keeps the npm version and the
+# repository in step. Publishing by hand let them drift, which is
+# https://github.com/SignalK/tracks/issues/17.
 #
-# Publishing to npm stays manual, so a mis-tagged push cannot publish
-# on its own.
+# The repo also carries historical m* tags from when @signalk/tracks
+# was published as a separate module; generate_release_notes picks the
+# previous tag across all of them, so those older m* tags still bound
+# the diff for the first v* release cut after this comment was written.
 # ─────────────────────────────────────────────────────────────
 
 name: Release on tag
@@ -43,3 +44,50 @@ jobs:
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    needs: release
+    permissions:
+      # Trusted publishing: npm exchanges this token for publish rights, so no
+      # NPM_TOKEN secret is needed and the tarball carries a provenance
+      # attestation. Requires package.json `repository.url` to match this repo.
+      id-token: write
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      # The published tarball is built here, so make sure nothing from the
+      # runner image or a previous step leaks into it.
+      - name: Clean workspace
+        run: git clean -xfd
+
+      # Node 24 bundles npm 11, which is the first line that performs the OIDC
+      # token exchange. Older npm skips it silently and the publish 404s.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      # prepublishOnly runs typecheck, lint and build, so a tag that does not
+      # compile cannot reach the registry.
+      - name: Verify the tag matches package.json
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $PKG"
+            exit 1
+          fi
+          echo "tag and package.json agree on $PKG"
+
+      - name: Publish
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == *-beta.* || "${GITHUB_REF_NAME}" == *-rc.* || "${GITHUB_REF_NAME}" == *-alpha.* ]]; then
+            npm publish --provenance --access public --tag next
+          else
+            npm publish --provenance --access public
+          fi
