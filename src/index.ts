@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
 import { Tracks as Tracks_ } from './tracks.js'
 import { parseTrackQuery, thin, TimeWindowError } from './timeWindow.js'
@@ -38,8 +39,8 @@ interface AllTracksResult {
 // Defined locally to avoid a hard dependency on a specific server-api version
 interface HistoryValuesQuery {
   context: string
-  from: string
-  to: string
+  from: Temporal.Instant
+  to: Temporal.Instant
   pathSpecs: { path: string; aggregate: string }[]
   resolution: number
 }
@@ -144,14 +145,39 @@ const isNoProviderError = (err: unknown): boolean => {
   return text.includes('No history') && text.includes('provider')
 }
 
-/** History API rows are [timestamp, [lon, lat]]; keep only well-formed ones. */
-const isHistoryPositionRow = (row: unknown): row is [string, [number, number]] =>
-  Array.isArray(row) &&
-  row.length >= 2 &&
-  Array.isArray(row[1]) &&
-  row[1].length === 2 &&
-  typeof row[1][0] === 'number' &&
-  typeof row[1][1] === 'number'
+/**
+ * A history row is `[timestamp, position]`. Providers disagree on how the
+ * position is encoded: signalk-questdb returns `{latitude, longitude}`, while
+ * a `[lon, lat]` pair is the shape the History API's own docs describe. Accept
+ * both — rejecting either silently bootstraps an empty track.
+ */
+const historyRowPosition = (row: unknown): LatLngTuple | undefined => {
+  if (!Array.isArray(row) || row.length < 2) {
+    return undefined
+  }
+  const value: unknown = row[1]
+  if (Array.isArray(value) && value.length === 2 && typeof value[0] === 'number' && typeof value[1] === 'number') {
+    // [lon, lat] -> [lat, lng]
+    return [value[1], value[0]]
+  }
+  if (value && typeof value === 'object' && 'latitude' in value && 'longitude' in value) {
+    const { latitude, longitude } = value as Partial<Position>
+    if (typeof latitude === 'number' && typeof longitude === 'number') {
+      return [latitude, longitude]
+    }
+  }
+  return undefined
+}
+
+/** Epoch milliseconds for a history row, or 0 when the timestamp is unusable. */
+const historyRowTimestamp = (row: unknown): number => {
+  const raw: unknown = Array.isArray(row) ? row[0] : undefined
+  if (typeof raw !== 'string') {
+    return 0
+  }
+  const parsed = Date.parse(raw)
+  return Number.isNaN(parsed) ? 0 : parsed
+}
 
 async function bootstrapSelfTrack(app: App, tracks: Tracks_, config: TracksPluginConfig): Promise<void> {
   const { debug } = app
@@ -192,24 +218,30 @@ async function bootstrapSelfTrack(app: App, tracks: Tracks_, config: TracksPlugi
       const to = new Date()
       const from = new Date(to.getTime() - timespanMs)
 
+      // The History API hands providers Temporal.Instant values, not strings —
+      // see parseTimeRangeParams in signalk-server. Providers call Instant
+      // methods on them (signalk-questdb does `from.add(duration)`), so passing
+      // ISO strings here yields a query that silently returns the wrong range.
       const response = await historyApi.getValues({
         context: app.selfContext,
-        from: from.toISOString(),
-        to: to.toISOString(),
+        from: Temporal.Instant.from(from.toISOString()),
+        to: Temporal.Instant.from(to.toISOString()),
         pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
         resolution: resolutionSecs,
       })
 
       if (response?.data && response.data.length > 0) {
-        // History API returns [timestamp, [lon, lat]]; flip to [lat, lng] for LatLngTuple.
-        const rows = response.data.filter(isHistoryPositionRow)
-        const positions: LatLngTuple[] = rows.map(([, [lon, lat]]): LatLngTuple => [lat, lon])
+        const positions: LatLngTuple[] = []
         // Carry the recorded times through so bootstrapped points answer
         // time-window queries rather than looking infinitely old.
-        const timestamps = rows.map(([time]) => {
-          const parsed = Date.parse(time)
-          return Number.isNaN(parsed) ? 0 : parsed
-        })
+        const timestamps: number[] = []
+        for (const row of response.data) {
+          const position = historyRowPosition(row)
+          if (position) {
+            positions.push(position)
+            timestamps.push(historyRowTimestamp(row))
+          }
+        }
 
         if (positions.length > 0) {
           tracks.initialTrack(app.selfContext, positions, timestamps)
