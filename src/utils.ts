@@ -1,4 +1,4 @@
-import { LatLngTuple, GeoBounds, QueryParameters, TrackParams, Debug } from './types'
+import type { LatLngTuple, GeoBounds, QueryParameters, TrackParams, Debug } from './types.js'
 
 const LAT = 0
 const LNG = 1
@@ -23,27 +23,44 @@ export function createInBounds(bounds: GeoBounds): (position: LatLngTuple | null
   }
 }
 
+/**
+ * Express gives a repeated query parameter as an array. Take the first value so
+ * `?radius=1&radius=2` degrades to a usable number rather than a parse failure.
+ */
+function firstValue(value: unknown): string | undefined {
+  const scalar: unknown = Array.isArray(value) ? (value as unknown[])[0] : value
+  return typeof scalar === 'string' ? scalar : undefined
+}
+
+/** Finite-only parse: rejects '', 'abc' and 'Infinity', all of which Number() lets through or maps to NaN. */
+function toFiniteNumber(value: string): number | undefined {
+  const trimmed = value.trim()
+  if (trimmed === '') {
+    return undefined
+  }
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
 export function validateParameters(params: QueryParameters, defaultMaxRadius: number | undefined): TrackParams {
   // bounding box lon1,lat1,lon2,lat2
   let bbox: GeoBounds | null = null
-  if (typeof params.bbox !== 'undefined') {
-    const b: number[] = params.bbox
-      .split(',')
-      .map((i: string | number) => {
-        if (!isNaN(i as number)) {
-          return parseFloat(i as string)
-        }
-      })
-      .filter((i: number) => {
-        if (typeof i === 'number') return i
-      })
-    bbox = b.length == 4 ? { sw: [b[0], b[1]], ne: [b[2], b[3]] } : null
+  const rawBbox = firstValue(params.bbox)
+  if (rawBbox !== undefined) {
+    const b = rawBbox.split(',').map(toFiniteNumber)
+    // Every one of the four must have parsed; a `0` is a valid coordinate, so
+    // test for undefined rather than truthiness.
+    const [swLat, swLng, neLat, neLng] = b
+    if (b.length === 4 && swLat !== undefined && swLng !== undefined && neLat !== undefined && neLng !== undefined) {
+      bbox = { sw: [swLat, swLng], ne: [neLat, neLng] }
+    }
   }
 
   let radius: number | null = null
   // radius in meters
-  if (typeof params.radius !== 'undefined') {
-    radius = !isNaN(params.radius) ? parseFloat(params.radius) : null
+  const rawRadius = firstValue(params.radius)
+  if (rawRadius !== undefined) {
+    radius = toFiniteNumber(rawRadius) ?? null
   } else if (defaultMaxRadius) {
     radius = defaultMaxRadius
   }
@@ -74,8 +91,8 @@ export function createDistanceTo([lat1d, lon1d]: LatLngTuple, debug?: Debug): (d
     const a = Math.pow(Math.sin(dlat / 2), 2) + Math.cos(lat1) * Math.cos(lat2) * Math.pow(Math.sin(dlon / 2), 2)
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
     const dk = c * Rk * 1000 // great circle distance in m
-    if (debug && debug.enabled) {
-      debug(`${[lat2d, lon2d]} => ${dk}`)
+    if (debug?.enabled) {
+      debug(`${lat2d},${lon2d} => ${dk}`)
     }
     return dk
   }
@@ -86,7 +103,7 @@ const degreesToRadians = (value: number) => {
 }
 
 function lastPoint(track: LatLngTuple[]): LatLngTuple | null {
-  return track.length ? track[track.length - 1] : null
+  return track.at(-1) ?? null
 }
 
 // Positions are accumulated under the context carried by the delta, which for
@@ -112,8 +129,9 @@ export function createMatcher(
     if (!selfPosition) {
       throw new Error('No self position to calculate radius values')
     }
+    const radius = params.radius
     const distanceFromSelf = createDistanceTo(selfPosition, debug)
-    return (track: LatLngTuple[]) => distanceFromSelf(lastPoint(track)) < (params.radius as number)
+    return (track: LatLngTuple[]) => distanceFromSelf(lastPoint(track)) < radius
   }
   return () => true
 }
