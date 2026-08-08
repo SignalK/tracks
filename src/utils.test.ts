@@ -57,6 +57,21 @@ describe('validateParameters', () => {
     })
   })
 
+  // The parameter is latitude-first, the opposite of the GeoJSON these
+  // endpoints emit. README and the OpenAPI description said lon-first for
+  // years, which silently matched nothing: a latitude of 130 cannot exist, so
+  // the box was valid but empty rather than an error.
+  it('reads the bbox as lat,lon,lat,lon', () => {
+    // South Australia: latitudes -35..-33, longitudes 130..139
+    const { bbox } = validateParameters({ bbox: '-35,130,-33,139' }, undefined)
+
+    expect(bbox).toEqual({ sw: [-35, 130], ne: [-33, 139] })
+
+    const inBounds = createInBounds(bbox!)
+    expect(inBounds([-34, 135])).toBe(true) // inside
+    expect(inBounds([135, -34])).toBe(false) // the same point written lon-first
+  })
+
   it('rejects a bbox that is not four finite numbers', () => {
     expect(validateParameters({ bbox: '1,2,3' }, undefined).bbox).toBeNull()
     expect(validateParameters({ bbox: '1,2,3,abc' }, undefined).bbox).toBeNull()
