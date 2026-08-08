@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { Tracks as Tracks_ } from './tracks.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import type { TrackStore } from './store.js'
-import { parseTrackQuery, thin, TimeWindowError } from './timeWindow.js'
+import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types.js'
 import { resolveContext, validateParameters } from './utils.js'
@@ -122,6 +122,8 @@ interface TracksPluginConfig {
   bootstrapFromHistory?: boolean
   /** Days of history to keep when `source` is `sqlite`. 0 keeps everything. */
   retentionDays?: number
+  /** Minutes without a fix that start a new track segment. 0 disables. */
+  segmentGapMinutes?: number
 }
 
 /**
@@ -146,6 +148,11 @@ const DEFAULT_RESOLUTION = 60000
 const DEFAULT_POINTS_TO_KEEP = 60 * 2 // 2 hours with default resolution
 const DEFAULT_MAX_AGE = 60 * 10 // ten minutes
 const DEFAULT_MAX_RADIUS = 50 * 1000 //50 kilometers
+// Off by default. Segmenting changes the shape of every response, and measured
+// against real AIS traffic a 5-minute rule split 61 of 879 gaps that were just
+// a slow-updating target rather than a stop. Opt in, and pick a threshold that
+// suits the fleet being watched.
+const DEFAULT_SEGMENT_GAP_MINUTES = 0
 
 // Bootstrap retry configuration:
 // First attempt after 5s (sufficient for warm restarts where InfluxDB is already running).
@@ -351,6 +358,7 @@ async function bootstrapSelfTrack(app: App, tracks: TrackStore, config: TracksPl
 export default function ThePlugin(app: App): Plugin {
   let onStop: (() => void)[] = []
   let tracks: TrackStore | undefined = undefined
+  let segmentGap = 0
   let defaultMaxRadius: number | undefined = undefined
 
   function getVesselPosition(): LatLngTuple | undefined {
@@ -369,6 +377,8 @@ export default function ThePlugin(app: App): Plugin {
       const { resolution, pointsToKeep, maxAge, maxRadius } = config
       defaultMaxRadius = toNumber(maxRadius)
       const source = resolveSource(config)
+      const segmentGapMinutes = toNumber(config.segmentGapMinutes) ?? DEFAULT_SEGMENT_GAP_MINUTES
+      segmentGap = segmentGapMinutes > 0 ? segmentGapMinutes * 60 * 1000 : 0
 
       // getDataDirPath is what makes the file the server's to manage (backed up
       // and removed with the plugin). Without it there is nowhere safe to
@@ -387,6 +397,7 @@ export default function ThePlugin(app: App): Plugin {
               file: join(dataDir, 'tracks.db'),
               resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
               retention: (toNumber(config.retentionDays) ?? 0) * 24 * 60 * 60 * 1000,
+              segmentGap,
             },
             app.debug,
           )
@@ -472,7 +483,9 @@ export default function ThePlugin(app: App): Plugin {
             .then((points) => {
               res.json({
                 type: 'MultiLineString',
-                coordinates: [thin(points, query.resolution).map(({ position }) => toLngLat(position))],
+                coordinates: segment(thin(points, query.resolution), segmentGap).map((points) =>
+                  points.map(({ position }) => toLngLat(position)),
+                ),
               })
             })
             .catch(() => {
@@ -577,6 +590,13 @@ export default function ThePlugin(app: App): Plugin {
           title: 'Days of track history to keep (SQLite only)',
           description: 'Positions older than this are deleted. 0 keeps everything.',
           default: 0,
+        },
+        segmentGapMinutes: {
+          type: 'integer',
+          title: 'Split a track after this many minutes without a fix',
+          description:
+            'A gap longer than this starts a new track segment, so a stop overnight or a spell out of AIS range does not draw a straight line across it. 0 (the default) returns the track as a single line, as before. Note that slow-updating AIS targets can legitimately go many minutes between fixes, so a low value will fragment their tracks.',
+          default: DEFAULT_SEGMENT_GAP_MINUTES,
         },
       },
     },
