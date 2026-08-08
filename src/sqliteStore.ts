@@ -85,6 +85,15 @@ interface PositionRow {
 export interface SqliteStoreConfig {
   /** Absolute path to the database file, or ':memory:'. */
   file: string
+  /**
+   * Minimum spacing between stored positions, in ms. 0 stores every one.
+   *
+   * The same `resolution` the in-memory accumulator applies with
+   * `throttleTime`, enforced here on write instead. Without it a boat emitting
+   * position at 8 Hz writes ~700k rows a day rather than the ~1.4k a 60s
+   * resolution implies — a difference that lands on an SD card.
+   */
+  resolution?: number
   /** Drop positions older than this many ms. 0 keeps everything. */
   retention?: number
   /** Cells per bounding box covering. */
@@ -113,12 +122,16 @@ export class SqliteTrackStore implements TrackStore {
   private readonly maxCells: number
   private readonly segmentGap: number
   private readonly retention: number
+  private readonly resolution: number
   private readonly debug: Debug
+  /** Timestamp of the last position stored per context, for throttling. */
+  private readonly lastStored = new Map<string, number>()
 
   constructor(config: SqliteStoreConfig, debug: Debug) {
     this.maxCells = config.maxCells ?? DEFAULT_MAX_CELLS
     this.segmentGap = config.segmentGap ?? DEFAULT_SEGMENT_GAP
     this.retention = config.retention ?? 0
+    this.resolution = config.resolution ?? 0
     this.debug = debug
 
     this.db = new DatabaseSync(config.file)
@@ -140,6 +153,23 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   newPosition(context: Context, position: LatLngTuple, timestamp: number = Date.now()): void {
+    // Leading-edge throttle per context, matching the in-memory accumulator's
+    // throttleTime: the first position in a resolution window is stored and the
+    // rest are dropped, not averaged. A vessel emitting at 8 Hz would otherwise
+    // write hundreds of thousands of rows a day at the default 60s resolution.
+    if (this.resolution > 0) {
+      const previous = this.lastStored.get(context)
+      // `<` not `<=`: two positions sharing a timestamp are the same instant,
+      // and a stored point must not block one that is genuinely later.
+      if (previous !== undefined && timestamp - previous < this.resolution) {
+        return
+      }
+      this.lastStored.set(context, timestamp)
+    }
+    this.store(context, position, timestamp)
+  }
+
+  private store(context: Context, position: LatLngTuple, timestamp: number): void {
     this.insert.run(context, timestamp, position[0], position[1], toSigned(cellIdFor(position)))
   }
 
@@ -147,9 +177,13 @@ export class SqliteTrackStore implements TrackStore {
     // Replaces the context's history, matching the in-memory store: the
     // bootstrap is authoritative for the window it covers.
     this.db.prepare('DELETE FROM positions WHERE context = ?').run(context)
+    // Bypasses the throttle: these points are already at whatever resolution
+    // the history provider returned, and they are back-dated, so throttling
+    // against the newest-seen timestamp would drop most of them.
     for (const [i, position] of track.entries()) {
-      this.newPosition(context, position, timestamps?.[i] ?? 0)
+      this.store(context, position, timestamps?.[i] ?? 0)
     }
+    this.lastStored.delete(context)
   }
 
   private rowsFor(context: Context, window?: TimeWindow): PositionRow[] {

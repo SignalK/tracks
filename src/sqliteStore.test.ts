@@ -96,6 +96,75 @@ describe('splitAtAntimeridian', () => {
   })
 })
 
+describe('resolution', () => {
+  it('stores every position when resolution is 0', async () => {
+    const store = newStore()
+    for (let i = 0; i < 5; i++) {
+      store.newPosition(ctx, [60 + i / 1000, 24], 1000 + i * 10)
+    }
+    await expect(store.get(ctx)).resolves.toHaveLength(5)
+    store.close()
+  })
+
+  it('drops positions inside a resolution window', async () => {
+    // A vessel emitting at 8 Hz would otherwise write hundreds of thousands of
+    // rows a day at the default 60s resolution.
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: 60_000 }, debug)
+    store.newPosition(ctx, [60.0, 24], 0)
+    store.newPosition(ctx, [60.1, 24], 10_000)
+    store.newPosition(ctx, [60.2, 24], 30_000)
+    store.newPosition(ctx, [60.3, 24], 60_000)
+    store.newPosition(ctx, [60.4, 24], 90_000)
+    store.newPosition(ctx, [60.5, 24], 120_000)
+
+    // Leading edge: the first of each window survives, the rest are dropped.
+    await expect(store.get(ctx)).resolves.toEqual([
+      [60.0, 24],
+      [60.3, 24],
+      [60.5, 24],
+    ])
+    store.close()
+  })
+
+  it('throttles each context independently', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: 60_000 }, debug)
+    store.newPosition(ctx, [60, 24], 0)
+    // A different vessel's first position must not be dropped because this one
+    // just recorded.
+    store.newPosition(other, [61, 25], 1000)
+
+    await expect(store.get(ctx)).resolves.toHaveLength(1)
+    await expect(store.get(other)).resolves.toHaveLength(1)
+    store.close()
+  })
+
+  it('does not throttle a bootstrapped track', async () => {
+    // Bootstrap points are back-dated and already at the provider's own
+    // resolution; throttling them against the newest-seen timestamp would drop
+    // almost all of them.
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: 60_000 }, debug)
+    store.initialTrack(
+      ctx,
+      [
+        [60.0, 24],
+        [60.1, 24],
+        [60.2, 24],
+      ],
+      [1000, 2000, 3000],
+    )
+    await expect(store.get(ctx)).resolves.toHaveLength(3)
+    store.close()
+  })
+
+  it('accepts a live position after a bootstrap', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: 60_000 }, debug)
+    store.initialTrack(ctx, [[60.0, 24]], [1000])
+    store.newPosition(ctx, [60.1, 24], 2000)
+    await expect(store.get(ctx)).resolves.toHaveLength(2)
+    store.close()
+  })
+})
+
 describe('segments', () => {
   it('breaks a track where recording stopped', () => {
     const store = newStore()

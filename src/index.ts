@@ -385,6 +385,7 @@ export default function ThePlugin(app: App): Plugin {
         ? new SqliteTrackStore(
             {
               file: join(dataDir, 'tracks.db'),
+              resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
               retention: (toNumber(config.retentionDays) ?? 0) * 24 * 60 * 60 * 1000,
             },
             app.debug,
