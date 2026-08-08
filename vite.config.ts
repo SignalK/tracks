@@ -15,7 +15,7 @@ export default defineConfig({
       fileName: 'index',
     },
     rollupOptions: {
-      external: [/^node:/, 'rxjs', 'rxjs/operators', 'express'],
+      external: [/^node:/, 'rxjs', 'rxjs/operators', 'express', /^typebox/],
     },
     sourcemap: true,
     minify: false,

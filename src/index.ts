@@ -15,12 +15,16 @@
 
 import type { Request, RequestHandler, Response, Router } from 'express'
 import { Tracks as Tracks_ } from './tracks.js'
+import { parseTrackQuery, thin, TimeWindowError } from './timeWindow.js'
+import type { TrackQuery } from './timeWindow.js'
 import type { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types.js'
 import { resolveContext, validateParameters } from './utils.js'
 
 export interface ContextPosition {
   context: Context
   value: Position
+  /** ISO-8601 time the value was recorded, as carried by the Signal K delta. */
+  timestamp?: string
 }
 
 interface AllTracksResult {
@@ -73,6 +77,14 @@ interface Plugin {
   name: string
   description: string
   schema: Record<string, unknown>
+  /**
+   * The live accumulator, or undefined before `start()`.
+   *
+   * Exposed so a track can be installed or inspected without going through the
+   * position bus, which throttles against the wall clock. The Signal K server
+   * does not use this.
+   */
+  getTracks: () => Tracks_ | undefined
 }
 
 interface TracksPluginConfig {
@@ -190,12 +202,17 @@ async function bootstrapSelfTrack(app: App, tracks: Tracks_, config: TracksPlugi
 
       if (response?.data && response.data.length > 0) {
         // History API returns [timestamp, [lon, lat]]; flip to [lat, lng] for LatLngTuple.
-        const positions: LatLngTuple[] = response.data
-          .filter(isHistoryPositionRow)
-          .map(([, [lon, lat]]): LatLngTuple => [lat, lon])
+        const rows = response.data.filter(isHistoryPositionRow)
+        const positions: LatLngTuple[] = rows.map(([, [lon, lat]]): LatLngTuple => [lat, lon])
+        // Carry the recorded times through so bootstrapped points answer
+        // time-window queries rather than looking infinitely old.
+        const timestamps = rows.map(([time]) => {
+          const parsed = Date.parse(time)
+          return Number.isNaN(parsed) ? 0 : parsed
+        })
 
         if (positions.length > 0) {
-          tracks.initialTrack(app.selfContext, positions)
+          tracks.initialTrack(app.selfContext, positions, timestamps)
           debug(
             `Track bootstrap complete: loaded ${positions.length} positions for self ` +
               `(${timespanMinutes} min window) on attempt ${attempt}`,
@@ -265,7 +282,14 @@ export default function ThePlugin(app: App): Plugin {
       onStop.push(
         app.streambundle.getBus('navigation.position').onValue((update: ContextPosition): void => {
           if (!update.value || update.value.latitude == null || update.value.longitude == null) return
-          tracks?.newPosition(update.context, [update.value.latitude, update.value.longitude])
+          // Prefer the delta's own timestamp so a replayed or delayed update is
+          // filed at the time it was recorded, not the time it arrived.
+          const recorded = update.timestamp === undefined ? undefined : Date.parse(update.timestamp)
+          tracks?.newPosition(
+            update.context,
+            [update.value.latitude, update.value.longitude],
+            recorded !== undefined && !Number.isNaN(recorded) ? recorded : undefined,
+          )
         }),
       )
       const theMaxAge = toNumber(maxAge) ?? DEFAULT_MAX_AGE
@@ -295,26 +319,46 @@ export default function ThePlugin(app: App): Plugin {
     },
 
     signalKApiRoutes: function (router: Router) {
-      const trackHandler: RequestHandler = (req: Request, res: Response) => {
-        if (!tracks) {
-          notAvailable(res)
-          return
-        }
-        const context = resolveContext(String(req.params.vesselId), app.selfContext)
-        tracks
-          .get(context)
-          .then((coordinates: LatLngTuple[]) => {
-            res.json({
-              type: 'MultiLineString',
-              coordinates: [coordinates.map(toLngLat)],
+      const singleTrackHandler =
+        (contextOf: (req: Request) => string): RequestHandler =>
+        (req: Request, res: Response) => {
+          if (!tracks) {
+            notAvailable(res)
+            return
+          }
+          const context = contextOf(req)
+          let query: TrackQuery
+          try {
+            query = parseTrackQuery(req.query)
+          } catch (err) {
+            res.status(400)
+            res.json({ message: err instanceof TimeWindowError ? err.message : 'Invalid query parameters' })
+            return
+          }
+          tracks
+            .getTimed(context, query.window)
+            .then((points) => {
+              res.json({
+                type: 'MultiLineString',
+                coordinates: [thin(points, query.resolution).map(({ position }) => toLngLat(position))],
+              })
             })
-          })
-          .catch(() => {
-            res.status(404)
-            res.json({ message: `No track available for ${context}` })
-          })
-      }
+            .catch(() => {
+              res.status(404)
+              res.json({ message: `No track available for ${context}` })
+            })
+        }
+
+      const trackHandler = singleTrackHandler((req) => resolveContext(String(req.params.vesselId), app.selfContext))
       router.get('/vessels/:vesselId/track', trackHandler)
+
+      // Freeboard-SK requests the own vessel's trail here rather than at
+      // /vessels/self/track. Plugin routes are mounted before the v1 REST
+      // interface, so this takes precedence over the data-tree walker.
+      router.get(
+        '/self/track',
+        singleTrackHandler(() => app.selfContext),
+      )
 
       // return all / filtered vessel tracks
       const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
@@ -323,8 +367,16 @@ export default function ThePlugin(app: App): Plugin {
           notAvailable(res)
           return
         }
+        let query: TrackQuery
+        try {
+          query = parseTrackQuery(req.query)
+        } catch (err) {
+          res.status(400)
+          res.json({ message: err instanceof TimeWindowError ? err.message : 'Invalid query parameters' })
+          return
+        }
         tracks
-          .getFilteredTracks(validateParameters(req.query, defaultMaxRadius), getVesselPosition(), app.debug)
+          .getFilteredTracks(validateParameters(req.query, defaultMaxRadius), getVesselPosition(), app.debug, query)
           .then((tc: TrackCollection) => {
             const trks = Object.entries(tc).reduce<AllTracksResult>((acc, [context, track]) => {
               acc[context] = {
@@ -347,6 +399,8 @@ export default function ThePlugin(app: App): Plugin {
 
       return router
     },
+
+    getTracks: () => tracks,
 
     id: 'tracks',
     name: 'Tracks',
