@@ -152,3 +152,44 @@ export function thin(points: TimedPosition[], resolution: number | undefined): T
   }
   return result
 }
+
+/**
+ * Split points into segments wherever recording stopped for longer than `gap`.
+ *
+ * A track is not one continuous line: a vessel that stops for the night, or
+ * sails out of AIS range and back, leaves a hole. Joining across it draws a
+ * straight line through places the vessel never went — across a headland, or
+ * over an anchorage it actually sat still in.
+ *
+ * Operates on timestamped points rather than inside a store, so both the
+ * in-memory and sqlite stores segment identically, and so it composes with
+ * `thin()` — thinning first, then segmenting, keeps a thinned-away gap from
+ * being invented as a join.
+ *
+ * `gap` of 0 or undefined returns a single segment, preserving the old shape.
+ * An empty input returns no segments rather than one empty one, so a caller can
+ * distinguish "no track" from "a track with no points".
+ */
+export function segment(points: TimedPosition[], gap: number | undefined): TimedPosition[][] {
+  if (points.length === 0) {
+    return []
+  }
+  if (!gap || gap <= 0) {
+    return [points]
+  }
+  const segments: TimedPosition[][] = []
+  let current: TimedPosition[] = []
+  let previous: number | undefined
+  for (const point of points) {
+    if (previous !== undefined && point.timestamp - previous > gap) {
+      segments.push(current)
+      current = []
+    }
+    current.push(point)
+    previous = point.timestamp
+  }
+  if (current.length > 0) {
+    segments.push(current)
+  }
+  return segments
+}

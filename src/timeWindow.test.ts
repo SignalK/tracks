@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { parseDuration, parseTrackQuery, thin, TimeWindowError } from './timeWindow.js'
+import { parseDuration, parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TimedPosition } from './types.js'
+
+const MINUTE = 60 * 1000
 
 const NOW = Date.parse('2026-08-09T12:00:00Z')
 const HOUR = 60 * 60 * 1000
@@ -130,5 +132,43 @@ describe('thin', () => {
   it('leaves one- and two-point tracks alone', () => {
     expect(thin(points(0), 1000)).toHaveLength(1)
     expect(thin(points(0, 1), 1000)).toHaveLength(2)
+  })
+})
+
+describe('segment', () => {
+  const at = (timestamp: number): TimedPosition => ({ position: [60, 24], timestamp })
+
+  it('returns one segment when no gap is configured', () => {
+    expect(segment([at(0), at(10 * MINUTE)], undefined)).toHaveLength(1)
+    expect(segment([at(0), at(10 * MINUTE)], 0)).toHaveLength(1)
+  })
+
+  it('returns no segments for an empty track', () => {
+    // Distinguishable from a track that has points, so a caller can tell
+    // "nothing recorded" from "recorded, but empty after filtering".
+    expect(segment([], 5 * MINUTE)).toEqual([])
+  })
+
+  it('splits where the gap is exceeded', () => {
+    const points = [at(0), at(MINUTE), at(30 * MINUTE), at(31 * MINUTE)]
+    const segments = segment(points, 5 * MINUTE)
+    expect(segments.map((s) => s.length)).toEqual([2, 2])
+  })
+
+  it('does not split on a gap exactly equal to the threshold', () => {
+    // `>` not `>=`: a vessel reporting on a fixed 5-minute interval should not
+    // have every single fix become its own segment.
+    expect(segment([at(0), at(5 * MINUTE)], 5 * MINUTE)).toHaveLength(1)
+  })
+
+  it('keeps a single point as its own segment', () => {
+    expect(segment([at(0)], 5 * MINUTE)).toEqual([[at(0)]])
+  })
+
+  it('composes with thin(): thinning first does not invent a join', () => {
+    // thin() drops intermediate points but never moves them, so a real gap
+    // survives thinning and still segments.
+    const points = [at(0), at(MINUTE), at(2 * MINUTE), at(60 * MINUTE)]
+    expect(segment(thin(points, 90 * 1000), 5 * MINUTE).map((s) => s.length)).toEqual([2, 1])
   })
 })

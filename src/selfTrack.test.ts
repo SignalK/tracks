@@ -163,3 +163,45 @@ describe('resolution', () => {
     expect(pointCount(res.body)).toBe(5)
   })
 })
+
+describe('segmentation', () => {
+  it('returns one line by default, however large the gaps', async () => {
+    // Segmenting is opt-in: without segmentGapMinutes the response shape is
+    // exactly what it was before the setting existed.
+    const h = createHarness()
+    const now = Date.now()
+    h.seedTrack(
+      SELF_CONTEXT,
+      [
+        [60, 24],
+        [60.1, 24],
+        [60.2, 24],
+      ],
+      [now - 4 * HOUR, now - 2 * HOUR, now],
+    )
+
+    const res = await request(h.app).get(`${API}/self/track`).expect(200)
+    expect(res.body.coordinates).toHaveLength(1)
+  })
+
+  it('splits the track when a gap exceeds segmentGapMinutes', async () => {
+    const h = createHarness({ config: { segmentGapMinutes: 30 } })
+    const now = Date.now()
+    // Two clusters an hour apart: 30 minutes of silence in between.
+    h.seedTrack(
+      SELF_CONTEXT,
+      [
+        [60, 24],
+        [60.1, 24],
+        [60.2, 24],
+        [60.3, 24],
+      ],
+      [now - 2 * HOUR, now - 2 * HOUR + 60_000, now - HOUR, now - HOUR + 60_000],
+    )
+
+    const res = await request(h.app).get(`${API}/self/track`).expect(200)
+    expect(res.body.type).toBe('MultiLineString')
+    expect(res.body.coordinates).toHaveLength(2)
+    expect(res.body.coordinates.map((s: unknown[]) => s.length)).toEqual([2, 2])
+  })
+})
