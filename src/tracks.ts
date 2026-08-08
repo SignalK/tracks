@@ -3,6 +3,7 @@ import type { Connectable, Observable } from 'rxjs'
 import { map, scan, startWith, throttleTime } from 'rxjs/operators'
 import { thin } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
+import type { TrackStore } from './store.js'
 import type { Context, Debug, LatLngTuple, TimedPosition, TimeWindow, TrackCollection, TrackParams } from './types.js'
 import { createMatcher } from './utils.js'
 
@@ -21,7 +22,12 @@ export interface TracksConfig {
   fetchInitialTrack?: boolean
 }
 
-export class Tracks {
+/**
+ * The in-memory store: a bounded sliding window of positions per context,
+ * held in RxJS accumulators and lost on restart. `bootstrapSelfTrack()` in
+ * index.ts is what re-hydrates it from a History provider at startup.
+ */
+export class Tracks implements TrackStore {
   tracks: TracksMap = {}
   debug: Debug
   config: TracksConfig
