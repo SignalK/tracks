@@ -116,23 +116,23 @@ describe('when the plugin has been stopped', () => {
   })
 })
 
-// ── Gaps documented by RFC #2504 / Freeboard-SK compatibility ───────────────
-// Freeboard-SK requests `/self/track?timespan=1h&resolution=N&timespanOffset=N`.
-// Verified against a live server: the route 404s and the parameters are ignored.
-// These tests pin today's behaviour so the fix is visible as a diff.
-describe('Freeboard-SK compatibility gaps', () => {
-  it('does not serve /self/track', async () => {
+// ── Freeboard-SK compatibility ─────────────────────────────────────────────
+// These pinned the gap before it was fixed: /self/track 404'd and the time
+// parameters were ignored. Time-window behaviour itself is covered in
+// selfTrack.test.ts; this just holds the route open.
+describe('Freeboard-SK compatibility', () => {
+  it('serves /self/track', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
 
-    await request(h.app).get(`${API}/self/track`).expect(404)
+    const res = await request(h.app).get(`${API}/self/track`).expect(200)
+
+    expect(res.body.type).toBe('MultiLineString')
+    expect(res.body.coordinates[0][0]).toEqual([24.9, 60.1])
   })
 
-  it('ignores timespan and resolution', async () => {
-    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]], [SELF_CONTEXT, [60.2, 24.8]])
+  it('accepts the timespan and resolution parameters', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
 
-    const all = await request(h.app).get(`${API}/vessels/${SELF_ID}/track`).expect(200)
-    const windowed = await request(h.app).get(`${API}/vessels/${SELF_ID}/track?timespan=1h&resolution=60`).expect(200)
-
-    expect(windowed.body.coordinates[0]).toEqual(all.body.coordinates[0])
+    await request(h.app).get(`${API}/vessels/${SELF_ID}/track?timespan=1h&resolution=60`).expect(200)
   })
 })

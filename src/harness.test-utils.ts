@@ -20,8 +20,20 @@ type PositionListener = (update: ContextPosition) => void
 
 export interface TestHarness {
   app: Express
-  /** Feed a position delta as the streambundle would. */
-  emit: (context: string, position: LatLngTuple) => void
+  /**
+   * Feed a position delta as the streambundle would. `timestamp` dates the
+   * point, so time-window queries can be tested without faking the clock.
+   *
+   * Note `throttleTime` thins on the leading edge against the wall clock, so a
+   * synchronous burst yields a single point regardless of the timestamps given.
+   * Use `seedTrack` to install a back-dated track instead.
+   */
+  emit: (context: string, position: LatLngTuple, timestamp?: number) => void
+  /**
+   * Install a track with explicit timestamps, bypassing the throttled bus. This
+   * is the entry point the History API bootstrap uses.
+   */
+  seedTrack: (context: string, positions: LatLngTuple[], timestamps: number[]) => void
   /** Self position as reported by `getSelfPath`, used for radius filtering. */
   setSelfPosition: (position: LatLngTuple | undefined) => void
   stop: () => void
@@ -79,10 +91,17 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
 
   return {
     app: expressApp,
-    emit: (context, position) => {
+    emit: (context, position, timestamp) => {
       for (const cb of listeners) {
-        cb({ context, value: { latitude: position[0], longitude: position[1] } })
+        cb({
+          context,
+          value: { latitude: position[0], longitude: position[1] },
+          ...(timestamp === undefined ? {} : { timestamp: new Date(timestamp).toISOString() }),
+        })
       }
+    },
+    seedTrack: (context, positions, timestamps) => {
+      plugin.getTracks()?.initialTrack(context, positions, timestamps)
     },
     setSelfPosition: (position) => {
       selfPosition = position

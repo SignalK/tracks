@@ -1,7 +1,9 @@
 import { BehaviorSubject, combineLatest, connectable, firstValueFrom, ReplaySubject, Subject } from 'rxjs'
 import type { Connectable, Observable } from 'rxjs'
-import { map, scan, throttleTime } from 'rxjs/operators'
-import type { Context, Debug, LatLngTuple, TrackCollection, TrackParams } from './types.js'
+import { map, scan, startWith, throttleTime } from 'rxjs/operators'
+import { thin } from './timeWindow.js'
+import type { TrackQuery } from './timeWindow.js'
+import type { Context, Debug, LatLngTuple, TimedPosition, TimeWindow, TrackCollection, TrackParams } from './types.js'
 import { createMatcher } from './utils.js'
 
 interface TracksMap {
@@ -31,12 +33,12 @@ export class Tracks {
     this.debug = debug
   }
 
-  newPosition(context: Context, position: LatLngTuple): void {
-    this.getAccumulator(context)?.nextLatLngTuple(position)
+  newPosition(context: Context, position: LatLngTuple, timestamp?: number): void {
+    this.getAccumulator(context)?.nextLatLngTuple(position, timestamp)
   }
 
-  initialTrack(context: Context, track: LatLngTuple[]): void {
-    this.getAccumulator(context)?.setInitialTrack(track)
+  initialTrack(context: Context, track: LatLngTuple[], timestamps?: number[]): void {
+    this.getAccumulator(context)?.setInitialTrack(track, timestamps)
   }
 
   getAccumulator(context: Context, createIfMissing = true): TrackAccumulator | undefined {
@@ -53,35 +55,54 @@ export class Tracks {
     return result
   }
 
-  get(context: Context): Promise<LatLngTuple[]> {
-    const accumulator = this.getAccumulator(context, false)
-    if (accumulator) {
-      // Rejects with EmptyError if the stream completes without emitting; the
-      // route handlers turn that into the same 404 as an unknown context.
-      return firstValueFrom(accumulator.track)
-    } else {
-      return Promise.reject(new Error(`No track accumulator for ${context}`))
-    }
+  get(context: Context, window?: TimeWindow): Promise<LatLngTuple[]> {
+    return this.getTimed(context, window).then((points) => points.map(({ position }) => position))
   }
 
-  getAllTracks(): Promise<VesselTrack[]> {
+  /**
+   * Track points with their timestamps, optionally narrowed to a time window.
+   *
+   * Rejects with EmptyError if the stream completes without emitting; the route
+   * handlers turn that into the same 404 as an unknown context.
+   */
+  getTimed(context: Context, window?: TimeWindow): Promise<TimedPosition[]> {
+    const accumulator = this.getAccumulator(context, false)
+    if (!accumulator) {
+      return Promise.reject(new Error(`No track accumulator for ${context}`))
+    }
+    return firstValueFrom(accumulator.timedTrack).then((points) =>
+      window
+        ? points.filter(
+            ({ timestamp }) =>
+              timestamp >= window.from && (window.inclusiveEnd ? timestamp <= window.to : timestamp < window.to),
+          )
+        : points,
+    )
+  }
+
+  getAllTracks(query?: TrackQuery): Promise<VesselTrack[]> {
     return Promise.all(
       Object.keys(this.tracks).map((context) =>
-        this.get(context).then((track) => ({
+        this.getTimed(context, query?.window).then((points) => ({
           context,
-          track,
+          track: thin(points, query?.resolution).map(({ position }) => position),
         })),
       ),
     )
   }
 
   // Return all / filtered vessels and their tracks
-  async getFilteredTracks(params: TrackParams, selfPosition?: LatLngTuple, debug?: Debug): Promise<TrackCollection> {
+  async getFilteredTracks(
+    params: TrackParams,
+    selfPosition?: LatLngTuple,
+    debug?: Debug,
+    query?: TrackQuery,
+  ): Promise<TrackCollection> {
     this.debug(params)
     this.debug('Self position', selfPosition)
     const matcher = createMatcher(params, selfPosition, debug)
 
-    return this.getAllTracks().then((contextTracks) => {
+    return this.getAllTracks(query).then((contextTracks) => {
       return contextTracks.reduce<TrackCollection>((acc, { context, track }) => {
         if (matcher(track)) {
           acc[context] = track
@@ -113,10 +134,13 @@ interface AccumulatorParams {
 }
 
 export class TrackAccumulator {
-  initialTrack: Subject<LatLngTuple[]> = new BehaviorSubject<LatLngTuple[]>([])
-  input: Subject<LatLngTuple> = new Subject()
+  initialTrack: Subject<TimedPosition[]> = new BehaviorSubject<TimedPosition[]>([])
+  input: Subject<TimedPosition> = new Subject()
   latestLatLngTuple = 0
-  accumulatedTrack: Connectable<LatLngTuple[]>
+  accumulatedTrack: Connectable<TimedPosition[]>
+  /** Timestamped points, used to answer time-window queries. */
+  timedTrack: Observable<TimedPosition[]>
+  /** Positions only — the long-standing public shape. */
   track: Observable<LatLngTuple[]>
 
   constructor({ resolution, pointsToKeep, fetchTrackFor }: AccumulatorParams) {
@@ -126,35 +150,43 @@ export class TrackAccumulator {
     this.accumulatedTrack = connectable(
       this.input.pipe(
         throttleTime(resolution),
-        scan<LatLngTuple, LatLngTuple[]>((acc, position) => {
-          acc.push(position)
+        scan<TimedPosition, TimedPosition[]>((acc, point) => {
+          acc.push(point)
           return acc.slice(Math.max(0, acc.length - pointsToKeep))
         }, []),
+        // combineLatest below only emits once every source has, and `scan` stays
+        // silent until the first live position. Without this an accumulator that
+        // has only been given an initial track — the state after a History API
+        // bootstrap, before any live delta — never yields a readable track.
+        startWith<TimedPosition[]>([]),
       ),
-      { connector: () => new ReplaySubject<LatLngTuple[]>(1), resetOnDisconnect: false },
+      { connector: () => new ReplaySubject<TimedPosition[]>(1), resetOnDisconnect: false },
     )
-    this.track = combineLatest([this.initialTrack, this.accumulatedTrack]).pipe(
+    this.timedTrack = combineLatest([this.initialTrack, this.accumulatedTrack]).pipe(
       map(([initialTrack, accumulatedTrack]) => [...initialTrack, ...accumulatedTrack]),
     )
+    this.track = this.timedTrack.pipe(map((points) => points.map(({ position }) => position)))
     this.accumulatedTrack.connect()
 
     if (fetchTrackFor) {
       void fetchTrack(fetchTrackFor).then((trackGEOJson) => {
         const coordinates = trackGEOJson?.coordinates?.[0]
         if (coordinates) {
-          this.initialTrack.next(coordinates)
+          // The fetched track carries no timestamps; date them at the start of
+          // time so a time-window query treats them as older than anything live.
+          this.initialTrack.next(coordinates.map((position) => ({ position, timestamp: 0 })))
         }
       })
     }
   }
 
-  nextLatLngTuple(position: LatLngTuple): void {
-    this.input.next(position)
-    this.latestLatLngTuple = Date.now()
+  nextLatLngTuple(position: LatLngTuple, timestamp: number = Date.now()): void {
+    this.input.next({ position, timestamp })
+    this.latestLatLngTuple = timestamp
   }
 
-  setInitialTrack(track: LatLngTuple[]): void {
-    this.initialTrack.next(track)
+  setInitialTrack(track: LatLngTuple[], timestamps?: number[]): void {
+    this.initialTrack.next(track.map((position, i) => ({ position, timestamp: timestamps?.[i] ?? 0 })))
   }
 }
 
