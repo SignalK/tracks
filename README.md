@@ -94,5 +94,7 @@ npm run lint       # eslint
 npm run format     # prettier --write
 ```
 
-The package is ESM only and targets Node >= 20.19, the first release in which the Signal K server's
-`require()`-based plugin loader can load an ES module.
+The package is ESM only and targets Node >= 22.5.0, the release that added `node:sqlite`. ESM alone
+would only need 20.19, the first release in which the Signal K server's `require()`-based plugin
+loader can load an ES module, but the sqlite track source raises the floor. The server itself
+requires Node >= 22, so this rules out nothing that could have run the plugin anyway.
