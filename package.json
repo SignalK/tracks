@@ -8,7 +8,13 @@
   ],
   "author": "Teppo Kurki <teppo.kurki@iki.fi>",
   "repository": "https://github.com/SignalK/tracks",
-  "scripts": {},
+  "workspaces": [
+    "module"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @signalk/tracks",
+    "test": "npm test --workspace @signalk/tracks"
+  },
   "license": "Apache-2.0",
   "dependencies": {
     "@signalk/tracks": "^2.0.1"
