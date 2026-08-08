@@ -271,9 +271,10 @@ export default function ThePlugin(app: App): Plugin {
       onStop.push(
         app.streambundle
           .getBus('navigation.position')
-          .onValue((update: ContextPosition): void =>
-            tracks?.newPosition(update.context, [update.value.latitude, update.value.longitude]),
-          ),
+          .onValue((update: ContextPosition): void => {
+            if (!update.value || update.value.latitude == null || update.value.longitude == null) return
+            tracks?.newPosition(update.context, [update.value.latitude, update.value.longitude])
+          }),
       )
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const theMaxAge = isNumeric(maxAge) ? parseFloat(maxAge as any) : DEFAULT_MAX_AGE
