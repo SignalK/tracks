@@ -43,7 +43,9 @@ function toFiniteNumber(value: string): number | undefined {
 }
 
 export function validateParameters(params: QueryParameters, defaultMaxRadius: number | undefined): TrackParams {
-  // bounding box lon1,lat1,lon2,lat2
+  // Bounding box as lat1,lon1,lat2,lon2 — south-west corner first, and
+  // latitude first within each corner. Note this is the opposite order to the
+  // GeoJSON these endpoints return, where a coordinate is [lng, lat].
   let bbox: GeoBounds | null = null
   const rawBbox = firstValue(params.bbox)
   if (rawBbox !== undefined) {
