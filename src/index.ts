@@ -35,6 +35,16 @@ interface AllTracksResult {
   [context: string]: {
     type: 'MultiLineString'
     coordinates: LngLatTuple[][]
+    /**
+     * Whether this is the own vessel's track.
+     *
+     * Stated rather than left to the client: telling own vessel from an AIS
+     * target otherwise means string-matching the context against the server's
+     * self identity, which a client can only do if it has fetched that
+     * separately and knows the `vessels.self` alias resolves to a `urn:mrn:`
+     * context. Getting it wrong draws someone else's track as your own.
+     */
+    isSelf: boolean
   }
 }
 
@@ -486,6 +496,8 @@ export default function ThePlugin(app: App): Plugin {
                 type: 'MultiLineString',
                 coordinates: segments.map((points) => points.map(({ position }) => toLngLat(position))),
                 ...(query.times ? { times: segments.map(toIsoTimes) } : {}),
+                context,
+                isSelf: context === app.selfContext,
               })
             })
             .catch(() => {
@@ -527,6 +539,7 @@ export default function ThePlugin(app: App): Plugin {
               acc[context] = {
                 type: 'MultiLineString',
                 coordinates: [track.map(toLngLat)],
+                isSelf: context === app.selfContext,
               }
               return acc
             }, {})

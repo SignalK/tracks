@@ -74,7 +74,9 @@ so thinning never shortens the track._
       [25.0, 60.2]
     ]
   ],
-  "times": [["2026-08-14T09:00:00.000Z", "2026-08-14T09:01:00.000Z"]]
+  "times": [["2026-08-14T09:00:00.000Z", "2026-08-14T09:01:00.000Z"]],
+  "context": "vessels.urn:mrn:imo:mmsi:123456789",
+  "isSelf": true
 }
 ```
 
@@ -83,6 +85,10 @@ _`times` adds a `times` array positionally aligned with `coordinates`: `times[i]
 roughly a third and clients that only draw the geometry have no use for it. Accepts
 `true`/`1`/`yes` and `false`/`0`/`no`; a valueless `?times` reads as true._
 
+_`context` is the fully qualified context the track belongs to, and `isSelf` says whether it is
+the own vessel. Asking for `self` resolves the alias, so the response tells you which vessel
+`self` actually is._
+
 ---
 
 **Retrieve tracks for all vessels:**
@@ -90,6 +96,9 @@ roughly a third and clients that only draw the geometry have no use for it. Acce
 `/signalk/v1/api/tracks`
 
 _If `maxRadius` is specified only vessels with last track position within this distance are returned._
+
+_Each entry carries `isSelf`, so the own vessel can be told from an AIS target without
+string-matching the context against the server's self identity._
 
 ---
 
