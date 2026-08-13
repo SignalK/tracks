@@ -22,7 +22,7 @@ import type { TrackStore } from './store.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types.js'
-import { resolveContext, validateParameters } from './utils.js'
+import { resolveContext, toIsoTimes, validateParameters } from './utils.js'
 
 export interface ContextPosition {
   context: Context
@@ -481,11 +481,11 @@ export default function ThePlugin(app: App): Plugin {
           tracks
             .getTimed(context, query.window)
             .then((points) => {
+              const segments = segment(thin(points, query.resolution), segmentGap)
               res.json({
                 type: 'MultiLineString',
-                coordinates: segment(thin(points, query.resolution), segmentGap).map((points) =>
-                  points.map(({ position }) => toLngLat(position)),
-                ),
+                coordinates: segments.map((points) => points.map(({ position }) => toLngLat(position))),
+                ...(query.times ? { times: segments.map(toIsoTimes) } : {}),
               })
             })
             .catch(() => {

@@ -1,7 +1,20 @@
-import type { LatLngTuple, GeoBounds, QueryParameters, TrackParams, Debug } from './types.js'
+import type { LatLngTuple, GeoBounds, QueryParameters, TimedPosition, TrackParams, Debug } from './types.js'
 
 const LAT = 0
 const LNG = 1
+
+/**
+ * The recording times of a segment, as ISO-8601 UTC, positionally aligned with
+ * the segment's coordinates.
+ *
+ * UTC because a track outlives the timezone it was recorded in: a passage that
+ * crosses a zone boundary, or a database restored on a boat that has since
+ * moved, must not shift. ISO-8601 rather than the epoch milliseconds held
+ * internally because that is what the rest of Signal K puts on the wire.
+ */
+export function toIsoTimes(segment: TimedPosition[]): string[] {
+  return segment.map(({ timestamp }) => new Date(timestamp).toISOString())
+}
 
 // create function to check position against GeoBounds
 export function createInBounds(bounds: GeoBounds): (position: LatLngTuple | null) => boolean {

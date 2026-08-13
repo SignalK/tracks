@@ -172,3 +172,34 @@ describe('segment', () => {
     expect(segment(thin(points, 90 * 1000), 5 * MINUTE).map((s) => s.length)).toEqual([2, 1])
   })
 })
+
+describe('parseTrackQuery: times', () => {
+  it('is absent unless the parameter is given', () => {
+    expect(parseTrackQuery({}, NOW).times).toBeUndefined()
+  })
+
+  it('reads a valueless ?times as true', () => {
+    // Express parses `?times` into an empty string; that is how a query string
+    // conventionally spells a flag.
+    expect(parseTrackQuery({ times: '' }, NOW).times).toBe(true)
+  })
+
+  it('accepts the usual truthy and falsy spellings', () => {
+    for (const value of ['true', '1', 'yes', 'TRUE']) {
+      expect(parseTrackQuery({ times: value }, NOW).times).toBe(true)
+    }
+    for (const value of ['false', '0', 'no', 'FALSE']) {
+      expect(parseTrackQuery({ times: value }, NOW).times).toBe(false)
+    }
+  })
+
+  it('rejects a value that is neither', () => {
+    expect(() => parseTrackQuery({ times: 'maybe' }, NOW)).toThrow(TimeWindowError)
+  })
+
+  it('combines with a time window', () => {
+    const query = parseTrackQuery({ duration: '1h', times: 'true' }, NOW)
+    expect(query.times).toBe(true)
+    expect(query.window).toEqual({ from: NOW - HOUR, to: NOW, inclusiveEnd: true })
+  })
+})

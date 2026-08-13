@@ -23,6 +23,7 @@ const QuerySchema = Type.Object({
   timespan: Type.Optional(Type.String()),
   timespanOffset: Type.Optional(Type.String()),
   resolution: Type.Optional(Type.String()),
+  times: Type.Optional(Type.String()),
 })
 
 export class TimeWindowError extends Error {}
@@ -59,6 +60,27 @@ function parseInstant(value: string, name: string): number {
   return ms
 }
 
+const TRUE_FLAGS = ['true', '1', 'yes']
+const FALSE_FLAGS = ['false', '0', 'no']
+
+/**
+ * A boolean query parameter. Present but valueless (`?times`) reads as true,
+ * which is how a query string conventionally spells a flag.
+ */
+function parseFlag(value: string | undefined, name: string): boolean {
+  if (value === undefined) {
+    return true
+  }
+  const flag = value.trim().toLowerCase()
+  if (TRUE_FLAGS.includes(flag)) {
+    return true
+  }
+  if (FALSE_FLAGS.includes(flag)) {
+    return false
+  }
+  throw new TimeWindowError(`Invalid ${name} '${value}', expected true or false`)
+}
+
 /** Express repeats a query key into an array; take the first usable string. */
 function firstString(value: unknown): string | undefined {
   const scalar: unknown = Array.isArray(value) ? (value as unknown[])[0] : value
@@ -69,6 +91,16 @@ export interface TrackQuery {
   window?: TimeWindow
   /** Minimum spacing between returned points, in milliseconds. */
   resolution?: number
+  /**
+   * Serve the recording time of every point alongside the geometry.
+   *
+   * Opt-in rather than always-on: the response grows by roughly a third, and
+   * the clients reading these routes today (Freeboard-SK) draw the geometry
+   * and have no use for the times. Consumers that need per-point time — an
+   * IMO-style AIS display drawing dots equally spaced by time, per
+   * SignalK/signalk-server#2504 — ask for it.
+   */
+  times?: boolean
 }
 
 /**
@@ -86,6 +118,7 @@ export function parseTrackQuery(query: Record<string, unknown>, now: number = Da
     timespan: firstString(query.timespan),
     timespanOffset: firstString(query.timespanOffset),
     resolution: firstString(query.resolution),
+    times: firstString(query.times),
   }
 
   if (!Value.Check(QuerySchema, raw)) {
@@ -93,6 +126,13 @@ export function parseTrackQuery(query: Record<string, unknown>, now: number = Da
   }
 
   const result: TrackQuery = {}
+
+  // `?times` with no value is how a query string spells a flag, so a bare key
+  // counts as true; `times=false` turns it back off for a caller building the
+  // parameter list programmatically.
+  if (Object.prototype.hasOwnProperty.call(query, 'times')) {
+    result.times = parseFlag(raw.times, 'times')
+  }
 
   if (raw.resolution !== undefined) {
     const resolution = parseDuration(raw.resolution)
