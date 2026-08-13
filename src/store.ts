@@ -1,4 +1,13 @@
-import type { Context, Debug, LatLngTuple, TimedPosition, TimeWindow, TrackCollection, TrackParams } from './types.js'
+import type {
+  Context,
+  Debug,
+  LatLngTuple,
+  TimedPosition,
+  TimedTrackCollection,
+  TimeWindow,
+  TrackCollection,
+  TrackParams,
+} from './types.js'
 import type { TrackQuery } from './timeWindow.js'
 
 /**
@@ -43,6 +52,14 @@ export interface TrackStore {
 
   /** Every known context and its track, thinned to `query.resolution`. */
   getAllTracks(query?: TrackQuery): Promise<{ context: string; track: LatLngTuple[] }[]>
+
+  /** As `getFilteredTracks`, but keeping the timestamp of each point. */
+  getFilteredTimedTracks(
+    params: TrackParams,
+    selfPosition?: LatLngTuple,
+    debug?: Debug,
+    query?: TrackQuery,
+  ): Promise<TimedTrackCollection>
 
   /**
    * Tracks whose *last* position matches a spatial predicate.

@@ -38,6 +38,11 @@ export interface TrackCollection {
   [key: string]: LatLngTuple[]
 }
 
+/** As `TrackCollection`, but each point keeps the time it was recorded. */
+export interface TimedTrackCollection {
+  [key: string]: TimedPosition[]
+}
+
 export interface GeoBounds {
   ne: LatLngTuple
   sw: LatLngTuple
