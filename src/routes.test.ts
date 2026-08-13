@@ -193,3 +193,55 @@ describe('per-point timestamps', () => {
     expect(res.body.times[0]).toHaveLength(2)
   })
 })
+
+// Own vessel vs AIS target, stated by the server. A client otherwise has to
+// string-match the context against the self identity it fetched separately,
+// and drawing another vessel's track as your own is the failure mode.
+describe('isSelf', () => {
+  it('marks the own vessel on a single-vessel track', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    const res = await request(h.app).get(`${API}/vessels/${SELF_ID}/track`).expect(200)
+
+    expect(res.body.isSelf).toBe(true)
+    expect(res.body.context).toBe(SELF_CONTEXT)
+  })
+
+  it('marks an AIS target as not self', async () => {
+    const h = withTracks([OTHER_CONTEXT, [60.2, 24.8]])
+    const otherId = OTHER_CONTEXT.replace('vessels.', '')
+
+    const res = await request(h.app).get(`${API}/vessels/${otherId}/track`).expect(200)
+
+    expect(res.body.isSelf).toBe(false)
+    expect(res.body.context).toBe(OTHER_CONTEXT)
+  })
+
+  it('reports the resolved context when asked for the self alias', async () => {
+    // The alias resolves to the fully qualified urn:mrn: context, so a client
+    // that asked for `self` learns which vessel that actually is.
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    const res = await request(h.app).get(`${API}/vessels/self/track`).expect(200)
+
+    expect(res.body.context).toBe(SELF_CONTEXT)
+    expect(res.body.isSelf).toBe(true)
+  })
+
+  it('marks /self/track as self', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    const res = await request(h.app).get(`${API}/self/track`).expect(200)
+
+    expect(res.body.isSelf).toBe(true)
+  })
+
+  it('distinguishes self from others in the all-tracks listing', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]], [OTHER_CONTEXT, [60.2, 24.8]])
+
+    const res = await request(h.app).get(`${API}/tracks`).expect(200)
+
+    expect(res.body[SELF_CONTEXT].isSelf).toBe(true)
+    expect(res.body[OTHER_CONTEXT].isSelf).toBe(false)
+  })
+})

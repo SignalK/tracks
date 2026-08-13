@@ -81,6 +81,8 @@ describe('README ?times example', () => {
         ],
       ])
       expect(res.body.times).toEqual([[new Date(t0).toISOString(), new Date(t0 + 30_000).toISOString()]])
+      expect(res.body.context).toBe(SELF_CONTEXT)
+      expect(res.body.isSelf).toBe(true)
     } finally {
       h.stop()
     }
