@@ -61,6 +61,30 @@ so thinning never shortens the track._
 
 ---
 
+**Retrieve the time each position was recorded:**
+
+`/signalk/v1/api/self/track?duration=6h&times`
+
+```json
+{
+  "type": "MultiLineString",
+  "coordinates": [
+    [
+      [24.9, 60.1],
+      [25.0, 60.2]
+    ]
+  ],
+  "times": [["2026-08-14T09:00:00.000Z", "2026-08-14T09:01:00.000Z"]]
+}
+```
+
+_`times` adds a `times` array positionally aligned with `coordinates`: `times[i][j]` is when
+`coordinates[i][j]` was recorded, as ISO-8601 UTC. It is opt-in because the response grows by
+roughly a third and clients that only draw the geometry have no use for it. Accepts
+`true`/`1`/`yes` and `false`/`0`/`no`; a valueless `?times` reads as true._
+
+---
+
 **Retrieve tracks for all vessels:**
 
 `/signalk/v1/api/tracks`

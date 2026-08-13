@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createInBounds, resolveContext, validateParameters } from './utils.js'
+import { createInBounds, resolveContext, toIsoTimes, validateParameters } from './utils.js'
 
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
 
@@ -90,5 +90,28 @@ describe('validateParameters', () => {
 
   it('takes the first value when express repeats a query parameter', () => {
     expect(validateParameters({ radius: ['500', '900'] }, undefined).radius).toBe(500)
+  })
+})
+
+describe('toIsoTimes', () => {
+  const at = (timestamp: number) => ({ position: [60, 24] as [number, number], timestamp })
+
+  it('formats epoch milliseconds as ISO-8601 UTC', () => {
+    expect(toIsoTimes([at(Date.UTC(2026, 7, 14, 9, 0, 0))])).toEqual(['2026-08-14T09:00:00.000Z'])
+  })
+
+  it('is positionally aligned with the segment it came from', () => {
+    const segment = [at(0), at(1000), at(2000)]
+    expect(toIsoTimes(segment)).toHaveLength(segment.length)
+  })
+
+  it('renders a non-UTC recording time in UTC', () => {
+    // A track outlives the zone it was recorded in, so the wire format is
+    // always UTC regardless of the server's local time.
+    expect(toIsoTimes([at(Date.parse('2026-08-14T09:00:00+12:00'))])).toEqual(['2026-08-13T21:00:00.000Z'])
+  })
+
+  it('returns nothing for an empty segment', () => {
+    expect(toIsoTimes([])).toEqual([])
   })
 })

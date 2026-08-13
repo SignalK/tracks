@@ -136,3 +136,60 @@ describe('Freeboard-SK compatibility', () => {
     await request(h.app).get(`${API}/vessels/${SELF_ID}/track?timespan=1h&resolution=60`).expect(200)
   })
 })
+
+// Per-point recording times, for consumers that draw a track as dots spaced by
+// time rather than as a line — the IMO AIS presentation in
+// SignalK/signalk-server#2504. Opt-in so existing clients see no change.
+describe('per-point timestamps', () => {
+  const T0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+  const MINUTE = 60_000
+
+  const seeded = () => {
+    harness = createHarness({ selfPosition: [60, 24] })
+    harness.seedTrack(
+      SELF_CONTEXT,
+      [
+        [60.1, 24.9],
+        [60.2, 25.0],
+      ],
+      [T0, T0 + MINUTE],
+    )
+    return harness
+  }
+
+  it('omits times unless asked', async () => {
+    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track`).expect(200)
+
+    expect(res.body.times).toBeUndefined()
+    expect(res.body.coordinates[0]).toHaveLength(2)
+  })
+
+  it('serves ISO-8601 UTC times aligned with the coordinates', async () => {
+    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track?times=true`).expect(200)
+
+    expect(res.body.times).toEqual([['2026-08-14T09:00:00.000Z', '2026-08-14T09:01:00.000Z']])
+    expect(res.body.times[0]).toHaveLength(res.body.coordinates[0].length)
+  })
+
+  it('treats a valueless ?times as true', async () => {
+    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track?times`).expect(200)
+
+    expect(res.body.times[0][0]).toBe('2026-08-14T09:00:00.000Z')
+  })
+
+  it('honours times=false', async () => {
+    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track?times=false`).expect(200)
+
+    expect(res.body.times).toBeUndefined()
+  })
+
+  it('400s on an unparseable times value', async () => {
+    await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track?times=maybe`).expect(400)
+  })
+
+  it('serves times on /self/track too', async () => {
+    const res = await request(seeded().app).get(`${API}/self/track?times`).expect(200)
+
+    expect(res.body.times[0]).toHaveLength(2)
+  })
+})
