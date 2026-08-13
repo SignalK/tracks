@@ -111,6 +111,10 @@ _If `maxRadius` is specified only vessels with last track position within this d
 _Each entry carries `isSelf`, so the own vessel can be told from an AIS target without
 string-matching the context against the server's self identity._
 
+_`?times` works here too, adding a `times` array to every vessel's entry. Note that asking for
+times also segments each track on the gap threshold, so `coordinates` and `times` line up;
+without `times` each vessel keeps its single unsegmented line._
+
 ---
 
 **Retrieve tracks for all vessels within a given radius (in meters) from your vessel position:**

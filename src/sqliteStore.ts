@@ -11,6 +11,7 @@ import type {
   GeoBounds,
   LatLngTuple,
   TimedPosition,
+  TimedTrackCollection,
   TimeWindow,
   TrackCollection,
   TrackParams,
@@ -255,23 +256,48 @@ export class SqliteTrackStore implements TrackStore {
    * set. It is kept because a prefilter that returns half the table is not
    * worth running, not because correctness depends on it.
    */
-  getFilteredTracks(
+  async getFilteredTracks(
     params: TrackParams,
     selfPosition?: LatLngTuple,
     debug?: Debug,
     query?: TrackQuery,
   ): Promise<TrackCollection> {
+    const timed = await this.getFilteredTimedTracks(params, selfPosition, debug, query)
+    return Object.fromEntries(
+      Object.entries(timed).map(([context, points]) => [context, points.map(({ position }) => position)]),
+    )
+  }
+
+  /**
+   * The same filtering as `getFilteredTracks`, keeping each point's timestamp.
+   *
+   * The untimed form is derived from this one so the two cannot disagree about
+   * which tracks match — both the cell prefilter and the authoritative
+   * last-position test run once, here.
+   */
+  async getFilteredTimedTracks(
+    params: TrackParams,
+    selfPosition?: LatLngTuple,
+    debug?: Debug,
+    query?: TrackQuery,
+  ): Promise<TimedTrackCollection> {
     const candidates = params.bbox ? this.contextsInBounds(params.bbox) : undefined
     const matcher = createMatcher(params, selfPosition, debug)
 
-    return this.getAllTracks(query).then((tracks) =>
-      tracks.reduce<TrackCollection>((acc, { context, track }) => {
-        if ((!candidates || candidates.has(context)) && matcher(track)) {
-          acc[context] = track
-        }
-        return acc
-      }, {}),
+    const tracks = await Promise.all(
+      this.contexts().map((context) =>
+        this.getTimed(context, query?.window).then((points) => ({
+          context,
+          points: thin(points, query?.resolution),
+        })),
+      ),
     )
+    return tracks.reduce<TimedTrackCollection>((acc, { context, points }) => {
+      if ((!candidates || candidates.has(context)) && matcher(points.map(({ position }) => position))) {
+        acc[context] = points
+      }
+      return acc
+    }, {})
   }
 
   /** Contexts with at least one position inside `bounds`, via the cell index. */

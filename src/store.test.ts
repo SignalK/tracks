@@ -107,4 +107,54 @@ describe.each(implementations)('TrackStore contract: %s', (_name, newStore) => {
     const remaining = await store.getAllTracks()
     expect(remaining.map(({ context }) => context)).toEqual([ctx])
   })
+
+  it('returns timed tracks carrying each point timestamp', async () => {
+    const store = newStore()
+    // initialTrack, not newPosition: the in-memory accumulator throttles on the
+    // wall clock, so a synchronous burst of positions yields a single point.
+    store.initialTrack(
+      ctx,
+      [
+        [60, 25],
+        [60.1, 25.1],
+      ],
+      [1000, 2000],
+    )
+    const timed = await store.getFilteredTimedTracks({ bbox: null, radius: null })
+    expect(timed[ctx]).toEqual([
+      { position: [60, 25], timestamp: 1000 },
+      { position: [60.1, 25.1], timestamp: 2000 },
+    ])
+  })
+
+  it('selects the same contexts timed and untimed', async () => {
+    // Both forms share one filter; if they diverge, a client asking for times
+    // silently gets a different set of vessels.
+    const store = newStore()
+    store.newPosition(ctx, [60, 25], 1000)
+    store.newPosition('vessels.far' as Context, [10, 10], 1000)
+    const params = { bbox: { sw: [59, 24] as [number, number], ne: [61, 26] as [number, number] }, radius: null }
+
+    const plain = await store.getFilteredTracks(params)
+    const timed = await store.getFilteredTimedTracks(params)
+
+    expect(Object.keys(timed).sort()).toEqual(Object.keys(plain).sort())
+    expect(Object.keys(plain)).toEqual([ctx])
+  })
+
+  it('narrows a timed track to the requested window', async () => {
+    const store = newStore()
+    store.initialTrack(
+      ctx,
+      [
+        [60, 25],
+        [60.1, 25.1],
+      ],
+      [1000, 5000],
+    )
+    const timed = await store.getFilteredTimedTracks({ bbox: null, radius: null }, undefined, undefined, {
+      window: { from: 4000, to: 6000, inclusiveEnd: true },
+    })
+    expect(timed[ctx]).toEqual([{ position: [60.1, 25.1], timestamp: 5000 }])
+  })
 })

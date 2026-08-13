@@ -4,7 +4,16 @@ import { map, scan, startWith, throttleTime } from 'rxjs/operators'
 import { thin } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
-import type { Context, Debug, LatLngTuple, TimedPosition, TimeWindow, TrackCollection, TrackParams } from './types.js'
+import type {
+  Context,
+  Debug,
+  LatLngTuple,
+  TimedPosition,
+  TimedTrackCollection,
+  TimeWindow,
+  TrackCollection,
+  TrackParams,
+} from './types.js'
 import { createMatcher } from './utils.js'
 
 interface TracksMap {
@@ -104,18 +113,45 @@ export class Tracks implements TrackStore {
     debug?: Debug,
     query?: TrackQuery,
   ): Promise<TrackCollection> {
+    const timed = await this.getFilteredTimedTracks(params, selfPosition, debug, query)
+    return Object.fromEntries(
+      Object.entries(timed).map(([context, points]) => [context, points.map(({ position }) => position)]),
+    )
+  }
+
+  /**
+   * The same filtering as `getFilteredTracks`, keeping each point's timestamp.
+   *
+   * The untimed form is derived from this one so the two cannot disagree about
+   * which tracks match — the filter runs once, here.
+   */
+  async getFilteredTimedTracks(
+    params: TrackParams,
+    selfPosition?: LatLngTuple,
+    debug?: Debug,
+    query?: TrackQuery,
+  ): Promise<TimedTrackCollection> {
     this.debug(params)
     this.debug('Self position', selfPosition)
     const matcher = createMatcher(params, selfPosition, debug)
 
-    return this.getAllTracks(query).then((contextTracks) => {
-      return contextTracks.reduce<TrackCollection>((acc, { context, track }) => {
-        if (matcher(track)) {
-          acc[context] = track
-        }
-        return acc
-      }, {})
-    })
+    const contexts = Object.keys(this.tracks)
+    const tracks = await Promise.all(
+      contexts.map((context) =>
+        this.getTimed(context, query?.window).then((points) => ({
+          context,
+          points: thin(points, query?.resolution),
+        })),
+      ),
+    )
+    return tracks.reduce<TimedTrackCollection>((acc, { context, points }) => {
+      // The matcher tests the last *position*, so it sees the same geometry it
+      // always did; only what is carried alongside changed.
+      if (matcher(points.map(({ position }) => position))) {
+        acc[context] = points
+      }
+      return acc
+    }, {})
   }
 
   prune(maxAge: number): void {

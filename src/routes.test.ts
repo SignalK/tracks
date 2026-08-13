@@ -245,3 +245,78 @@ describe('isSelf', () => {
     expect(res.body[OTHER_CONTEXT].isSelf).toBe(false)
   })
 })
+
+// Times on the all-vessels listing. The filtering is shared with the untimed
+// form, so these also pin that the two cannot disagree about which tracks match.
+describe('GET /tracks?times', () => {
+  const T0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+  const MINUTE = 60_000
+
+  const seeded = () => {
+    harness = createHarness({ selfPosition: [60, 24] })
+    harness.seedTrack(
+      SELF_CONTEXT,
+      [
+        [60.1, 24.9],
+        [60.2, 25.0],
+      ],
+      [T0, T0 + MINUTE],
+    )
+    harness.seedTrack(OTHER_CONTEXT, [[60.3, 24.7]], [T0 + 2 * MINUTE])
+    return harness
+  }
+
+  it('omits times unless asked', async () => {
+    const res = await request(seeded().app).get(`${API}/tracks`).expect(200)
+
+    expect(res.body[SELF_CONTEXT].times).toBeUndefined()
+    expect(res.body[SELF_CONTEXT].coordinates).toEqual([
+      [
+        [24.9, 60.1],
+        [25.0, 60.2],
+      ],
+    ])
+  })
+
+  it('serves times aligned with coordinates for every vessel', async () => {
+    const res = await request(seeded().app).get(`${API}/tracks?times`).expect(200)
+
+    expect(res.body[SELF_CONTEXT].times).toEqual([['2026-08-14T09:00:00.000Z', '2026-08-14T09:01:00.000Z']])
+    expect(res.body[OTHER_CONTEXT].times).toEqual([['2026-08-14T09:02:00.000Z']])
+    for (const context of [SELF_CONTEXT, OTHER_CONTEXT]) {
+      const { coordinates, times } = res.body[context]
+      expect(times).toHaveLength(coordinates.length)
+      expect(times[0]).toHaveLength(coordinates[0].length)
+    }
+  })
+
+  it('keeps isSelf alongside the times', async () => {
+    const res = await request(seeded().app).get(`${API}/tracks?times`).expect(200)
+
+    expect(res.body[SELF_CONTEXT].isSelf).toBe(true)
+    expect(res.body[OTHER_CONTEXT].isSelf).toBe(false)
+  })
+
+  it('selects the same vessels with and without times', async () => {
+    // The timed and untimed forms share one filter; a bbox that excludes a
+    // vessel must exclude it either way.
+    const h = seeded()
+    const bbox = 'bbox=60.05,24.5,60.25,25.5'
+
+    const plain = await request(h.app).get(`${API}/tracks?${bbox}`).expect(200)
+    const timed = await request(h.app).get(`${API}/tracks?${bbox}&times`).expect(200)
+
+    expect(Object.keys(timed.body).sort()).toEqual(Object.keys(plain.body).sort())
+    expect(Object.keys(plain.body)).toEqual([SELF_CONTEXT])
+  })
+
+  it('applies the time window to the listing', async () => {
+    const h = seeded()
+
+    const res = await request(h.app)
+      .get(`${API}/tracks?times&from=2026-08-14T09:00:30Z&to=2026-08-14T09:01:30Z`)
+      .expect(200)
+
+    expect(res.body[SELF_CONTEXT].times).toEqual([['2026-08-14T09:01:00.000Z']])
+  })
+})

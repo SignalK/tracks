@@ -22,7 +22,15 @@ import type { TrackStore } from './store.js'
 import { SourceWatch } from './sourceWatch.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
-import type { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types.js'
+import type {
+  Context,
+  Debug,
+  LatLngTuple,
+  LngLatTuple,
+  Position,
+  TimedTrackCollection,
+  TrackCollection,
+} from './types.js'
 import { resolveContext, toIsoTimes, validateParameters } from './utils.js'
 
 export interface ContextPosition {
@@ -42,6 +50,8 @@ interface AllTracksResult {
   [context: string]: {
     type: 'MultiLineString'
     coordinates: LngLatTuple[][]
+    /** Present only when `?times` was asked for; aligned with `coordinates`. */
+    times?: string[][]
     /**
      * Whether this is the own vessel's track.
      *
@@ -173,15 +183,15 @@ const DEFAULT_MAX_RADIUS = 50 * 1000 //50 kilometers
 // suits the fleet being watched.
 const DEFAULT_SEGMENT_GAP_MINUTES = 0
 
-// Bootstrap retry configuration:
-// First attempt after 5s (sufficient for warm restarts where InfluxDB is already running).
-// Subsequent attempts every 15s, up to 18 total (~260s window), covering cold boot scenarios
-// where InfluxDB may take 2+ minutes to accept connections after systemd reports it active.
 // Long enough that a boat with one GPS never pays for the check in practice,
 // short enough that the warning appears while the user is still looking at the
 // plugin page after enabling it.
 const SOURCE_STATUS_INTERVAL_MS = 30000
 
+// Bootstrap retry configuration:
+// First attempt after 5s (sufficient for warm restarts where InfluxDB is already running).
+// Subsequent attempts every 15s, up to 18 total (~260s window), covering cold boot scenarios
+// where InfluxDB may take 2+ minutes to accept connections after systemd reports it active.
 const BOOTSTRAP_INITIAL_DELAY = 5000
 const BOOTSTRAP_RETRY_DELAY = 15000
 const BOOTSTRAP_MAX_ATTEMPTS = 18
@@ -566,17 +576,40 @@ export default function ThePlugin(app: App): Plugin {
           res.json({ message: err instanceof TimeWindowError ? err.message : 'Invalid query parameters' })
           return
         }
-        tracks
-          .getFilteredTracks(validateParameters(req.query, defaultMaxRadius), getVesselPosition(), app.debug, query)
-          .then((tc: TrackCollection) => {
-            const trks = Object.entries(tc).reduce<AllTracksResult>((acc, [context, track]) => {
-              acc[context] = {
-                type: 'MultiLineString',
-                coordinates: [track.map(toLngLat)],
-                isSelf: context === app.selfContext,
-              }
-              return acc
-            }, {})
+        const params = validateParameters(req.query, defaultMaxRadius)
+        const selfPosition = getVesselPosition()
+
+        // Two paths on purpose. Without `times` the response keeps its
+        // long-standing shape exactly — one un-segmented line per vessel — so
+        // existing clients are unaffected. With `times` the track is segmented
+        // like the single-vessel route, because a times array can only line up
+        // with coordinates if both are split the same way.
+        const result = query.times
+          ? tracks.getFilteredTimedTracks(params, selfPosition, app.debug, query).then((tc: TimedTrackCollection) =>
+              Object.entries(tc).reduce<AllTracksResult>((acc, [context, points]) => {
+                const segments = segment(points, segmentGap)
+                acc[context] = {
+                  type: 'MultiLineString',
+                  coordinates: segments.map((s) => s.map(({ position }) => toLngLat(position))),
+                  times: segments.map(toIsoTimes),
+                  isSelf: context === app.selfContext,
+                }
+                return acc
+              }, {}),
+            )
+          : tracks.getFilteredTracks(params, selfPosition, app.debug, query).then((tc: TrackCollection) =>
+              Object.entries(tc).reduce<AllTracksResult>((acc, [context, track]) => {
+                acc[context] = {
+                  type: 'MultiLineString',
+                  coordinates: [track.map(toLngLat)],
+                  isSelf: context === app.selfContext,
+                }
+                return acc
+              }, {}),
+            )
+
+        result
+          .then((trks) => {
             res.json(trks)
           })
           .catch(() => {
