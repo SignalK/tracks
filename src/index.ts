@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { Tracks as Tracks_ } from './tracks.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import type { TrackStore } from './store.js'
+import { SourceWatch } from './sourceWatch.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { Context, Debug, LatLngTuple, LngLatTuple, Position, TrackCollection } from './types.js'
@@ -29,6 +30,12 @@ export interface ContextPosition {
   value: Position
   /** ISO-8601 time the value was recorded, as carried by the Signal K delta. */
   timestamp?: string
+  /**
+   * Which source produced the value. The bus carries every source's values,
+   * not just the one source priority selects, so this is how a multi-receiver
+   * setup is detected.
+   */
+  $source?: string
 }
 
 interface AllTracksResult {
@@ -80,6 +87,8 @@ interface App {
   }
   getSelfPath: (path: string) => unknown
   selfContext: string
+  /** Shown against the plugin in the server's dashboard. Absent on older servers. */
+  setPluginStatus?: (msg: string) => void
   /** Plugin-private directory for persistent data; absent on older servers. */
   getDataDirPath?: () => string
   /** Resolves the named provider, or the configured default when omitted. */
@@ -168,6 +177,11 @@ const DEFAULT_SEGMENT_GAP_MINUTES = 0
 // First attempt after 5s (sufficient for warm restarts where InfluxDB is already running).
 // Subsequent attempts every 15s, up to 18 total (~260s window), covering cold boot scenarios
 // where InfluxDB may take 2+ minutes to accept connections after systemd reports it active.
+// Long enough that a boat with one GPS never pays for the check in practice,
+// short enough that the warning appears while the user is still looking at the
+// plugin page after enabling it.
+const SOURCE_STATUS_INTERVAL_MS = 30000
+
 const BOOTSTRAP_INITIAL_DELAY = 5000
 const BOOTSTRAP_RETRY_DELAY = 15000
 const BOOTSTRAP_MAX_ATTEMPTS = 18
@@ -370,6 +384,7 @@ export default function ThePlugin(app: App): Plugin {
   let tracks: TrackStore | undefined = undefined
   let segmentGap = 0
   let defaultMaxRadius: number | undefined = undefined
+  const sourceWatch = new SourceWatch()
 
   function getVesselPosition(): LatLngTuple | undefined {
     const p = app.getSelfPath('navigation.position')
@@ -421,6 +436,7 @@ export default function ThePlugin(app: App): Plugin {
       onStop.push(
         app.streambundle.getBus('navigation.position').onValue((update: ContextPosition): void => {
           if (!update.value || update.value.latitude == null || update.value.longitude == null) return
+          sourceWatch.add(update.context, update.$source)
           // Prefer the delta's own timestamp so a replayed or delayed update is
           // filed at the time it was recorded, not the time it arrived.
           const recorded = update.timestamp === undefined ? undefined : Date.parse(update.timestamp)
@@ -436,6 +452,20 @@ export default function ThePlugin(app: App): Plugin {
       const pruneInterval = setInterval(() => tracks?.prune(theMaxAge * 1000), (theMaxAge * 1000) / 2)
       onStop.push(() => {
         clearInterval(pruneInterval)
+      })
+
+      // Report on a timer rather than per delta: at 10Hz across several
+      // vessels that would rewrite the status thousands of times a minute, and
+      // the first fix from a second source is not yet evidence of a problem —
+      // a source that appears once and stops is not worth a warning.
+      const statusInterval = setInterval(() => {
+        const warning = sourceWatch.warning(app.selfContext)
+        if (warning) {
+          app.setPluginStatus?.(warning)
+        }
+      }, SOURCE_STATUS_INTERVAL_MS)
+      onStop.push(() => {
+        clearInterval(statusInterval)
       })
 
       // Bootstrap self track from History API (async, non-blocking).
@@ -457,6 +487,10 @@ export default function ThePlugin(app: App): Plugin {
         }
       })
       onStop = []
+      // Forget which sources were seen: the point of a restart is often to
+      // apply a source priority change, and carrying the old observations over
+      // would keep warning about a setup that has just been fixed.
+      sourceWatch.clear()
       // Release the file handle a sqlite store holds, so a plugin restart does
       // not leak it and the WAL gets checkpointed.
       //
