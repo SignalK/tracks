@@ -91,6 +91,20 @@ describe('SourceWatch', () => {
     expect(w.warning(undefined)).toContain('1 vessel')
   })
 
+  it('stays quiet when the server has already picked a winner', () => {
+    // The premise the warning rests on: getBus() is fed from `delta`, which the
+    // server emits *after* applying toPreferredDelta. With a priority rule in
+    // place only the winning source arrives, so a correctly configured boat
+    // never sees this warning however many receivers it has.
+    const w = new SourceWatch()
+    for (let i = 0; i < 100; i++) {
+      w.add(SELF, 'gps.0')
+    }
+
+    expect(w.conflicted()).toEqual([])
+    expect(w.warning(SELF)).toBeUndefined()
+  })
+
   it('forgets what it saw when cleared', () => {
     const w = new SourceWatch()
     w.add(SELF, 'gps.0')

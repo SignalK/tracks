@@ -25,12 +25,13 @@ vessel, exposing the result as `Observable<LatLngTuple[]>`.
 
 `navigation.position` often arrives from several sources at once — an internal GPS, an AIS
 transponder, a plotter echoing its own fix. Signal K decides which one wins through **source
-priority**, but the stream this plugin listens on carries them all.
+priority**, and the stream this plugin records from is already filtered by it, so normally only
+the winning source is stored.
 
-Recording every source interleaves fixes from receivers metres apart, so the track zigzags
-between them instead of following the boat. If that is happening, the plugin says so in its
-status on the server dashboard, naming the sources it has seen. The fix is to set a source
-priority for `navigation.position` in the server settings.
+When no priority rule matches the path, though, every source comes through. Their fixes are
+metres apart, so the track zigzags between receivers instead of following the boat. If that is
+happening, the plugin says so in its status on the server dashboard, naming the sources it has
+seen. The fix is to set a source priority for `navigation.position` in the server settings.
 
 # Usage:
 

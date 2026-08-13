@@ -5,19 +5,23 @@ import type { Context } from './types.js'
  *
  * `navigation.position` is a rapid update — a GPS may report at 10Hz — and a
  * typical boat has several receivers: an internal GPS, an AIS transponder, a
- * chart plotter echoing its own fix. Signal K resolves which one *wins* per
- * path through source priority, but the streambundle bus this plugin listens
- * on carries every source's values, not just the winner.
+ * chart plotter echoing its own fix.
  *
- * Recording all of them interleaves fixes from receivers metres apart, so the
+ * Signal K resolves which one wins through source priority, and the bus this
+ * plugin listens on is the filtered one: the server applies `toPreferredDelta`
+ * before emitting `delta`, which is what feeds `getBus()`. So with a priority
+ * rule in place, only the winner arrives and there is nothing to warn about.
+ *
+ * The gap is when no rule *matches* the path. Then the engine passes every
+ * source through, the fixes from receivers metres apart interleave, and the
  * track zigzags between them rather than following the boat. The fix is to
  * configure source priority for `navigation.position`; this watcher exists to
  * say so, because the symptom (a track that looks noisy) does not obviously
  * point at the cause.
  *
- * Detection is empirical rather than reading the server's priority config:
- * what matters is what actually arrives, and a priority rule that exists but
- * does not match still produces multiple sources here.
+ * Detection is therefore empirical rather than reading the priority config:
+ * seeing several sources here *is* the evidence that no rule is matching,
+ * which a config that merely exists would not tell us.
  */
 export class SourceWatch {
   private readonly seen = new Map<Context, Set<string>>()

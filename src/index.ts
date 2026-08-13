@@ -39,9 +39,11 @@ export interface ContextPosition {
   /** ISO-8601 time the value was recorded, as carried by the Signal K delta. */
   timestamp?: string
   /**
-   * Which source produced the value. The bus carries every source's values,
-   * not just the one source priority selects, so this is how a multi-receiver
-   * setup is detected.
+   * Which source produced the value.
+   *
+   * The bus is priority-filtered, so normally this is the one source the
+   * server selected. Seeing several for one context means no priority rule is
+   * matching the path — which is what `SourceWatch` reports on.
    */
   $source?: string
 }
