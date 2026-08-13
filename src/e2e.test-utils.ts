@@ -15,13 +15,13 @@ import { join } from 'node:path'
  * arriving as deltas reach the plugin through the real streambundle.
  *
  * Deliberately not in CI. It needs a built server checkout and, for the
- * backfill tests, a running QuestDB.
+ * history-provider tests, a running QuestDB.
  */
 
 /** Where the signalk-server checkout lives. Override with SIGNALK_SERVER_DIR. */
 const SERVER_DIR = process.env.SIGNALK_SERVER_DIR ?? join(process.env.HOME ?? '', 'dev/xxx_signalk-server')
 
-/** QuestDB HTTP endpoint for the backfill tier. */
+/** QuestDB endpoint used by the history-provider tier. */
 export const QUESTDB_URL = process.env.QUESTDB_URL ?? 'http://localhost:9000'
 
 export interface E2EServer {
@@ -31,6 +31,8 @@ export interface E2EServer {
   feed: (context: string, position: [number, number], timestamp?: number, source?: string) => Promise<void>
   /** GET a path under /signalk/v1/api and parse the JSON. */
   api: (path: string) => Promise<unknown>
+  /** The server's own vessel context, as it resolved it. */
+  selfContext: string
   stop: () => void
 }
 
@@ -70,6 +72,17 @@ export interface E2EOptions {
   config?: Record<string, unknown>
   /** Seconds to wait for the server to answer before giving up. */
   timeoutSeconds?: number
+  /**
+   * Other plugins to install and enable alongside this one, as
+   * `{ 'npm-package-name': pluginConfiguration }`.
+   *
+   * Used to stand up a real history provider so the bootstrap can be exercised
+   * through `getHistoryApi()` — the interface this plugin actually depends on —
+   * rather than against a provider's private storage.
+   */
+  plugins?: Record<string, Record<string, unknown>>
+  /** Port to boot on, when a test needs its own server. */
+  port?: number
 }
 
 export async function startServer(options: E2EOptions = {}): Promise<E2EServer> {
@@ -96,7 +109,18 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
     ),
   )
 
-  const port = basePort
+  for (const [pkg, configuration] of Object.entries(options.plugins ?? {})) {
+    execFileSync('npm', ['install', pkg], { cwd: configDir, stdio: 'pipe' })
+    // The plugin id is the package name without a scope, which is how the
+    // server names the config file.
+    const id = pkg.replace(/^@[^/]+\//, '')
+    writeFileSync(
+      join(configDir, 'plugin-config-data', `${id}.json`),
+      JSON.stringify({ enabled: true, configuration }, null, 2),
+    )
+  }
+
+  const port = options.port ?? basePort
   const child: ChildProcess = spawn('node', ['bin/signalk-server', '-c', configDir], {
     cwd: SERVER_DIR,
     env: {
@@ -125,9 +149,11 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
     try {
       const res = await fetch(`${url}/signalk`, { signal: AbortSignal.timeout(2000) })
       if (res.ok) {
+        const self = (await (await fetch(`${url}/signalk/v1/api/self`)).json()) as string
         return {
           url,
           configDir,
+          selfContext: typeof self === 'string' ? self : `vessels.${String(self)}`,
           feed: (context, position, timestamp, source) => feedDelta(url, context, position, timestamp, source),
           api: async (path: string) => {
             const r = await fetch(`${url}/signalk/v1/api${path}`)
@@ -182,20 +208,17 @@ async function feedDelta(
   ws.close()
 }
 
-/** Run a SQL statement against QuestDB's HTTP endpoint. */
-export async function questdb(sql: string): Promise<{ dataset: unknown[][] }> {
-  const res = await fetch(`${QUESTDB_URL}/exec?query=${encodeURIComponent(sql)}`)
-  if (!res.ok) {
-    throw new Error(`QuestDB rejected the query (${res.status}): ${await res.text()}`)
-  }
-  return (await res.json()) as { dataset: unknown[][] }
-}
-
-/** Whether QuestDB is reachable, so the backfill tier can skip cleanly. */
+/**
+ * Whether a QuestDB is listening, so the provider tier can skip cleanly.
+ *
+ * A liveness probe only. What the provider stores, and how, is its own
+ * business: this plugin reaches it through `getHistoryApi()` and must keep
+ * working across any change to that.
+ */
 export async function questdbAvailable(): Promise<boolean> {
   try {
-    await questdb('SELECT 1')
-    return true
+    const res = await fetch(`${QUESTDB_URL}/`, { signal: AbortSignal.timeout(2000) })
+    return res.ok
   } catch {
     return false
   }
