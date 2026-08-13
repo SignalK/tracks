@@ -15,7 +15,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['**/*.test.ts', 'vite.config.ts', 'eslint.config.ts'],
+    files: ['**/*.test.ts', '**/*.test-utils.ts', 'vite.config.ts', 'vitest.e2e.config.ts', 'eslint.config.ts'],
     ...tseslint.configs.disableTypeChecked,
   },
   prettier,

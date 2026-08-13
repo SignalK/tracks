@@ -24,5 +24,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
+    // e2e runs against a real Signal K server and a real QuestDB, neither of
+    // which exists in CI. `npm run test:e2e` opts in.
+    exclude: ['**/node_modules/**', '**/dist/**', 'src/**/*.e2e.test.ts'],
   },
 })
