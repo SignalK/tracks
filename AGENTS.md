@@ -18,10 +18,23 @@ The package is **ESM only** (`"type": "module"`) and ships only `dist/`.
 npm ci
 npm run build      # vite library build -> dist/index.js + rolled-up index.d.ts
 npm test           # vitest
+npm run test:e2e   # real signalk-server + real QuestDB; never in CI
 npm run typecheck  # tsc --noEmit (the build itself does not typecheck)
 npm run lint       # eslint flat config
 npm run format     # prettier --write
 ```
+
+**`npm run test:e2e` needs a built `signalk-server` checkout.** It packs the plugin with
+`npm pack`, installs the tarball into a throwaway config dir, boots a real server against it,
+and feeds positions as deltas over the WebSocket API. That covers what the unit suite mocks:
+that the server can resolve and load the package at all (the `main`-vs-`exports` trap above),
+that `signalKApiRoutes` mounts where it should, and that deltas reach the plugin through the
+real streambundle.
+
+Point it at a checkout with `SIGNALK_SERVER_DIR`, default `~/dev/xxx_signalk-server`; build
+that checkout first with `npm run build:all`. The QuestDB tier is read-only and skips itself
+when nothing answers at `QUESTDB_URL` (default `http://localhost:9000`), so the server tier
+still runs without it.
 
 `tsconfig.json` is strict and then some — `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitReturns`, `noUnusedLocals`. Keep them on; they caught real bugs when they went in.
 
