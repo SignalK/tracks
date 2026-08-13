@@ -28,7 +28,9 @@ export interface TestHarness {
    * synchronous burst yields a single point regardless of the timestamps given.
    * Use `seedTrack` to install a back-dated track instead.
    */
-  emit: (context: string, position: LatLngTuple, timestamp?: number) => void
+  emit: (context: string, position: LatLngTuple, timestamp?: number, source?: string) => void
+  /** Status messages the plugin has pushed to the server dashboard. */
+  statuses: string[]
   /**
    * Install a track with explicit timestamps, bypassing the throttled bus. This
    * is the entry point the History API bootstrap uses.
@@ -50,6 +52,7 @@ export interface HarnessOptions {
 export function createHarness(options: HarnessOptions = {}): TestHarness {
   const listeners: PositionListener[] = []
   const errors: unknown[][] = []
+  const statuses: string[] = []
   let selfPosition: LatLngTuple | undefined = options.selfPosition
   const selfContext = options.selfContext ?? SELF_CONTEXT
 
@@ -58,6 +61,7 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
   const app = {
     debug,
     error: (...args: unknown[]) => errors.push(args),
+    setPluginStatus: (msg: string) => statuses.push(msg),
     selfContext,
     getSelfPath: (): unknown =>
       selfPosition
@@ -91,12 +95,13 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
 
   return {
     app: expressApp,
-    emit: (context, position, timestamp) => {
+    emit: (context, position, timestamp, source) => {
       for (const cb of listeners) {
         cb({
           context,
           value: { latitude: position[0], longitude: position[1] },
           ...(timestamp === undefined ? {} : { timestamp: new Date(timestamp).toISOString() }),
+          ...(source === undefined ? {} : { $source: source }),
         })
       }
     },
@@ -108,5 +113,6 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     },
     stop: () => plugin.stop(),
     errors,
+    statuses,
   }
 }
