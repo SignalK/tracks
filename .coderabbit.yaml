@@ -1,0 +1,112 @@
+language: en-US
+
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    drafts: false
+  high_level_summary_instructions: |
+    Write all summaries in present tense.
+    Describe what the code does, not what it did.
+    Example: "This PR adds feature X" instead of "This PR added feature X"
+
+  path_instructions:
+    - path: '**/*'
+      instructions: |
+        ## Read AGENTS.md first
+        `AGENTS.md` in the repository root is the contributor guide, and it is
+        written for human and AI contributors alike. Read it before reviewing and
+        treat it as authoritative on this repository's conventions: the commit
+        format, the one-logical-change-per-PR rule, the release-notes label
+        requirement, the architecture, and — most importantly — the "Traps worth
+        knowing" section.
+
+        Those traps are hard-won and counter-intuitive. Several of them look like
+        bugs to a reviewer who has not read them, so check that section before
+        flagging anything that appears to be a mistake in packaging, module
+        resolution, express route syntax, rxjs connectable behaviour, or the
+        `engines.node` floor. A finding that contradicts AGENTS.md is almost
+        certainly wrong; if the code genuinely does contradict it, say which
+        section and treat the discrepancy itself as the finding.
+
+        Do not repeat AGENTS.md back in review comments. Cite the section.
+
+        ## Where this repository is going
+        The track API is being designed in the open in
+        https://github.com/SignalK/signalk-server/issues/2504, and the data shapes
+        here are provisional until that settles. Prefer questions to assertions
+        about API shape, and flag anything that would be expensive to change
+        later — a new method on the `TrackStore` interface, a new response field,
+        a new query parameter — since those constrain implementations that do not
+        exist yet.
+
+        ## Echo comments
+        Flag any comment that merely restates what the code already says.
+        Examples of echo comments to flag:
+        - `// Sets the resolution` above a function named `setResolution()`
+        - `// Loop through contexts` above a `for` loop
+        These add noise without adding meaning. Request removal or replacement
+        with a comment explaining *why*, not *what*.
+
+        ## Leftover crumbs from intermediate commits
+        Check for references to things that existed in earlier commits of this PR
+        but are no longer present — removed variables, old function names, deleted
+        files, superseded approaches. These are confusing to future readers.
+        Flag any comments, docs, or code that refer to something not present in
+        the current state of the branch.
+
+        ## Documentation drift risk
+        Flag any .md file that contains detailed implementation steps, specific
+        API call sequences, code snippets, or configuration values that are likely
+        to fall out of sync as the code evolves. Documentation should describe
+        architecture and how things work conceptually — not step-by-step
+        instructions that duplicate or shadow the code itself.
+
+        ## Unchecked items in test plans
+        If a PR description or any .md file contains a checklist with unchecked
+        items, flag it. Either the work is incomplete, or the checklist should be
+        removed before merge. Do not let unchecked boxes pass silently.
+
+        ## Implementation status in documentation
+        Flag any .md file that describes implementation progress, status, or
+        build steps (e.g. "Step 3: implement X", "TODO: add Y", "currently
+        implemented as Z"). This belongs in PR descriptions or commit messages,
+        not in documentation. Documentation should describe how things work,
+        not how they were built or what stage they are in.
+        Architecture decisions and design rationale are fine. Build narratives
+        are not.
+
+        ## What NOT to flag
+        Do not flag the following patterns — they are intentional, and each is
+        explained in AGENTS.md:
+        - `main` and `exports` both pointing at `dist/index.js` in package.json,
+          and the comment defending it. The server resolves plugins by directory
+          and reads `main`; dropping it makes the plugin unloadable.
+        - A bare `*` wildcard in an express route. The Signal K server runs
+          express 4, where that is the correct syntax — not express 5's `*splat`.
+        - The plugin's `export default`. The server's `import()` fallback reads
+          `module.default` with no `?? mod`, so a named-only export loads as
+          undefined.
+        - `files` in package.json listing only `dist`. It is an allowlist, and
+          the package once shipped at 174 MB when a denylist `.npmignore` failed
+          to exclude `node_modules`.
+        - `resetOnDisconnect: false` on the rxjs `connectable()`. The default
+          would discard the accumulated track when the last subscriber leaves.
+        - Coordinates held as `[lat, lng]` internally and flipped to `[lng, lat]`
+          only at the GeoJSON boundary, and a `bbox` query parameter that is
+          `lat,lon,lat,lon` rather than GeoJSON order. Both are deliberate and
+          documented; check which side of the boundary the code is on before
+          calling an order wrong.
+        - Tests that seed positions with `initialTrack` rather than
+          `newPosition`. `throttleTime` thins against the wall clock, so a
+          synchronous burst of `newPosition` calls yields a single point.
+        - `*.e2e.test.ts` files being excluded from the default vitest run. They
+          need a built signalk-server checkout and a running QuestDB, so they are
+          opt-in via `npm run test:e2e` and deliberately absent from CI.
+        - The absence of a CHANGELOG. Release notes are generated from merged PR
+          titles by `.github/workflows/release_on_tag.yml`.
+
+        ## Scope
+        Focus on files changed since main. Think carefully about how changes
+        interact with existing code and documentation — not just the diff in
+        isolation.
