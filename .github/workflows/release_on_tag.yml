@@ -67,7 +67,7 @@ jobs:
 
       # Node 24 bundles npm 11, which is the first line that performs the OIDC
       # token exchange. Older npm skips it silently and the publish 404s.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
