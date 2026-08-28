@@ -69,6 +69,7 @@ Vite transpiles without type checking, so **`npm run build` passing does not mea
 - **Every PR needs exactly one release-notes label**, enforced by `.github/workflows/require_pr_label.yml`. `.github/release.yml` groups the notes: `feature`/`enhancement` → 🚀 Features, `bug`/`fix` → 🐛 Fixes, `documentation` → 📖 Documentation, `dependencies` → 📦 Dependencies. `skip-changelog` omits the PR entirely — for changes with nothing to tell a user. The two files list the same labels on purpose: adding one to the gate without a matching category in `release.yml` puts the PR back in the uncategorised "Other" bucket the gate exists to prevent.
 - **Branch from latest `main`.** Hyphens in branch names, not slashes.
 - **CI must be green.** `.github/workflows/signalk-ci.yml` calls the canonical `SignalK/signalk-server` reusable workflow across Linux x64/arm64, macOS and Windows on Node 22 and 24.
+- **This file is the review baseline too.** `.coderabbit.yaml` points CodeRabbit here rather than restating the conventions, so a rule added below applies to automated review as well. If a review comment contradicts this file, the review is wrong — or this file is out of date, which is itself worth fixing.
 
 ## Traps worth knowing
 
