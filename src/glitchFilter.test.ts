@@ -135,29 +135,55 @@ describe('glitch filtering through the plugin', () => {
     return (res.body.coordinates as [number, number][][]).flat()
   }
 
+  /**
+   * Feed two positions so that both reach the store.
+   *
+   * `throttleTime` thins on the leading edge against the wall clock, so two
+   * synchronous emits arrive as a single point whatever the filter decides —
+   * which would make every assertion below pass with the filter removed.
+   * Yielding to the event loop between them is what makes these tests about
+   * the filter rather than about throttling.
+   */
+  const feedBoth = async (h: ReturnType<typeof createHarness>, second: LatLngTuple): Promise<[number, number][]> => {
+    const t0 = Date.now() - 10 * MINUTE
+    h.emit(SELF, HELSINKI, t0)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    h.emit(SELF, second, t0 + MINUTE)
+    return coordinatesFor(h)
+  }
+
   it('keeps a glitched position out of the track', async () => {
-    const h = createHarness({ selfPosition: [60, 24] })
+    const h = createHarness({ selfPosition: [60, 24], config: { resolution: 0 } })
     try {
-      const t0 = Date.now() - 10 * MINUTE
-      h.emit(SELF, HELSINKI, t0)
-      h.emit(SELF, GLITCH, t0 + MINUTE)
+      const coordinates = await feedBoth(h, GLITCH)
 
       // GeoJSON output is [lng, lat], so the glitch would appear as [0, 0].
-      expect(await coordinatesFor(h)).not.toContainEqual([0, 0])
+      expect(coordinates).toContainEqual([24.9, 60.1])
+      expect(coordinates).not.toContainEqual([0, 0])
     } finally {
       h.stop()
     }
   })
 
-  // The disabled case (maxSpeedKnots 0) is covered at unit level above rather
-  // than here: throttleTime thins against the wall clock, so a synchronous
-  // burst reaches the store as a single point whatever the filter decides.
-  it('records a plausible position normally', async () => {
-    const h = createHarness({ selfPosition: [60, 24] })
+  it('records a plausible second position', async () => {
+    const h = createHarness({ selfPosition: [60, 24], config: { resolution: 0 } })
     try {
-      h.emit(SELF, HELSINKI, Date.now() - MINUTE)
+      const coordinates = await feedBoth(h, NEARBY)
 
-      expect(await coordinatesFor(h)).toContainEqual([24.9, 60.1])
+      expect(coordinates).toContainEqual([24.9, 60.1])
+      expect(coordinates).toContainEqual([24.9, 60.11])
+    } finally {
+      h.stop()
+    }
+  })
+
+  it('records the glitch when the filter is disabled', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      config: { resolution: 0, maxSpeedKnots: 0 },
+    })
+    try {
+      expect(await feedBoth(h, GLITCH)).toContainEqual([0, 0])
     } finally {
       h.stop()
     }
