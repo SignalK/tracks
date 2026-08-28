@@ -32,9 +32,14 @@ that `signalKApiRoutes` mounts where it should, and that deltas reach the plugin
 real streambundle.
 
 Point it at a checkout with `SIGNALK_SERVER_DIR`, default `~/dev/xxx_signalk-server`; build
-that checkout first with `npm run build:all`. The QuestDB tier is read-only and skips itself
-when nothing answers at `QUESTDB_URL` (default `http://localhost:9000`), so the server tier
-still runs without it.
+that checkout first with `npm run build:all`.
+
+The second tier installs **signalk-questdb** into that server and lets the startup bootstrap run
+through `getHistoryApi()` for real. Test the History API contract, not a provider's storage: how
+questdb, influx or anything else keeps its rows is its own business, and a test asserting that
+would fail on a provider change that this plugin is unaffected by. It skips itself when nothing
+answers at `QUESTDB_URL` (default `http://localhost:9000`), so the server tier still runs
+without it.
 
 `tsconfig.json` is strict and then some — `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitReturns`, `noUnusedLocals`. Keep them on; they caught real bugs when they went in.
 
