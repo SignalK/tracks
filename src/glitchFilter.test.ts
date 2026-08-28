@@ -183,7 +183,14 @@ describe('glitch filtering through the plugin', () => {
       config: { resolution: 0, maxSpeedKnots: 0 },
     })
     try {
-      expect(await feedBoth(h, GLITCH)).toContainEqual([0, 0])
+      const coordinates = await feedBoth(h, GLITCH)
+
+      // Both asserted: if the first emit stopped reaching the store the glitch
+      // would become the first accepted position — always kept, since there is
+      // nothing to compare it against — and this would pass regardless of the
+      // configuration path.
+      expect(coordinates).toContainEqual([24.9, 60.1])
+      expect(coordinates).toContainEqual([0, 0])
     } finally {
       h.stop()
     }
