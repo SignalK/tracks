@@ -21,6 +21,22 @@ the setting is still read, with `false` mapping to `memory` and anything else to
 The package also exports a client side `TrackAccumulator` class that manages the track for a single
 vessel, exposing the result as `Observable<LatLngTuple[]>`.
 
+## Glitch filtering
+
+A receiver occasionally reports a position far from the vessel — a bad almanac, a multipath
+reflection, a unit resetting. On a live map it flickers past. In a stored track it is permanent:
+one spike stretches the bounding box across an ocean and draws a line over the chart every time
+the track is rendered.
+
+Positions implying a speed above **Discard positions implying a speed above this (knots)** since
+the previous accepted fix are discarded, defaulting to 100 knots. That is well above any real
+vessel, and glitches usually miss it by orders of magnitude rather than by a little. The test is
+speed rather than distance, so a track resuming after a long gap — a passage with the plugin
+stopped, or an AIS target reappearing — is not filtered. Set it to 0 to record everything.
+
+The same check runs over positions loaded from a history provider at startup, since those carry
+the same glitches.
+
 ## Position sources
 
 `navigation.position` often arrives from several sources at once — an internal GPS, an AIS

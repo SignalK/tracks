@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { Tracks as Tracks_ } from './tracks.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import type { TrackStore } from './store.js'
+import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
 import { SourceWatch } from './sourceWatch.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
@@ -155,6 +156,8 @@ interface TracksPluginConfig {
   retentionDays?: number
   /** Minutes without a fix that start a new track segment. 0 disables. */
   segmentGapMinutes?: number
+  /** Speed above which a position is treated as a glitch. 0 disables. */
+  maxSpeedKnots?: number
 }
 
 /**
@@ -266,7 +269,12 @@ const historyRowTimestamp = (row: unknown): number => {
   return Number.isNaN(parsed) ? 0 : parsed
 }
 
-async function bootstrapSelfTrack(app: App, tracks: TrackStore, config: TracksPluginConfig): Promise<void> {
+async function bootstrapSelfTrack(
+  app: App,
+  tracks: TrackStore,
+  config: TracksPluginConfig,
+  glitchFilter: GlitchFilter,
+): Promise<void> {
   const { debug } = app
   const getHistoryApi = app.getHistoryApi
 
@@ -329,12 +337,24 @@ async function bootstrapSelfTrack(app: App, tracks: TrackStore, config: TracksPl
         // Carry the recorded times through so bootstrapped points answer
         // time-window queries rather than looking infinitely old.
         const timestamps: number[] = []
+        let dropped = 0
         for (const row of response.data) {
           const position = historyRowPosition(row)
           if (position) {
+            const timestamp = historyRowTimestamp(row)
+            // History carries the same receiver glitches the live stream does,
+            // and bootstrap is how a persistent track is rehydrated — an
+            // unfiltered spike here would be baked in permanently.
+            if (!glitchFilter.accept(app.selfContext, position, timestamp)) {
+              dropped++
+              continue
+            }
             positions.push(position)
-            timestamps.push(historyRowTimestamp(row))
+            timestamps.push(timestamp)
           }
+        }
+        if (dropped > 0) {
+          debug(`Track bootstrap discarded ${dropped} position(s) as glitches`)
         }
 
         if (positions.length > 0) {
@@ -397,6 +417,7 @@ export default function ThePlugin(app: App): Plugin {
   let segmentGap = 0
   let defaultMaxRadius: number | undefined = undefined
   const sourceWatch = new SourceWatch()
+  let glitchFilter = new GlitchFilter({ maxSpeedKnots: DEFAULT_MAX_SPEED_KNOTS })
 
   function getVesselPosition(): LatLngTuple | undefined {
     const p = app.getSelfPath('navigation.position')
@@ -416,6 +437,13 @@ export default function ThePlugin(app: App): Plugin {
       const source = resolveSource(config)
       const segmentGapMinutes = toNumber(config.segmentGapMinutes) ?? DEFAULT_SEGMENT_GAP_MINUTES
       segmentGap = segmentGapMinutes > 0 ? segmentGapMinutes * 60 * 1000 : 0
+
+      // Rebuilt on every start so a changed ceiling takes effect, and so the
+      // reference positions do not survive a restart the user made precisely
+      // because the track looked wrong.
+      glitchFilter = new GlitchFilter({
+        maxSpeedKnots: toNumber(config.maxSpeedKnots) ?? DEFAULT_MAX_SPEED_KNOTS,
+      })
 
       // getDataDirPath is what makes the file the server's to manage (backed up
       // and removed with the plugin). Without it there is nowhere safe to
@@ -452,11 +480,14 @@ export default function ThePlugin(app: App): Plugin {
           // Prefer the delta's own timestamp so a replayed or delayed update is
           // filed at the time it was recorded, not the time it arrived.
           const recorded = update.timestamp === undefined ? undefined : Date.parse(update.timestamp)
-          tracks?.newPosition(
-            update.context,
-            [update.value.latitude, update.value.longitude],
-            recorded !== undefined && !Number.isNaN(recorded) ? recorded : undefined,
-          )
+          const timestamp = recorded !== undefined && !Number.isNaN(recorded) ? recorded : undefined
+          const position: LatLngTuple = [update.value.latitude, update.value.longitude]
+          // Filtered here rather than in each store: both would otherwise need
+          // the same check, and a rejected fix should reach neither.
+          if (!glitchFilter.accept(update.context, position, timestamp ?? Date.now())) {
+            return
+          }
+          tracks?.newPosition(update.context, position, timestamp)
         }),
       )
       const theMaxAge = toNumber(maxAge) ?? DEFAULT_MAX_AGE
@@ -484,7 +515,7 @@ export default function ThePlugin(app: App): Plugin {
       // Only for `history`: a sqlite store already holds what it recorded, and
       // refilling it from a provider would duplicate those positions.
       if (source === 'history') {
-        bootstrapSelfTrack(app, tracks, config).catch((err: unknown) => {
+        bootstrapSelfTrack(app, tracks, config, glitchFilter).catch((err: unknown) => {
           app.error(`Unexpected error in track bootstrap: ${errorDetail(err)}`)
         })
       }
@@ -503,6 +534,7 @@ export default function ThePlugin(app: App): Plugin {
       // apply a source priority change, and carrying the old observations over
       // would keep warning about a setup that has just been fixed.
       sourceWatch.clear()
+      glitchFilter.clear()
       // Release the file handle a sqlite store holds, so a plugin restart does
       // not leak it and the WAL gets checkpointed.
       //
@@ -679,6 +711,13 @@ export default function ThePlugin(app: App): Plugin {
           description:
             'A gap longer than this starts a new track segment, so a stop overnight or a spell out of AIS range does not draw a straight line across it. 0 (the default) returns the track as a single line, as before. Note that slow-updating AIS targets can legitimately go many minutes between fixes, so a low value will fragment their tracks.',
           default: DEFAULT_SEGMENT_GAP_MINUTES,
+        },
+        maxSpeedKnots: {
+          type: 'integer',
+          title: 'Discard positions implying a speed above this (knots)',
+          description:
+            'A receiver occasionally reports a position far from the vessel. On a live map it flickers past; in a stored track it is permanent, stretching the bounding box and drawing a line across the chart. A fix that would require travelling faster than this since the previous one is discarded. The default is well above any real vessel, and glitches miss it by orders of magnitude. 0 disables the check.',
+          default: DEFAULT_MAX_SPEED_KNOTS,
         },
       },
     },
