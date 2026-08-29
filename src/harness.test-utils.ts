@@ -38,6 +38,8 @@ export interface TestHarness {
   seedTrack: (context: string, positions: LatLngTuple[], timestamps: number[]) => void
   /** Self position as reported by `getSelfPath`, used for radius filtering. */
   setSelfPosition: (position: LatLngTuple | undefined) => void
+  /** The own vessel's navigation.state, as reported by `getSelfPath`. */
+  setSelfState: (state: string | undefined) => void
   stop: () => void
   errors: unknown[][]
 }
@@ -47,6 +49,8 @@ export interface HarnessOptions {
   config?: Record<string, unknown>
   selfContext?: string
   selfPosition?: LatLngTuple
+  /** Initial navigation.state for the own vessel. */
+  selfState?: string
 }
 
 export function createHarness(options: HarnessOptions = {}): TestHarness {
@@ -54,6 +58,7 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
   const errors: unknown[][] = []
   const statuses: string[] = []
   let selfPosition: LatLngTuple | undefined = options.selfPosition
+  let selfState: string | undefined = options.selfState
   const selfContext = options.selfContext ?? SELF_CONTEXT
 
   const debug: Debug = Object.assign(() => undefined, { enabled: false })
@@ -63,10 +68,17 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     error: (...args: unknown[]) => errors.push(args),
     setPluginStatus: (msg: string) => statuses.push(msg),
     selfContext,
-    getSelfPath: (): unknown =>
-      selfPosition
+    // Path-aware: the plugin reads navigation.state as well as position, and a
+    // stub that answered every path with a position would let a broken state
+    // lookup pass unnoticed.
+    getSelfPath: (path: string): unknown => {
+      if (path === 'navigation.state') {
+        return selfState === undefined ? undefined : { value: selfState }
+      }
+      return selfPosition
         ? { value: { latitude: selfPosition[0], longitude: selfPosition[1] } satisfies Position }
-        : undefined,
+        : undefined
+    },
     streambundle: {
       getBus: () => ({
         onValue: (cb: PositionListener) => {
@@ -110,6 +122,9 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     },
     setSelfPosition: (position) => {
       selfPosition = position
+    },
+    setSelfState: (state) => {
+      selfState = state
     },
     stop: () => plugin.stop(),
     errors,

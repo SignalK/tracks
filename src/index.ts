@@ -21,6 +21,7 @@ import { SqliteTrackStore } from './sqliteStore.js'
 import type { TrackStore } from './store.js'
 import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
 import { SourceWatch } from './sourceWatch.js'
+import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type {
@@ -158,6 +159,8 @@ interface TracksPluginConfig {
   segmentGapMinutes?: number
   /** Speed above which a position is treated as a glitch. 0 disables. */
   maxSpeedKnots?: number
+  /** navigation.state values that pause recording of the own vessel. */
+  pauseWhenState?: string[]
 }
 
 /**
@@ -418,6 +421,17 @@ export default function ThePlugin(app: App): Plugin {
   let defaultMaxRadius: number | undefined = undefined
   const sourceWatch = new SourceWatch()
   let glitchFilter = new GlitchFilter({ maxSpeedKnots: DEFAULT_MAX_SPEED_KNOTS })
+  let stateGate = new StateGate(app.selfContext, DEFAULT_PAUSE_STATES)
+
+  /** The own vessel's navigation.state, or undefined when it reports none. */
+  function getVesselState(): string | undefined {
+    const s = app.getSelfPath('navigation.state')
+    if (s && typeof s === 'object' && 'value' in s) {
+      const { value } = s as { value?: unknown }
+      return typeof value === 'string' ? value : undefined
+    }
+    return undefined
+  }
 
   function getVesselPosition(): LatLngTuple | undefined {
     const p = app.getSelfPath('navigation.position')
@@ -444,6 +458,10 @@ export default function ThePlugin(app: App): Plugin {
       glitchFilter = new GlitchFilter({
         maxSpeedKnots: toNumber(config.maxSpeedKnots) ?? DEFAULT_MAX_SPEED_KNOTS,
       })
+      stateGate = new StateGate(
+        app.selfContext,
+        Array.isArray(config.pauseWhenState) ? config.pauseWhenState : DEFAULT_PAUSE_STATES,
+      )
 
       // getDataDirPath is what makes the file the server's to manage (backed up
       // and removed with the plugin). Without it there is nowhere safe to
@@ -482,6 +500,12 @@ export default function ThePlugin(app: App): Plugin {
           const recorded = update.timestamp === undefined ? undefined : Date.parse(update.timestamp)
           const timestamp = recorded !== undefined && !Number.isNaN(recorded) ? recorded : undefined
           const position: LatLngTuple = [update.value.latitude, update.value.longitude]
+          // Read per delta rather than subscribed to: navigation.state changes
+          // rarely, and the current value is what matters at the moment a
+          // position arrives.
+          if (!stateGate.accept(update.context, getVesselState())) {
+            return
+          }
           // Filtered here rather than in each store: both would otherwise need
           // the same check, and a rejected fix should reach neither.
           if (!glitchFilter.accept(update.context, position, timestamp ?? Date.now())) {
@@ -501,10 +525,18 @@ export default function ThePlugin(app: App): Plugin {
       // vessels that would rewrite the status thousands of times a minute, and
       // the first fix from a second source is not yet evidence of a problem —
       // a source that appears once and stops is not worth a warning.
+      // Reported rather than left to go stale: without the else branch the last
+      // "not recording" message stayed on the dashboard after the vessel got
+      // under way, which is worse than saying nothing at all.
+      let lastStatus: string | undefined
       const statusInterval = setInterval(() => {
-        const warning = sourceWatch.warning(app.selfContext)
-        if (warning) {
-          app.setPluginStatus?.(warning)
+        // Being paused is the more useful thing to report: a user who has
+        // opted in wants to see it is working, and one who has not wonders why
+        // nothing is recording.
+        const status = stateGate.status() ?? sourceWatch.warning(app.selfContext) ?? 'Recording tracks'
+        if (status !== lastStatus) {
+          lastStatus = status
+          app.setPluginStatus?.(status)
         }
       }, SOURCE_STATUS_INTERVAL_MS)
       onStop.push(() => {
@@ -535,6 +567,7 @@ export default function ThePlugin(app: App): Plugin {
       // would keep warning about a setup that has just been fixed.
       sourceWatch.clear()
       glitchFilter.clear()
+      stateGate.clear()
       // Release the file handle a sqlite store holds, so a plugin restart does
       // not leak it and the WAL gets checkpointed.
       //
@@ -718,6 +751,18 @@ export default function ThePlugin(app: App): Plugin {
           description:
             'A receiver occasionally reports a position far from the vessel. On a live map it flickers past; in a stored track it is permanent, stretching the bounding box and drawing a line across the chart. A fix that would require travelling faster than this since the previous one is discarded. The default is well above any real vessel, and glitches miss it by orders of magnitude. 0 disables the check.',
           default: DEFAULT_MAX_SPEED_KNOTS,
+        },
+        pauseWhenState: {
+          type: 'array',
+          title: 'Pause recording while navigation.state is one of',
+          description:
+            "Stops recording the own vessel while it is not going anywhere, so a winter on a mooring costs no rows. Needs navigation.state to be set, by signalk-autostate or by hand. Leave empty (the default) to always record. Note that 'anchored' is offered but rarely wanted: an anchor alarm watches exactly the track a vessel makes while swinging on its rode. AIS targets are never gated, since their status comes from the transponder and is often stale.",
+          items: {
+            type: 'string',
+            enum: [...PAUSABLE_STATES],
+          },
+          uniqueItems: true,
+          default: DEFAULT_PAUSE_STATES,
         },
       },
     },

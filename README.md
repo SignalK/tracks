@@ -37,6 +37,23 @@ stopped, or an AIS target reappearing — is not filtered. Set it to 0 to record
 The same check runs over positions loaded from a history provider at startup, since those carry
 the same glitches.
 
+## Pausing while not under way
+
+A boat on a mooring for the winter emits a position every second and travels nowhere. Setting
+**Pause recording while navigation.state is one of** stops those months costing any rows.
+
+Off by default, and it needs `navigation.state` to be set — by
+[signalk-autostate](https://github.com/meri-imperiumi/signalk-autostate) or by hand. A vessel
+that reports no state is always recorded, so nothing changes for an install that has not opted in.
+
+Two limits are deliberate. **`anchored` is offered but rarely wanted**: an anchor alarm watches
+exactly the track a vessel makes while swinging on its rode, so pausing there would break it.
+And **AIS targets are never paused** — their navigational status comes from the transponder and
+is often stale, so a vessel under way still reporting `moored` would otherwise vanish from the
+track.
+
+While paused, the plugin says so in its status on the server dashboard.
+
 ## Position sources
 
 `navigation.position` often arrives from several sources at once — an internal GPS, an AIS
