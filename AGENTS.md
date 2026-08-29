@@ -41,7 +41,16 @@ would fail on a provider change that this plugin is unaffected by. It skips itse
 answers at `QUESTDB_URL` (default `http://localhost:9000`), so the server tier still runs
 without it.
 
-`tsconfig.json` is strict and then some — `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitReturns`, `noUnusedLocals`. Keep them on; they caught real bugs when they went in.
+`tsconfig.json` extends `@tsconfig/node24`, the same base `signalk-server` uses, so both agree on
+which built-ins exist rather than drifting apart. Two options are overridden deliberately: that base
+sets `module: nodenext` and `moduleResolution: node16` for a Node-resolved application, while this
+package is bundled by vite and needs `ESNext`/`bundler`.
+
+Note the tsconfig target governs type checking only — `vite.config.ts` down-levels the shipped
+`dist/` to `node20.19` independently, so raising the base does not raise what the published package
+requires. `engines.node` is the field that says that.
+
+On top of the base, `tsconfig.json` is strict and then some — `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitReturns`, `noUnusedLocals`. Keep them on; they caught real bugs when they went in.
 
 Vite transpiles without type checking, so **`npm run build` passing does not mean the types are sound.** CI runs `typecheck` separately and so should you.
 
