@@ -230,6 +230,31 @@ describe('state gating through the plugin', () => {
     }
   })
 
+  it('clears the paused status once the vessel is under way again', async () => {
+    // Without this the last "not recording" message stayed on the dashboard
+    // while the boat was sailing, which is worse than saying nothing.
+    vi.useFakeTimers()
+    const h = createHarness({
+      selfPosition: [60, 24],
+      selfState: 'moored',
+      config: { resolution: 0, pauseWhenState: ['moored'] },
+    })
+    try {
+      h.emit(SELF, HELSINKI, Date.now())
+      vi.advanceTimersByTime(30_000)
+      expect(h.statuses.at(-1)).toContain('moored')
+
+      h.setSelfState('sailing')
+      h.emit(SELF, NEARBY, Date.now())
+      vi.advanceTimersByTime(30_000)
+
+      expect(h.statuses.at(-1)).not.toContain('moored')
+    } finally {
+      h.stop()
+      vi.useRealTimers()
+    }
+  })
+
   it('reports being paused on the dashboard', async () => {
     vi.useFakeTimers()
     const h = createHarness({

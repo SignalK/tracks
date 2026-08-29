@@ -525,12 +525,17 @@ export default function ThePlugin(app: App): Plugin {
       // vessels that would rewrite the status thousands of times a minute, and
       // the first fix from a second source is not yet evidence of a problem —
       // a source that appears once and stops is not worth a warning.
+      // Reported rather than left to go stale: without the else branch the last
+      // "not recording" message stayed on the dashboard after the vessel got
+      // under way, which is worse than saying nothing at all.
+      let lastStatus: string | undefined
       const statusInterval = setInterval(() => {
         // Being paused is the more useful thing to report: a user who has
         // opted in wants to see it is working, and one who has not wonders why
         // nothing is recording.
-        const status = stateGate.status() ?? sourceWatch.warning(app.selfContext)
-        if (status) {
+        const status = stateGate.status() ?? sourceWatch.warning(app.selfContext) ?? 'Recording tracks'
+        if (status !== lastStatus) {
+          lastStatus = status
           app.setPluginStatus?.(status)
         }
       }, SOURCE_STATUS_INTERVAL_MS)

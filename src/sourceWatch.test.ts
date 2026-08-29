@@ -145,7 +145,9 @@ describe('source warning through the plugin', () => {
       h.emit(SELF, [60.1, 24.91], undefined, 'gps.0')
       vi.advanceTimersByTime(120_000)
 
-      expect(h.statuses).toEqual([])
+      // A healthy status is still pushed; what matters is that none of them
+      // warns about sources.
+      expect(h.statuses.some((s) => s.includes('navigation.position'))).toBe(false)
     } finally {
       h.stop()
       vi.useRealTimers()
