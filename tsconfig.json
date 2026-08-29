@@ -1,12 +1,13 @@
 {
+  "extends": "@tsconfig/node24/tsconfig.json",
   "compilerOptions": {
-    "target": "ES2023",
-    "lib": ["ES2023"],
+    // The shared base targets the Node the Signal K server develops against,
+    // so this package and the server agree on which built-ins exist. It also
+    // sets module/moduleResolution for a Node-resolved app; vite bundles this
+    // one, so those two are kept as they were.
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "types": ["node"],
 
-    "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "noImplicitOverride": true,
@@ -22,8 +23,6 @@
     "sourceMap": true,
     "outDir": "dist",
     "rootDir": "src",
-    "skipLibCheck": true,
-    "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
   },
   "include": ["src"],
