@@ -102,6 +102,15 @@ describe('reconcile', () => {
       expect(r.fromStore).toBe(2)
     })
 
+    it('uses the true span when history arrives out of order', () => {
+      // Nothing guarantees a provider returns rows in time order. Taking the
+      // first and last would judge a stored point inside history's span to be
+      // outside it, and keep both.
+      const r = reconcile([bucket(4), bucket(2)], [stored(3)], 0)
+      expect(r.fromStore).toBe(0)
+      expect(r.positions).toHaveLength(2)
+    })
+
     it('falls back to the store entirely when history is empty', () => {
       const r = reconcile([], [stored(1)], 0)
       expect(r.fromStore).toBe(1)

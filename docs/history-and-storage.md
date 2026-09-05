@@ -40,9 +40,9 @@ query window: last two years
 ```
 
 A track can therefore change granularity partway along: coarse where it came
-from the store, fine where the provider reached. That is expected, and the
-response says so — `properties.resolution` reports the coarsest spacing present,
-so a client is never told a track is more precise than part of it is.
+from the store, fine where the provider reached. That is expected. Passing
+`resolution` on a query thins the result to a spacing you choose, which is the
+way to get an evenly spaced track regardless of where each part came from.
 
 ## When the provider has holes
 

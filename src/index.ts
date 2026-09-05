@@ -401,6 +401,13 @@ async function bootstrapSelfTrack(
           const position = historyRowPosition(row)
           if (position) {
             const timestamp = historyRowTimestamp(row)
+            // An unusable timestamp reads as 0, which would file the position
+            // at 1970 — infinitely old to every window query, and permanent
+            // once a persistent store has it.
+            if (timestamp === 0) {
+              dropped++
+              continue
+            }
             // History carries the same receiver glitches the live stream does,
             // and bootstrap is how a persistent track is rehydrated — an
             // unfiltered spike here would be baked in permanently.

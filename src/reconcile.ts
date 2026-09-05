@@ -100,8 +100,15 @@ function reconcileByExtent(history: TimedPosition[], stored: TimedPosition[]): R
   if (history.length === 0) {
     return { positions: [...stored], fromHistory: 0, fromStore: stored.length }
   }
-  const first = history[0]!.timestamp
-  const last = history[history.length - 1]!.timestamp
+  // Min and max rather than first and last: nothing guarantees a provider
+  // returns rows in time order, and assuming it does would judge a stored
+  // point inside history's span to be outside it, keeping both.
+  let first = history[0]!.timestamp
+  let last = first
+  for (const point of history) {
+    if (point.timestamp < first) first = point.timestamp
+    if (point.timestamp > last) last = point.timestamp
+  }
   const outside = stored.filter((p) => p.timestamp < first || p.timestamp > last)
   const positions = [...history, ...outside].sort((a, b) => a.timestamp - b.timestamp)
   return {
