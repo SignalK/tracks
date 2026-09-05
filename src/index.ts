@@ -274,6 +274,24 @@ const historyRowPosition = (row: unknown): LatLngTuple | undefined => {
   return undefined
 }
 
+/**
+ * A window covering everything the store holds, up to now.
+ *
+ * Used when a query names no window of its own, so a history provider can
+ * still be asked something concrete. Undefined when the store is empty, since
+ * there is then no span to ask about.
+ */
+function windowSpanning(stored: TimedPosition[]): { from: number; to: number } | undefined {
+  if (stored.length === 0) {
+    return undefined
+  }
+  let from = stored[0]!.timestamp
+  for (const point of stored) {
+    if (point.timestamp < from) from = point.timestamp
+  }
+  return { from, to: Date.now() }
+}
+
 /** Reject if a promise has not settled within `ms`. */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -727,7 +745,12 @@ export default function ThePlugin(app: App): Plugin {
               // A history provider is the finer source for as long as its
               // retention reaches; the store is what remains of everything
               // older, and of any period the provider missed.
-              const window = query.window
+              // A query with no window still gets history: `/self/track` with
+              // no parameters is the common case, and skipping the provider
+              // there would quietly serve store-only data. With nothing else
+              // to go on, the window spans what the store holds, extended to
+              // now so the provider can supply anything more recent.
+              const window = query.window ?? windowSpanning(stored)
               const history = window
                 ? await historyPositions(app, context, window, effectiveResolution, app.debug)
                 : { points: [], resolutionMs: effectiveResolution }

@@ -165,6 +165,19 @@ describe('history and store together', () => {
     expect(coords(res.body)).toHaveLength(1)
   })
 
+  it('consults the provider even when the query names no window', async () => {
+    // `/self/track` with no parameters is the common call; skipping the
+    // provider there would quietly serve store-only data.
+    const h = stand([[iso(2), { latitude: 61, longitude: 24.9 }]])
+    stop = h.stop
+    h.plugin.getTracks()?.initialTrack(SELF, [[60, 24.8]], [Date.now() - 30 * MINUTE])
+
+    const res = await request(h.server).get(`${API}/self/track`).expect(200)
+    const lats = coords(res.body).map((p) => p[1])
+    expect(lats).toContain(61)
+    expect(lats).toContain(60)
+  })
+
   it('ignores provider rows outside the requested window', async () => {
     // A provider returning a wider range must not widen the answer.
     const h = stand([
