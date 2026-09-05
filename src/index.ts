@@ -306,10 +306,14 @@ async function historyPositions(
         }
       }
     }
-    debug.enabled && debug(`History supplied ${points.length} position(s) for ${context}`)
+    if (debug.enabled) {
+      debug(`History supplied ${points.length} position(s) for ${context}`)
+    }
     return points
   } catch (err) {
-    debug.enabled && debug(`History unavailable for ${context}: ${errorDetail(err)}`)
+    if (debug.enabled) {
+      debug(`History unavailable for ${context}: ${errorDetail(err)}`)
+    }
     return []
   }
 }
