@@ -21,6 +21,17 @@ the setting is still read, with `false` mapping to `memory` and anything else to
 The package also exports a client side `TrackAccumulator` class that manages the track for a single
 vessel, exposing the result as `Observable<LatLngTuple[]>`.
 
+## Where a track comes from
+
+With a history provider installed — [signalk-questdb](https://www.npmjs.com/package/signalk-questdb),
+[signalk-to-influxdb2](https://www.npmjs.com/package/signalk-to-influxdb2) — a track is answered from
+both it and the plugin's own store: the provider is the finer record for as long as its retention
+reaches, and the store is what remains of everything older or of any period the provider missed.
+
+Nothing needs configuring for this, and the plugin works exactly as before with no provider
+installed. See [docs/history-and-storage.md](docs/history-and-storage.md) for what that means in
+practice.
+
 ## Glitch filtering
 
 A receiver occasionally reports a position far from the vessel — a bad almanac, a multipath
