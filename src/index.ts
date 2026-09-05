@@ -202,6 +202,16 @@ const SOURCE_STATUS_INTERVAL_MS = 30000
 // First attempt after 5s (sufficient for warm restarts where InfluxDB is already running).
 // Subsequent attempts every 15s, up to 18 total (~260s window), covering cold boot scenarios
 // where InfluxDB may take 2+ minutes to accept connections after systemd reports it active.
+/**
+ * How long a history provider gets to answer a query before the store answers
+ * alone.
+ *
+ * The provider is an enrichment, not a dependency: a track is still correct
+ * without it, just coarser. Long enough for a database that has to warm up,
+ * short enough that a wedged provider does not hold a request open.
+ */
+const HISTORY_QUERY_TIMEOUT_MS = 5000
+
 const BOOTSTRAP_INITIAL_DELAY = 5000
 const BOOTSTRAP_RETRY_DELAY = 15000
 const BOOTSTRAP_MAX_ATTEMPTS = 18
@@ -264,6 +274,23 @@ const historyRowPosition = (row: unknown): LatLngTuple | undefined => {
   return undefined
 }
 
+/** Reject if a promise has not settled within `ms`. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err: unknown) => {
+        clearTimeout(timer)
+        reject(err instanceof Error ? err : new Error(String(err)))
+      },
+    )
+  })
+}
+
 /**
  * Positions a history provider holds for a window, or none.
  *
@@ -277,21 +304,37 @@ async function historyPositions(
   window: { from: number; to: number },
   resolutionMs: number,
   debug: Debug,
-): Promise<TimedPosition[]> {
+): Promise<{ points: TimedPosition[]; resolutionMs: number }> {
+  // The API takes whole seconds, so the width the provider actually bucketed
+  // by is not necessarily the one asked for. Reconciling on the requested
+  // width would leave a stored point in a bucket history already covered, and
+  // keep both.
+  const providerSeconds = Math.max(1, Math.round(resolutionMs / 1000))
+  const applied = providerSeconds * 1000
   const getHistoryApi = app.getHistoryApi
   if (!getHistoryApi) {
-    return []
+    return { points: [], resolutionMs: applied }
   }
   try {
-    const historyApi = await getHistoryApi(app.config?.settings?.historyApi?.defaultProvider)
-    const response = await historyApi.getValues({
-      context,
-      // Instants, not ISO strings: providers call Instant methods on these.
-      from: Temporal.Instant.from(new Date(window.from).toISOString()),
-      to: Temporal.Instant.from(new Date(window.to).toISOString()),
-      pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
-      resolution: Math.max(1, Math.round(resolutionMs / 1000)),
-    })
+    // Bounded because both awaits reach third-party code. Without this a
+    // provider that never settles holds the request open, and the store
+    // fallback below is never reached — which would make the "best-effort"
+    // this function promises untrue.
+    const historyApi = await withTimeout(
+      getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
+      HISTORY_QUERY_TIMEOUT_MS,
+    )
+    const response = await withTimeout(
+      historyApi.getValues({
+        context,
+        // Instants, not ISO strings: providers call Instant methods on these.
+        from: Temporal.Instant.from(new Date(window.from).toISOString()),
+        to: Temporal.Instant.from(new Date(window.to).toISOString()),
+        pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
+        resolution: providerSeconds,
+      }),
+      HISTORY_QUERY_TIMEOUT_MS,
+    )
     const points: TimedPosition[] = []
     for (const row of response?.data ?? []) {
       const position = historyRowPosition(row)
@@ -309,12 +352,12 @@ async function historyPositions(
     if (debug.enabled) {
       debug(`History supplied ${points.length} position(s) for ${context}`)
     }
-    return points
+    return { points, resolutionMs: applied }
   } catch (err) {
     if (debug.enabled) {
       debug(`History unavailable for ${context}: ${errorDetail(err)}`)
     }
-    return []
+    return { points: [], resolutionMs: applied }
   }
 }
 
@@ -685,8 +728,12 @@ export default function ThePlugin(app: App): Plugin {
               // retention reaches; the store is what remains of everything
               // older, and of any period the provider missed.
               const window = query.window
-              const history = window ? await historyPositions(app, context, window, effectiveResolution, app.debug) : []
-              const points = history.length ? reconcile(history, stored, effectiveResolution).positions : stored
+              const history = window
+                ? await historyPositions(app, context, window, effectiveResolution, app.debug)
+                : { points: [], resolutionMs: effectiveResolution }
+              const points = history.points.length
+                ? reconcile(history.points, stored, history.resolutionMs).positions
+                : stored
               // 404 only for a vessel neither source knows at all. A known
               // vessel with nothing inside the window is an empty track, not a
               // missing one — the difference matters to a client narrowing a

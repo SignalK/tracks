@@ -5,11 +5,18 @@ provider such as [signalk-questdb](https://www.npmjs.com/package/signalk-questdb
 or [signalk-to-influxdb2](https://www.npmjs.com/package/signalk-to-influxdb2).
 Neither is simply better than the other, which is why both are used.
 
-|                              | The plugin's store | A history provider                                      |
-| ---------------------------- | ------------------ | ------------------------------------------------------- |
-| How often a position is kept | once a minute      | whatever it was configured for, often every few seconds |
-| How long it is kept          | indefinitely       | until its retention drops it                            |
-| Size                         | about 15 MB a year | far larger, which is why retention exists               |
+|                              | The plugin's store                     | A history provider                                      |
+| ---------------------------- | -------------------------------------- | ------------------------------------------------------- |
+| How often a position is kept | once a minute by default, configurable | whatever it was configured for, often every few seconds |
+| How long it is kept          | see below                              | until its retention drops it                            |
+| Size                         | about 15 MB a year at the default      | far larger, which is why retention exists               |
+
+How long the plugin keeps a position depends on the **Where tracks come from
+after a restart** setting: `sqlite` writes to a database file and keeps
+positions for as long as its retention setting says, indefinitely by default;
+`memory` and `history` hold them in memory only, so a restart empties them.
+This page describes the `sqlite` case, where there is a durable store to
+reconcile against.
 
 So the provider is the finer record of the recent past, and the plugin's store
 is what remains of everything older.

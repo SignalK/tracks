@@ -102,6 +102,19 @@ describe('history and store together', () => {
     expect(coords(res.body).some((p) => p[1] === 60)).toBe(true)
   })
 
+  it('reconciles on the width the provider actually used', async () => {
+    // The History API takes whole seconds, so a 1500ms resolution is asked for
+    // as 2s. Reconciling on 1500ms would leave a stored point at 1600ms in a
+    // bucket the provider already covered, and keep both.
+    const base = Math.floor((Date.now() - 10 * MINUTE) / 2000) * 2000
+    const h = stand([[new Date(base).toISOString(), { latitude: 61, longitude: 24.9 }]])
+    stop = h.stop
+    h.plugin.getTracks()?.initialTrack(SELF, [[60, 24.9]], [base + 1600])
+
+    const res = await request(h.server).get(`${API}/self/track?timespan=1h&resolution=1.5`).expect(200)
+    expect(coords(res.body)).toHaveLength(1)
+  })
+
   it('falls back to the store when the provider fails', async () => {
     // Best-effort: a broken provider must not fail a query the store can answer.
     const debug: Debug = Object.assign(() => undefined, { enabled: false })
@@ -121,6 +134,34 @@ describe('history and store together', () => {
     plugin.getTracks()?.initialTrack(SELF, [[60, 24.9]], [Date.now() - 5 * MINUTE])
 
     const res = await request(server).get(`${API}/self/track?timespan=1h`).expect(200)
+    expect(coords(res.body)).toHaveLength(1)
+  })
+
+  it('answers from the store when the provider never responds', { timeout: 15000 }, async () => {
+    // The provider is an enrichment, not a dependency. Without a bound on the
+    // await, a wedged provider would hold the request open and the store
+    // fallback would never be reached.
+    const debug: Debug = Object.assign(() => undefined, { enabled: false })
+    const app = {
+      debug,
+      error: () => undefined,
+      selfContext: SELF,
+      getSelfPath: () => undefined,
+      streambundle: { getBus: () => ({ onValue: () => () => undefined }) },
+      // Never settles, which is the point of this test.
+      getHistoryApi: () => new Promise<never>(() => undefined),
+    }
+    const plugin = ThePlugin(app)
+    plugin.start({ resolution: 60000, pointsToKeep: 1000, maxAge: 3600, source: 'memory' })
+    stop = () => plugin.stop()
+    const server = express()
+    server.use(API, plugin.signalKApiRoutes(express.Router()))
+    plugin.getTracks()?.initialTrack(SELF, [[60, 24.9]], [Date.now() - 5 * MINUTE])
+
+    // Real timers: the bound is 5s, so this test genuinely waits for it.
+    const res = await request(server).get(`${API}/self/track?timespan=1h`)
+
+    expect(res.status).toBe(200)
     expect(coords(res.body)).toHaveLength(1)
   })
 
