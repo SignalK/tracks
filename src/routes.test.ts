@@ -62,7 +62,7 @@ describe('GET /tracks', () => {
   it('filters by bounding box on the last position', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]], [OTHER_CONTEXT, [10, 10]])
 
-    const res = await request(h.app).get(`${API}/tracks?bbox=59,24,61,25`).expect(200)
+    const res = await request(h.app).get(`${API}/tracks?bbox=24,59,25,61`).expect(200)
 
     expect(Object.keys(res.body)).toEqual([SELF_CONTEXT])
   })
@@ -301,7 +301,7 @@ describe('GET /tracks?times', () => {
     // The timed and untimed forms share one filter; a bbox that excludes a
     // vessel must exclude it either way.
     const h = seeded()
-    const bbox = 'bbox=60.05,24.5,60.25,25.5'
+    const bbox = 'bbox=24.5,60.05,25.5,60.25'
 
     const plain = await request(h.app).get(`${API}/tracks?${bbox}`).expect(200)
     const timed = await request(h.app).get(`${API}/tracks?${bbox}&times`).expect(200)

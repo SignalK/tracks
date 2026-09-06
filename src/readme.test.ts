@@ -7,13 +7,13 @@ import { parseTrackQuery } from './timeWindow.js'
 // Every example printed in the README, executed. Documentation that has not
 // been run is a claim, not a fact.
 describe('README examples', () => {
-  it('?bbox=-35,130,-33,139 selects South Australia', () => {
-    const { bbox } = validateParameters({ bbox: '-35,130,-33,139' }, undefined)
+  it('?bbox=130,-35,139,-33 selects South Australia', () => {
+    const { bbox } = validateParameters({ bbox: '130,-35,139,-33' }, undefined)
     expect(createInBounds(bbox!)([-34, 135])).toBe(true)
   })
 
-  it('?bbox=-10,175,10,-175 crosses the antimeridian', () => {
-    const { bbox } = validateParameters({ bbox: '-10,175,10,-175' }, undefined)
+  it('?bbox=175,-10,-175,10 crosses the antimeridian', () => {
+    const { bbox } = validateParameters({ bbox: '175,-10,-175,10' }, undefined)
     const inBounds = createInBounds(bbox!)
     expect(inBounds([0, 179])).toBe(true)
     expect(inBounds([0, -179])).toBe(true)

@@ -172,17 +172,18 @@ _Note: This value overrides the `maxRadius` value specified in plugin configurat
 
 **Retrieve tracks for all vessels within a bounded area:**
 
-`/signalk/v1/api/tracks?bbox=-35,130,-33,139`
+`/signalk/v1/api/tracks?bbox=130,-35,139,-33`
 
-_Bounded area is defined as `lat1, lon1, lat2, lon2`_
+_Bounded area is defined as `west, south, east, north` — GeoJSON coordinate order, the
+same as the coordinates this endpoint returns, the Resources API, and the v2 Track API._
 
-_`lat1, lon1` = south-west corner of bounded area_
+_A box crossing the antimeridian is expressed with `west` greater than `east`, for
+example `bbox=175,-10,-175,10`._
 
-_`lat2, lon2` = north-east corner of bounded area_
-
-_Note the order is **latitude first**, unlike the GeoJSON this endpoint returns, where
-each coordinate is `[longitude, latitude]`. A box crossing the antimeridian is expressed
-with `lon1` greater than `lon2`, for example `bbox=-10,175,10,-175`._
+> **Changed:** this parameter was `lat1, lon1, lat2, lon2` — latitude first — up to and
+> including 2.0.2. A box in the old order is still four valid numbers, so it will not be
+> rejected; it will simply describe a different area. Freeboard-SK is unaffected, as it
+> filters by `radius` rather than `bbox`.
 
 ---
 

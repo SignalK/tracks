@@ -83,18 +83,19 @@ function toFiniteNumber(value: string): number | undefined {
 }
 
 export function validateParameters(params: QueryParameters, defaultMaxRadius: number | undefined): TrackParams {
-  // Bounding box as lat1,lon1,lat2,lon2 — south-west corner first, and
-  // latitude first within each corner. Note this is the opposite order to the
-  // GeoJSON these endpoints return, where a coordinate is [lng, lat].
+  // Bounding box as west,south,east,north — GeoJSON coordinate order, the same
+  // as the coordinates these endpoints return, the Resources API, and the v2
+  // Track API. Internally a bounds is [lat, lng], so the pairs are swapped on
+  // the way in.
   let bbox: GeoBounds | null = null
   const rawBbox = firstValue(params.bbox)
   if (rawBbox !== undefined) {
     const b = rawBbox.split(',').map(toFiniteNumber)
     // Every one of the four must have parsed; a `0` is a valid coordinate, so
     // test for undefined rather than truthiness.
-    const [swLat, swLng, neLat, neLng] = b
-    if (b.length === 4 && swLat !== undefined && swLng !== undefined && neLat !== undefined && neLng !== undefined) {
-      bbox = { sw: [swLat, swLng], ne: [neLat, neLng] }
+    const [west, south, east, north] = b
+    if (b.length === 4 && west !== undefined && south !== undefined && east !== undefined && north !== undefined) {
+      bbox = { sw: [south, west], ne: [north, east] }
     }
   }
 

@@ -42,7 +42,7 @@ describe('inBounds', () => {
 
 describe('validateParameters', () => {
   it('parses a four-value bbox', () => {
-    expect(validateParameters({ bbox: '-10,-20,10,20' }, undefined).bbox).toEqual({
+    expect(validateParameters({ bbox: '-20,-10,20,10' }, undefined).bbox).toEqual({
       sw: [-10, -20],
       ne: [10, 20],
     })
@@ -51,25 +51,24 @@ describe('validateParameters', () => {
   // A coordinate of 0 is valid (equator / prime meridian) but falsy, so a
   // truthiness-based filter used to silently drop it and reject the whole bbox.
   it('keeps zero coordinates', () => {
-    expect(validateParameters({ bbox: '0,0,10,20' }, undefined).bbox).toEqual({
+    expect(validateParameters({ bbox: '0,0,20,10' }, undefined).bbox).toEqual({
       sw: [0, 0],
       ne: [10, 20],
     })
   })
 
-  // The parameter is latitude-first, the opposite of the GeoJSON these
-  // endpoints emit. README and the OpenAPI description said lon-first for
-  // years, which silently matched nothing: a latitude of 130 cannot exist, so
-  // the box was valid but empty rather than an error.
-  it('reads the bbox as lat,lon,lat,lon', () => {
-    // South Australia: latitudes -35..-33, longitudes 130..139
-    const { bbox } = validateParameters({ bbox: '-35,130,-33,139' }, undefined)
+  // GeoJSON order, matching the coordinates these endpoints emit, the
+  // Resources API and the v2 Track API. It was latitude-first until then,
+  // which is why a v2 example sent here used to match nothing.
+  it('reads the bbox as west,south,east,north', () => {
+    // South Australia: longitudes 130..139, latitudes -35..-33
+    const { bbox } = validateParameters({ bbox: '130,-35,139,-33' }, undefined)
 
     expect(bbox).toEqual({ sw: [-35, 130], ne: [-33, 139] })
 
     const inBounds = createInBounds(bbox!)
     expect(inBounds([-34, 135])).toBe(true) // inside
-    expect(inBounds([135, -34])).toBe(false) // the same point written lon-first
+    expect(inBounds([135, -34])).toBe(false) // the same point written lat-first
   })
 
   it('rejects a bbox that is not four finite numbers', () => {
