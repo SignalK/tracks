@@ -20,6 +20,7 @@ import { Tracks as Tracks_ } from './tracks.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import type { TrackStore } from './store.js'
 import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
+import { reconcile } from './reconcile.js'
 import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
@@ -30,6 +31,8 @@ import type {
   LatLngTuple,
   LngLatTuple,
   Position,
+  TimedPosition,
+  TimeWindow,
   TimedTrackCollection,
   TrackCollection,
 } from './types.js'
@@ -200,6 +203,27 @@ const SOURCE_STATUS_INTERVAL_MS = 30000
 // First attempt after 5s (sufficient for warm restarts where InfluxDB is already running).
 // Subsequent attempts every 15s, up to 18 total (~260s window), covering cold boot scenarios
 // where InfluxDB may take 2+ minutes to accept connections after systemd reports it active.
+/**
+ * How long a history provider gets to answer a query before the store answers
+ * alone.
+ *
+ * The provider is an enrichment, not a dependency: a track is still correct
+ * without it, just coarser. Long enough for a database that has to warm up,
+ * short enough that a wedged provider does not hold a request open.
+ */
+const HISTORY_QUERY_TIMEOUT_MS = 5000
+
+/**
+ * How far back a query with no window of its own reaches when the store is
+ * empty.
+ *
+ * There is nothing else to derive a span from, and asking a provider for all
+ * of time would be expensive on a large one. A day covers the usual reason for
+ * a windowless request — draw the recent trail — and an explicit `from`,
+ * `duration` or `timespan` reaches further.
+ */
+const WINDOWLESS_HISTORY_SPAN_MS = 24 * 60 * 60 * 1000
+
 const BOOTSTRAP_INITIAL_DELAY = 5000
 const BOOTSTRAP_RETRY_DELAY = 15000
 const BOOTSTRAP_MAX_ATTEMPTS = 18
@@ -260,6 +284,126 @@ const historyRowPosition = (row: unknown): LatLngTuple | undefined => {
     }
   }
   return undefined
+}
+
+/**
+ * A window covering everything the store holds, up to now.
+ *
+ * Used when a query names no window of its own, so a history provider can
+ * still be asked something concrete. Undefined when the store is empty, since
+ * there is then no span to ask about.
+ */
+function windowSpanning(stored: TimedPosition[], fallbackMs: number): TimeWindow {
+  const to = Date.now()
+  if (stored.length === 0) {
+    // Nothing stored says nothing about what a provider holds: a vessel
+    // recorded only by the provider — before this plugin was installed, say —
+    // would otherwise never be asked about and 404.
+    return { from: to - fallbackMs, to, inclusiveEnd: true }
+  }
+  let from = stored[0]!.timestamp
+  for (const point of stored) {
+    if (point.timestamp < from) from = point.timestamp
+  }
+  return { from, to, inclusiveEnd: true }
+}
+
+/**
+ * Reject once `ms` has passed.
+ *
+ * Written out rather than `Promise.race` so the timer is cleared when the
+ * promise wins. A race leaves it armed, holding the event loop open for the
+ * remainder of the timeout on every call that succeeds.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err: unknown) => {
+        clearTimeout(timer)
+        reject(err instanceof Error ? err : new Error(String(err)))
+      },
+    )
+  })
+}
+
+/**
+ * Positions a history provider holds for a window, or none.
+ *
+ * Best-effort by design: a provider that is absent, slow, or failing must not
+ * fail the query, because the plugin's own store can always answer it. The
+ * provider is the finer source where it reaches, not a required one.
+ */
+async function historyPositions(
+  app: App,
+  context: Context,
+  window: TimeWindow,
+  resolutionMs: number,
+  debug: Debug,
+): Promise<{ points: TimedPosition[]; resolutionMs: number }> {
+  // The API takes whole seconds, so the width the provider actually bucketed
+  // by is not necessarily the one asked for. Reconciling on the requested
+  // width would leave a stored point in a bucket history already covered, and
+  // keep both.
+  const providerSeconds = Math.max(1, Math.round(resolutionMs / 1000))
+  const applied = providerSeconds * 1000
+  const getHistoryApi = app.getHistoryApi
+  if (!getHistoryApi) {
+    return { points: [], resolutionMs: applied }
+  }
+  try {
+    // Bounded because both awaits reach third-party code. Without this a
+    // provider that never settles holds the request open, and the store
+    // fallback below is never reached — which would make the "best-effort"
+    // this function promises untrue.
+    const historyApi = await withTimeout(
+      getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
+      HISTORY_QUERY_TIMEOUT_MS,
+    )
+    const response = await withTimeout(
+      historyApi.getValues({
+        context,
+        // Instants, not ISO strings: providers call Instant methods on these.
+        from: Temporal.Instant.from(new Date(window.from).toISOString()),
+        to: Temporal.Instant.from(new Date(window.to).toISOString()),
+        pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
+        resolution: providerSeconds,
+      }),
+      HISTORY_QUERY_TIMEOUT_MS,
+    )
+    const points: TimedPosition[] = []
+    for (const row of response?.data ?? []) {
+      const position = historyRowPosition(row)
+      // A row with no position means the provider had none for that bucket,
+      // which is what lets the store fill it.
+      if (position) {
+        const timestamp = historyRowTimestamp(row)
+        // Clipped to the window rather than trusted: a provider that returns a
+        // wider range would otherwise widen the answer beyond what was asked.
+        // Matching the stores, which treat a window without `inclusiveEnd`
+        // as half-open so consecutive bands tile without repeating the point
+        // they share. Clipping inclusively here would reintroduce exactly
+        // that duplicate from the provider side.
+        const withinEnd = window.inclusiveEnd ? timestamp <= window.to : timestamp < window.to
+        if (timestamp >= window.from && withinEnd) {
+          points.push({ position, timestamp })
+        }
+      }
+    }
+    if (debug.enabled) {
+      debug(`History supplied ${points.length} position(s) for ${context}`)
+    }
+    return { points, resolutionMs: applied }
+  } catch (err) {
+    if (debug.enabled) {
+      debug(`History unavailable for ${context}: ${errorDetail(err)}`)
+    }
+    return { points: [], resolutionMs: applied }
+  }
 }
 
 /** Epoch milliseconds for a history row, or 0 when the timestamp is unusable. */
@@ -345,6 +489,13 @@ async function bootstrapSelfTrack(
           const position = historyRowPosition(row)
           if (position) {
             const timestamp = historyRowTimestamp(row)
+            // An unusable timestamp reads as 0, which would file the position
+            // at 1970 — infinitely old to every window query, and permanent
+            // once a persistent store has it.
+            if (timestamp === 0) {
+              dropped++
+              continue
+            }
             // History carries the same receiver glitches the live stream does,
             // and bootstrap is how a persistent track is rehydrated — an
             // unfiltered spike here would be baked in permanently.
@@ -418,6 +569,14 @@ export default function ThePlugin(app: App): Plugin {
   let onStop: (() => void)[] = []
   let tracks: TrackStore | undefined = undefined
   let segmentGap = 0
+  /**
+   * How often the store keeps a position, in ms.
+   *
+   * Used as the bucket width when reconciling with a history provider, so the
+   * two sources land on the same grid when a query names no resolution of its
+   * own.
+   */
+  let storeResolution = DEFAULT_RESOLUTION
   let defaultMaxRadius: number | undefined = undefined
   const sourceWatch = new SourceWatch()
   let glitchFilter = new GlitchFilter({ maxSpeedKnots: DEFAULT_MAX_SPEED_KNOTS })
@@ -449,6 +608,7 @@ export default function ThePlugin(app: App): Plugin {
       const { resolution, pointsToKeep, maxAge, maxRadius } = config
       defaultMaxRadius = toNumber(maxRadius)
       const source = resolveSource(config)
+      storeResolution = toNumber(config.resolution) ?? DEFAULT_RESOLUTION
       const segmentGapMinutes = toNumber(config.segmentGapMinutes) ?? DEFAULT_SEGMENT_GAP_MINUTES
       segmentGap = segmentGapMinutes > 0 ? segmentGapMinutes * 60 * 1000 : 0
 
@@ -599,9 +759,38 @@ export default function ThePlugin(app: App): Plugin {
             res.json({ message: err instanceof TimeWindowError ? err.message : 'Invalid query parameters' })
             return
           }
+          const effectiveResolution = query.resolution ?? storeResolution
           tracks
+            // Resolving instead of rejecting for an unknown context: a vessel
+            // the store has never seen may still be in a history provider —
+            // recorded before this plugin was installed, say — and 404ing
+            // before asking would hide data that exists.
             .getTimed(context, query.window)
-            .then((points) => {
+            .then((points) => ({ points, known: true }))
+            .catch(() => ({ points: [] as TimedPosition[], known: false }))
+            .then(async ({ points: stored, known }) => {
+              // A history provider is the finer source for as long as its
+              // retention reaches; the store is what remains of everything
+              // older, and of any period the provider missed.
+              // A query with no window still gets history: `/self/track` with
+              // no parameters is the common case, and skipping the provider
+              // there would quietly serve store-only data. With nothing else
+              // to go on, the window spans what the store holds, extended to
+              // now so the provider can supply anything more recent.
+              const window = query.window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
+              const history = await historyPositions(app, context, window, effectiveResolution, app.debug)
+              const points = history.points.length
+                ? reconcile(history.points, stored, history.resolutionMs).positions
+                : stored
+              // 404 only for a vessel neither source knows at all. A known
+              // vessel with nothing inside the window is an empty track, not a
+              // missing one — the difference matters to a client narrowing a
+              // window rather than asking about an unknown context.
+              if (points.length === 0 && !known) {
+                res.status(404)
+                res.json({ message: `No track available for ${context}` })
+                return
+              }
               const segments = segment(thin(points, query.resolution), segmentGap)
               res.json({
                 type: 'MultiLineString',

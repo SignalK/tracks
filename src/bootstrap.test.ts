@@ -116,6 +116,19 @@ describe('bootstrap from the History API', () => {
     expect(coords(lastHour.body)[0]).toEqual([2, 2])
   })
 
+  it('drops a point whose timestamp is unusable', async () => {
+    // An unparseable timestamp reads as 0, which would file the position at
+    // 1970 — infinitely old to every window query, and permanent once a
+    // persistent store has it.
+    const app = await bootstrapWith([
+      ['not-a-date', { latitude: 1, longitude: 1 }],
+      [new Date().toISOString(), { latitude: 2, longitude: 2 }],
+    ])
+
+    const res = await request(app).get(`${API}/self/track`).expect(200)
+    expect(coords(res.body)).toEqual([[2, 2]])
+  })
+
   it('leaves the track empty when history returns nothing usable', async () => {
     const app = await bootstrapWith([['2026-08-08T16:34:00.000000Z', 'not a position']])
 
