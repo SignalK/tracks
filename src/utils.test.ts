@@ -42,7 +42,6 @@ describe('inBounds', () => {
 
 describe('validateParameters', () => {
   it('parses a four-value bbox', () => {
-    // west,south,east,north in; [lat, lng] corners out.
     expect(validateParameters({ bbox: '-20,-10,20,10' }, undefined).bbox).toEqual({
       sw: [-10, -20],
       ne: [10, 20],

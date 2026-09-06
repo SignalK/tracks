@@ -16,6 +16,7 @@ export function toIsoTimes(segment: TimedPosition[]): string[] {
   return segment.map(({ timestamp }) => new Date(timestamp).toISOString())
 }
 
+// create function to check position against GeoBounds
 export function createInBounds(bounds: GeoBounds): (position: LatLngTuple | null) => boolean {
   const minLat = bounds.sw[LAT]
   const maxLat = bounds.ne[LAT]
@@ -110,6 +111,7 @@ export function validateParameters(params: QueryParameters, defaultMaxRadius: nu
   return { bbox, radius }
 }
 
+//Create function to calculate distance to a point
 export function createDistanceTo([lat1d, lon1d]: LatLngTuple, debug?: Debug): (d: LatLngTuple | null) => number {
   const Rk = 6371 // mean radius of the earth (km) at 39 degrees from the equator
 
