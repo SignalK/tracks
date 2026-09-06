@@ -416,8 +416,6 @@ describe('getTracks', () => {
     try {
       const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
       const day = 86_400_000
-      // A point just inside the spacing is thinned away; one just outside is
-      // kept, which brackets the resolved value without exposing it directly.
       const spacings: [string, number][] = [
         ['P1W', 7 * day],
         ['P1M', 31 * day],
@@ -425,21 +423,36 @@ describe('getTracks', () => {
       ]
 
       for (const [unit, expected] of spacings) {
+        // Four points bracketing the spacing: one a day short of it, one a
+        // millisecond past it, and a terminal point far beyond. The terminal
+        // point is there so that thin()'s unconditional keep-the-last rule
+        // lands on a point no assertion depends on — otherwise a track whose
+        // last point sits exactly on the boundary would be kept either way,
+        // and the spacing itself would go untested.
         h.seedTrack(
           SELF_CONTEXT,
           [
             [60.1, 24.9],
             [60.2, 25.0],
             [60.3, 25.1],
+            [60.4, 25.2],
           ],
-          [t0, t0 + expected - day, t0 + expected],
+          [t0, t0 + expected - day, t0 + expected + 1, t0 + 3 * expected],
         )
 
-        const res = await providerOf(h).getTracks({ resolution: Temporal.Duration.from(unit) })
+        const res = await providerOf(h).getTracks({
+          resolution: Temporal.Duration.from(unit),
+          times: true,
+        })
 
-        // The middle point falls short of the spacing and is dropped; thin()
-        // always keeps the newest fix, so the first and last survive.
-        expect(res.features[0]!.properties.pointCount).toBe(2)
+        const kept = res.features[0]!.properties.coordTimes!.flat()
+
+        // The short point is dropped, the one past the spacing is kept.
+        expect(kept).toEqual([
+          new Date(t0).toISOString(),
+          new Date(t0 + expected + 1).toISOString(),
+          new Date(t0 + 3 * expected).toISOString(),
+        ])
       }
     } finally {
       h.stop()

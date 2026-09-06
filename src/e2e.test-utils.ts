@@ -49,6 +49,16 @@ const basePort = 4700 + Math.floor(process.pid % 50)
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
+ * Ceiling on a single API request in these tests.
+ *
+ * Longer than the readiness probe's 2s, which polls in a loop and is meant to
+ * retry quickly. Here the server has already accepted the request, so this is
+ * only ever hit by a route that hangs — and it has to clear the slowest honest
+ * response, which for a track query means reading the whole store.
+ */
+const REQUEST_TIMEOUT_MS = 15_000
+
+/**
  * Install the plugin into a throwaway config dir from a packed tarball.
  *
  * A tarball rather than a link: `npm pack` applies the `files` allowlist, so
@@ -167,12 +177,15 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
           configDir,
           selfContext: typeof self === 'string' ? self : `vessels.${String(self)}`,
           feed: (context, position, timestamp, source) => feedDelta(url, context, position, timestamp, source),
+          // Both bounded: a route that accepts the connection and then never
+          // finishes would otherwise hang the suite on the request rather than
+          // failing it, and vitest's own timeout is the wrong place to notice.
           api: async (path: string) => {
-            const r = await fetch(`${url}/signalk/v1/api${path}`)
+            const r = await fetch(`${url}/signalk/v1/api${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
             return r.json()
           },
           apiV2: async (path: string) => {
-            const r = await fetch(`${url}/signalk/v2/api${path}`)
+            const r = await fetch(`${url}/signalk/v2/api${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
             return { status: r.status, body: await r.json() }
           },
           stop,

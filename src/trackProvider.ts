@@ -8,9 +8,11 @@ import { toIsoTimes } from './utils.js'
 /**
  * Serves the v2 Track API from this plugin's store.
  *
- * The store already answers the hard parts — spatial filtering, time windows,
- * thinning, segmentation — so this is mostly translation: v2's GeoJSON
- * coordinate order and Temporal values in, GeoJSON Features out.
+ * The store answers the hard parts — spatial filtering, time windows, thinning
+ * — so what is left here is mostly translation: v2's GeoJSON coordinate order
+ * and Temporal values in, GeoJSON Features out. Segmentation is done here,
+ * by `segment()`, because it is what turns a thinned track into the
+ * MultiLineString the wire format wants.
  *
  * Registered alongside the v1 routes rather than replacing them, so
  * Freeboard-SK keeps working until it moves.
