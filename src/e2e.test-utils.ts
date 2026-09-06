@@ -31,6 +31,13 @@ export interface E2EServer {
   feed: (context: string, position: [number, number], timestamp?: number, source?: string) => Promise<void>
   /** GET a path under /signalk/v1/api and parse the JSON. */
   api: (path: string) => Promise<unknown>
+  /**
+   * GET a path under /signalk/v2/api, keeping the status.
+   *
+   * The status is what distinguishes "no provider registered" (501) from an
+   * answered query, which is the thing a provider registration test is about.
+   */
+  apiV2: (path: string) => Promise<{ status: number; body: unknown }>
   /** The server's own vessel context, as it resolved it. */
   selfContext: string
   stop: () => void
@@ -149,7 +156,12 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
     try {
       const res = await fetch(`${url}/signalk`, { signal: AbortSignal.timeout(2000) })
       if (res.ok) {
-        const self = (await (await fetch(`${url}/signalk/v1/api/self`)).json()) as string
+        // Bounded like the probe above it: the server has answered /signalk,
+        // but an unbounded fetch here could still hang past the deadline the
+        // loop exists to enforce.
+        const self = (await (
+          await fetch(`${url}/signalk/v1/api/self`, { signal: AbortSignal.timeout(2000) })
+        ).json()) as string
         return {
           url,
           configDir,
@@ -158,6 +170,10 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
           api: async (path: string) => {
             const r = await fetch(`${url}/signalk/v1/api${path}`)
             return r.json()
+          },
+          apiV2: async (path: string) => {
+            const r = await fetch(`${url}/signalk/v2/api${path}`)
+            return { status: r.status, body: await r.json() }
           },
           stop,
         }
