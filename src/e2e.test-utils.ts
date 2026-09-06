@@ -31,6 +31,13 @@ export interface E2EServer {
   feed: (context: string, position: [number, number], timestamp?: number, source?: string) => Promise<void>
   /** GET a path under /signalk/v1/api and parse the JSON. */
   api: (path: string) => Promise<unknown>
+  /**
+   * GET a path under /signalk/v2/api, keeping the status.
+   *
+   * The status is what distinguishes "no provider registered" (501) from an
+   * answered query, which is the thing a provider registration test is about.
+   */
+  apiV2: (path: string) => Promise<{ status: number; body: unknown }>
   /** The server's own vessel context, as it resolved it. */
   selfContext: string
   stop: () => void
@@ -40,6 +47,16 @@ export interface E2EServer {
 const basePort = 4700 + Math.floor(process.pid % 50)
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Ceiling on a single API request in these tests.
+ *
+ * Longer than the readiness probe's 2s, which polls in a loop and is meant to
+ * retry quickly. Here the server has already accepted the request, so this is
+ * only ever hit by a route that hangs — and it has to clear the slowest honest
+ * response, which for a track query means reading the whole store.
+ */
+const REQUEST_TIMEOUT_MS = 15_000
 
 /**
  * Install the plugin into a throwaway config dir from a packed tarball.
@@ -149,15 +166,27 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
     try {
       const res = await fetch(`${url}/signalk`, { signal: AbortSignal.timeout(2000) })
       if (res.ok) {
-        const self = (await (await fetch(`${url}/signalk/v1/api/self`)).json()) as string
+        // Bounded like the probe above it: the server has answered /signalk,
+        // but an unbounded fetch here could still hang past the deadline the
+        // loop exists to enforce.
+        const self = (await (
+          await fetch(`${url}/signalk/v1/api/self`, { signal: AbortSignal.timeout(2000) })
+        ).json()) as string
         return {
           url,
           configDir,
           selfContext: typeof self === 'string' ? self : `vessels.${String(self)}`,
           feed: (context, position, timestamp, source) => feedDelta(url, context, position, timestamp, source),
+          // Both bounded: a route that accepts the connection and then never
+          // finishes would otherwise hang the suite on the request rather than
+          // failing it, and vitest's own timeout is the wrong place to notice.
           api: async (path: string) => {
-            const r = await fetch(`${url}/signalk/v1/api${path}`)
+            const r = await fetch(`${url}/signalk/v1/api${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
             return r.json()
+          },
+          apiV2: async (path: string) => {
+            const r = await fetch(`${url}/signalk/v2/api${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+            return { status: r.status, body: await r.json() }
           },
           stop,
         }

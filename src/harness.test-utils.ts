@@ -2,6 +2,7 @@ import express from 'express'
 import type { Express } from 'express'
 import ThePlugin from './index.js'
 import type { ContextPosition } from './index.js'
+import type { TrackApi } from './trackApi.js'
 import type { Debug, LatLngTuple, Position } from './types.js'
 
 /**
@@ -42,6 +43,13 @@ export interface TestHarness {
   setSelfState: (state: string | undefined) => void
   stop: () => void
   errors: unknown[][]
+  /**
+   * The v2 Track API provider the plugin registered, or undefined when the
+   * server offered no `registerTrackApiProvider`.
+   */
+  trackProvider: () => TrackApi | undefined
+  /** How many times the plugin registered a provider. */
+  registrations: () => number
 }
 
 export interface HarnessOptions {
@@ -51,6 +59,11 @@ export interface HarnessOptions {
   selfPosition?: LatLngTuple
   /** Initial navigation.state for the own vessel. */
   selfState?: string
+  /**
+   * Stand in for a server without the v2 Track API, to check the plugin still
+   * starts when `registerTrackApiProvider` is absent.
+   */
+  withoutTrackApi?: boolean
 }
 
 export function createHarness(options: HarnessOptions = {}): TestHarness {
@@ -60,6 +73,8 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
   let selfPosition: LatLngTuple | undefined = options.selfPosition
   let selfState: string | undefined = options.selfState
   const selfContext = options.selfContext ?? SELF_CONTEXT
+  let trackProvider: TrackApi | undefined
+  let registrations = 0
 
   const debug: Debug = Object.assign(() => undefined, { enabled: false })
 
@@ -68,6 +83,14 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     error: (...args: unknown[]) => errors.push(args),
     setPluginStatus: (msg: string) => statuses.push(msg),
     selfContext,
+    ...(options.withoutTrackApi
+      ? {}
+      : {
+          registerTrackApiProvider: (provider: TrackApi) => {
+            trackProvider = provider
+            registrations += 1
+          },
+        }),
     // Path-aware: the plugin reads navigation.state as well as position, and a
     // stub that answered every path with a position would let a broken state
     // lookup pass unnoticed.
@@ -129,5 +152,7 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     stop: () => plugin.stop(),
     errors,
     statuses,
+    trackProvider: () => trackProvider,
+    registrations: () => registrations,
   }
 }

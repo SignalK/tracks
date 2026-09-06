@@ -17,6 +17,8 @@ import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
 import { join } from 'node:path'
 import { Tracks as Tracks_ } from './tracks.js'
+import { createTrackProvider } from './trackProvider.js'
+import type { TrackApi } from './trackApi.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import type { TrackStore } from './store.js'
 import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
@@ -110,6 +112,14 @@ interface App {
   getDataDirPath?: () => string
   /** Resolves the named provider, or the configured default when omitted. */
   getHistoryApi?: (providerId?: string) => Promise<HistoryApi>
+  /**
+   * Offer this plugin's tracks to the v2 Track API. Absent on servers older
+   * than SignalK/signalk-server#2995.
+   *
+   * The server unregisters the provider itself when the plugin stops, so
+   * `stop()` here must not do it a second time.
+   */
+  registerTrackApiProvider?: (provider: TrackApi) => void
   config?: {
     settings?: {
       historyApi?: { defaultProvider?: string }
@@ -702,6 +712,23 @@ export default function ThePlugin(app: App): Plugin {
       onStop.push(() => {
         clearInterval(statusInterval)
       })
+
+      // Offer the accumulated tracks to the v2 Track API.
+      //
+      // The provider reads `tracks` through a getter rather than capturing it,
+      // because start() replaces the store wholesale and a captured reference
+      // would keep serving the store a restart was meant to discard.
+      //
+      // Deliberately not unregistered in stop(): the server pushes its own
+      // unregister onto the plugin's stop handlers when this is called, so
+      // doing it here as well would unregister twice.
+      app.registerTrackApiProvider?.(
+        createTrackProvider({
+          store: () => tracks,
+          selfContext: () => app.selfContext,
+          segmentGap: () => segmentGap,
+        }),
+      )
 
       // Bootstrap self track from History API (async, non-blocking).
       // Only for `history`: a sqlite store already holds what it recorded, and
