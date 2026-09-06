@@ -292,7 +292,13 @@ function windowSpanning(stored: TimedPosition[]): { from: number; to: number } |
   return { from, to: Date.now() }
 }
 
-/** Reject if a promise has not settled within `ms`. */
+/**
+ * Reject once `ms` has passed.
+ *
+ * Written out rather than `Promise.race` so the timer is cleared when the
+ * promise wins. A race leaves it armed, holding the event loop open for the
+ * remainder of the timeout on every call that succeeds.
+ */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms)
