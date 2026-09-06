@@ -13,7 +13,7 @@ Neither is simply better than the other, which is why both are used.
 
 How long the plugin keeps a position depends on the **Where tracks come from
 after a restart** setting: `sqlite` writes to a database file and keeps
-positions for as long as its retention setting says, indefinitely by default;
+positions for as long as its retention setting says;
 `memory` and `history` hold them in memory only, so a restart empties them.
 This page describes the `sqlite` case, where there is a durable store to
 reconcile against.
@@ -25,14 +25,14 @@ defaults are shown.
 
 ## What you get with no history provider
 
-Everything comes from the plugin's own store: one position a minute, for as far
-back as it has been running. Nothing else is needed, and no other plugin has to
+Everything comes from the plugin's own store, at whatever interval it is
+configured to keep, for as far back as it has been running. Nothing else is needed, and no other plugin has to
 be installed.
 
 ```
 query window
 ├──────────────────────────────────────────────────┤
-│ plugin store, one point a minute                  │
+│ plugin store, at the configured interval          │
 ```
 
 ## What you get with one
@@ -43,8 +43,8 @@ everything else.
 ```
 query window: last two years
 ├───────────────────────────────────────┬──────────┤
-│ plugin store, one point a minute      │ provider │
-│                                       │ ~2s      │
+│ plugin store, coarse                  │ provider │
+│                                       │ finer    │
                                         └ retention begins
 ```
 

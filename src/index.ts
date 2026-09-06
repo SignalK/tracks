@@ -32,6 +32,7 @@ import type {
   LngLatTuple,
   Position,
   TimedPosition,
+  TimeWindow,
   TimedTrackCollection,
   TrackCollection,
 } from './types.js'
@@ -212,6 +213,17 @@ const SOURCE_STATUS_INTERVAL_MS = 30000
  */
 const HISTORY_QUERY_TIMEOUT_MS = 5000
 
+/**
+ * How far back a query with no window of its own reaches when the store is
+ * empty.
+ *
+ * There is nothing else to derive a span from, and asking a provider for all
+ * of time would be expensive on a large one. A day covers the usual reason for
+ * a windowless request — draw the recent trail — and an explicit `from`,
+ * `duration` or `timespan` reaches further.
+ */
+const WINDOWLESS_HISTORY_SPAN_MS = 24 * 60 * 60 * 1000
+
 const BOOTSTRAP_INITIAL_DELAY = 5000
 const BOOTSTRAP_RETRY_DELAY = 15000
 const BOOTSTRAP_MAX_ATTEMPTS = 18
@@ -281,15 +293,19 @@ const historyRowPosition = (row: unknown): LatLngTuple | undefined => {
  * still be asked something concrete. Undefined when the store is empty, since
  * there is then no span to ask about.
  */
-function windowSpanning(stored: TimedPosition[]): { from: number; to: number } | undefined {
+function windowSpanning(stored: TimedPosition[], fallbackMs: number): TimeWindow {
+  const to = Date.now()
   if (stored.length === 0) {
-    return undefined
+    // Nothing stored says nothing about what a provider holds: a vessel
+    // recorded only by the provider — before this plugin was installed, say —
+    // would otherwise never be asked about and 404.
+    return { from: to - fallbackMs, to, inclusiveEnd: true }
   }
   let from = stored[0]!.timestamp
   for (const point of stored) {
     if (point.timestamp < from) from = point.timestamp
   }
-  return { from, to: Date.now() }
+  return { from, to, inclusiveEnd: true }
 }
 
 /**
@@ -325,7 +341,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 async function historyPositions(
   app: App,
   context: Context,
-  window: { from: number; to: number },
+  window: TimeWindow,
   resolutionMs: number,
   debug: Debug,
 ): Promise<{ points: TimedPosition[]; resolutionMs: number }> {
@@ -368,7 +384,12 @@ async function historyPositions(
         const timestamp = historyRowTimestamp(row)
         // Clipped to the window rather than trusted: a provider that returns a
         // wider range would otherwise widen the answer beyond what was asked.
-        if (timestamp >= window.from && timestamp <= window.to) {
+        // Matching the stores, which treat a window without `inclusiveEnd`
+        // as half-open so consecutive bands tile without repeating the point
+        // they share. Clipping inclusively here would reintroduce exactly
+        // that duplicate from the provider side.
+        const withinEnd = window.inclusiveEnd ? timestamp <= window.to : timestamp < window.to
+        if (timestamp >= window.from && withinEnd) {
           points.push({ position, timestamp })
         }
       }
@@ -756,10 +777,8 @@ export default function ThePlugin(app: App): Plugin {
               // there would quietly serve store-only data. With nothing else
               // to go on, the window spans what the store holds, extended to
               // now so the provider can supply anything more recent.
-              const window = query.window ?? windowSpanning(stored)
-              const history = window
-                ? await historyPositions(app, context, window, effectiveResolution, app.debug)
-                : { points: [], resolutionMs: effectiveResolution }
+              const window = query.window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
+              const history = await historyPositions(app, context, window, effectiveResolution, app.debug)
               const points = history.points.length
                 ? reconcile(history.points, stored, history.resolutionMs).positions
                 : stored

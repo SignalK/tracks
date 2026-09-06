@@ -178,6 +178,34 @@ describe('history and store together', () => {
     expect(lats).toContain(60)
   })
 
+  it('serves a provider-only vessel when the query names no window', async () => {
+    // Nothing stored says nothing about what a provider holds. A vessel
+    // recorded before this plugin was installed would otherwise 404.
+    const h = stand([[iso(30), { latitude: 61, longitude: 24.9 }]])
+    stop = h.stop
+
+    const res = await request(h.server).get(`${API}/self/track`).expect(200)
+    expect(coords(res.body).map((p) => p[1])).toContain(61)
+  })
+
+  it('honours a half-open window when clipping provider rows', async () => {
+    // Both stores treat a window without inclusiveEnd as half-open, so
+    // consecutive bands tile without repeating the point they share. Clipping
+    // inclusively here would reintroduce that duplicate from the provider.
+    const to = new Date(Date.now() - 10 * MINUTE)
+    const from = new Date(to.getTime() - 10 * MINUTE)
+    const h = stand([[to.toISOString(), { latitude: 61, longitude: 24.9 }]])
+    stop = h.stop
+    h.plugin.getTracks()?.initialTrack(SELF, [[60, 24.8]], [from.getTime() + 1000])
+
+    const res = await request(h.server)
+      .get(`${API}/self/track?from=${from.toISOString()}&to=${to.toISOString()}`)
+      .expect(200)
+
+    // The point exactly at `to` is excluded, as it is from the store.
+    expect(coords(res.body).map((p) => p[1])).not.toContain(61)
+  })
+
   it('ignores provider rows outside the requested window', async () => {
     // A provider returning a wider range must not widen the answer.
     const h = stand([
