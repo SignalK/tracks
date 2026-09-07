@@ -12,9 +12,15 @@
   "//main": "Signal K resolves an installed plugin by directory. Node's CJS directory resolution and the server's esm-resolve fallback both read `main`, not `exports`, so dropping this makes the plugin unloadable.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "//files": "app-icon.svg ships alongside dist because `files` is an allowlist: the app store probes the declared signalk.appIcon path inside the published tarball, so an icon left out here 404s and the plugin falls back to a placeholder.",
   "files": [
-    "dist"
+    "dist",
+    "app-icon.svg"
   ],
+  "signalk": {
+    "displayName": "Tracks",
+    "appIcon": "app-icon.svg"
+  },
   "keywords": [
     "signalk-node-server-plugin",
     "signalk-category-utility"
