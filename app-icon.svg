@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Tracks">
+  <defs>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b6ea8"/>
+      <stop offset="1" stop-color="#0b3a5e"/>
+    </linearGradient>
+    <clipPath id="card">
+      <rect x="0" y="0" width="128" height="128" rx="22"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#card)">
+    <rect width="128" height="128" fill="url(#sea)"/>
+
+    <!-- Chart grid, as on the sibling plugins' icons. -->
+    <g stroke="#bee3f4" stroke-opacity="0.28" stroke-width="1" fill="none">
+      <path d="M0 32 H128 M0 64 H128 M0 96 H128"/>
+      <path d="M32 0 V128 M64 0 V128 M96 0 V128"/>
+    </g>
+
+    <!-- The track itself: the recorded path, drawn through its own points. -->
+    <path d="M24 102 C 40 94, 42 72, 58 64 S 84 58, 94 44"
+          fill="none" stroke="#0b3a5e" stroke-opacity="0.45"
+          stroke-width="9" stroke-linecap="round"/>
+    <path d="M24 102 C 40 94, 42 72, 58 64 S 84 58, 94 44"
+          fill="none" stroke="#ffd76a" stroke-width="5"
+          stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Position fixes. The track is a series of recorded points, not a
+         drawn line, and the icon should read that way at 32px too. -->
+    <g fill="#fffaf0" stroke="#0b3a5e" stroke-opacity="0.5" stroke-width="1.5">
+      <circle cx="24" cy="102" r="4.5"/>
+      <circle cx="49" cy="74" r="4"/>
+      <circle cx="72" cy="61" r="4"/>
+    </g>
+
+    <!-- The vessel, at the newest fix, heading along the track. -->
+    <path d="M94 34 L102 52 L94 47 L86 52 Z" fill="#fffaf0"
+          stroke="#0b3a5e" stroke-opacity="0.5" stroke-width="1.5"
+          stroke-linejoin="round"/>
+  </g>
+</svg>
