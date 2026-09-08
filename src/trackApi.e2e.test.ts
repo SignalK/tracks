@@ -131,16 +131,42 @@ describe('a v2 query through the real HTTP route', () => {
     expect((narrow.body as Collection).features).toHaveLength(0)
   })
 
-  // The server validates `resolution` as any positive ISO 8601 duration, so a
-  // calendar unit passes validation and reaches the provider. Resolving one
-  // needs a reference point; without it this came back as a 500.
-  it('answers a calendar-unit resolution rather than erroring', async () => {
-    for (const unit of ['P1W', 'P1M', 'P1Y']) {
+  // Weeks and days are fixed lengths, so they reach the provider normalised.
+  it('answers a fixed-length calendar resolution rather than erroring', async () => {
+    for (const unit of ['P1W', 'P1D']) {
       const { status, body } = await server.apiV2(`/tracks?contexts=${CTX}&resolution=${unit}`)
 
       expect(status).toBe(200)
       expect((body as Collection).features).toHaveLength(1)
     }
+  })
+
+  // Months and years are not fixed lengths — a month is 744h from January and
+  // 672h from February — so the server rejects them rather than picking one.
+  it('rejects a resolution in months or years', async () => {
+    for (const unit of ['P1M', 'P1Y']) {
+      const { status } = await server.apiV2(`/tracks?contexts=${CTX}&resolution=${unit}`)
+
+      expect(status).toBe(400)
+    }
+  })
+
+  // The server normalises a calendar-unit resolution to hours before a provider
+  // sees it, so ?resolution=P1D no longer needs a reference date on this side.
+  it('accepts a day-scale resolution through the real route', async () => {
+    const { status, body } = await server.apiV2(`/tracks?contexts=${CTX}&resolution=P1D`)
+
+    expect(status).toBe(200)
+    expect((body as Collection).features[0]!.properties.resolution).toBe('PT24H')
+  })
+
+  it('honours maxPoints and reports the spacing it used', async () => {
+    const { status, body } = await server.apiV2(`/tracks?contexts=${CTX}&maxPoints=2`)
+    const feature = (body as Collection).features[0]!
+
+    expect(status).toBe(200)
+    expect(feature.properties.pointCount).toBeLessThanOrEqual(2)
+    expect(feature.properties.resolution).toBeDefined()
   })
 
   it('rejects a malformed query before reaching the provider', async () => {

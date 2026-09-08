@@ -1,5 +1,5 @@
 import { Temporal } from '@js-temporal/polyfill'
-import { segment } from './timeWindow.js'
+import { segment, thinToBudget } from './timeWindow.js'
 import type { TrackStore } from './store.js'
 import type { TrackApi, TrackFeature, TracksRequest, TracksResponse } from './trackApi.js'
 import type { GeoBounds, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
@@ -87,6 +87,20 @@ const CALENDAR_REFERENCE = Temporal.PlainDate.from('2000-01-01')
 const totalMilliseconds = (duration: Temporal.Duration): number =>
   duration.total({ unit: 'milliseconds', relativeTo: CALENDAR_REFERENCE })
 
+/**
+ * Milliseconds back to a Duration, for reporting the spacing applied.
+ *
+ * Rounded to whole seconds when it is a second or more: a budget-derived
+ * spacing lands on values like 24470ms, and `PT24.47S` reads as false precision
+ * for something the server chose rather than the client asked for. Sub-second
+ * spacings keep their milliseconds, because there rounding would lose the
+ * distinction entirely.
+ */
+const msToDuration = (ms: number): Temporal.Duration =>
+  Temporal.Duration.from({ milliseconds: ms >= 1000 ? Math.round(ms / 1000) * 1000 : ms }).round({
+    largestUnit: 'hour',
+  })
+
 const toLngLat = ([lat, lng]: LatLngTuple): [number, number] => [lng, lat]
 
 /** Bounding box of the returned geometry, in GeoJSON order. */
@@ -94,18 +108,48 @@ const boundsOf = (points: TimedPosition[]): TracksRequest['bbox'] => {
   if (points.length === 0) {
     return undefined
   }
-  let west = points[0]!.position[1]
-  let east = west
   let south = points[0]!.position[0]
   let north = south
+  const longitudes: number[] = []
   for (const { position } of points) {
     const [lat, lng] = position
-    if (lng < west) west = lng
-    if (lng > east) east = lng
     if (lat < south) south = lat
     if (lat > north) north = lat
+    longitudes.push(lng)
   }
+  const [west, east] = longitudeSpan(longitudes)
   return [west, south, east, north]
+}
+
+/**
+ * The narrower of the two longitude intervals covering these points.
+ *
+ * A plain min/max describes a track spanning the antimeridian as almost the
+ * whole globe: two fixes at 179 and -179 are two degrees apart, but min/max
+ * reports 358. RFC 7946 says a box crossing the antimeridian is written with
+ * west greater than east, so the wrap-around interval is expressible — pick it
+ * whenever it is the shorter of the two.
+ *
+ * The widest gap between adjacent longitudes is the part of the globe the track
+ * does not cover, so the complement of that gap is the tightest interval that
+ * does.
+ */
+const longitudeSpan = (longitudes: number[]): [number, number] => {
+  const sorted = [...longitudes].sort((a, b) => a - b)
+  const min = sorted[0]!
+  const max = sorted[sorted.length - 1]!
+  let widestGap = 360 - (max - min)
+  let west = min
+  let east = max
+  for (let i = 1; i < sorted.length; i++) {
+    const gap = sorted[i]! - sorted[i - 1]!
+    if (gap > widestGap) {
+      widestGap = gap
+      west = sorted[i]!
+      east = sorted[i - 1]!
+    }
+  }
+  return [west, east]
 }
 
 export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
@@ -125,7 +169,12 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     // The bbox path goes through the store's spatial filter, which the sqlite
     // store answers from its cell index rather than by reading every track.
     const collection = await store.getFilteredTimedTracks(
-      { bbox: toGeoBounds(query.bbox), radius: null },
+      // intersects: the v2 contract matches a track on any position within the
+      // window, not on where the vessel ended up — "a vessel that crossed the
+      // box an hour ago and has since left still matches". The v1 routes keep
+      // the last-position rule, which is the right answer to their own
+      // question.
+      { bbox: toGeoBounds(query.bbox), radius: null, intersects: true },
       undefined,
       undefined,
       {
@@ -157,8 +206,19 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
       const matched = await matching(query)
       const gap = deps.segmentGap()
       const selfContext = deps.selfContext()
+      const requested = query.resolution ? totalMilliseconds(query.resolution) : undefined
       const features: TrackFeature[] = []
-      for (const [context, points] of matched) {
+      for (const [context, all] of matched) {
+        // The budget is applied per track, after the store's own thinning: a
+        // client that named both is asking for this spacing *and* no more than
+        // this many points, and the wider of the two wins.
+        const { points, resolution: appliedMs } =
+          query.maxPoints === undefined
+            ? { points: all, resolution: requested }
+            : thinToBudget(all, query.maxPoints, requested)
+        if (points.length === 0) {
+          continue
+        }
         const segments = segment(points, gap)
         const bbox = boundsOf(points)
         features.push({
@@ -179,9 +239,10 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
             to: new Date(points[points.length - 1]!.timestamp).toISOString(),
             ...(bbox ? { bbox } : {}),
             pointCount: points.length,
-            // Reported only when thinning was actually asked for, so a client
-            // can tell a thinned track from a full one.
-            ...(query.resolution ? { resolution: query.resolution.toString() } : {}),
+            // The spacing actually applied, which is not always the one asked
+            // for: a maxPoints budget widens it. Reported so a client can tell
+            // a thinned track from a full one, and see what produced it.
+            ...(appliedMs === undefined ? {} : { resolution: msToDuration(appliedMs).toString() }),
             ...(query.times ? { coordTimes: segments.map(toIsoTimes) } : {}),
           },
         })

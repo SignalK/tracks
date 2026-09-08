@@ -57,6 +57,16 @@ export type QueryParameters = Record<string, unknown>
 export interface TrackParams {
   bbox: GeoBounds | null
   radius: number | null
+  /**
+   * Match a track on *any* position rather than its last.
+   *
+   * The v1 routes answer "vessels near here now", so they match the last
+   * position — a vessel that has left is no longer near. The v2 Track API asks
+   * a different question, "tracks that passed through this box within the
+   * window", and its contract says a vessel that crossed an hour ago and has
+   * since left still matches. Same filter, two questions.
+   */
+  intersects?: boolean
 }
 
 export interface Debug {

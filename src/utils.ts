@@ -166,7 +166,9 @@ export function createMatcher(
 ): (track: LatLngTuple[]) => boolean {
   if (params.bbox) {
     const inBounds = createInBounds(params.bbox)
-    return (track: LatLngTuple[]) => inBounds(lastPoint(track))
+    return params.intersects
+      ? (track: LatLngTuple[]) => track.some(inBounds)
+      : (track: LatLngTuple[]) => inBounds(lastPoint(track))
   } else if (params.radius !== null) {
     if (!selfPosition) {
       throw new Error('No self position to calculate radius values')
