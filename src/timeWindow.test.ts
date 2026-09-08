@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseDuration, parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
+import { parseDuration, parseTrackQuery, segment, thin, thinToBudget, TimeWindowError } from './timeWindow.js'
 import type { TimedPosition } from './types.js'
 
 const MINUTE = 60 * 1000
@@ -201,5 +201,53 @@ describe('parseTrackQuery: times', () => {
     const query = parseTrackQuery({ duration: '1h', times: 'true' }, NOW)
     expect(query.times).toBe(true)
     expect(query.window).toEqual({ from: NOW - HOUR, to: NOW, inclusiveEnd: true })
+  })
+})
+
+describe('thinToBudget', () => {
+  const at = (timestamp: number) => ({ position: [60, 24] as [number, number], timestamp })
+
+  it('leaves a track that already fits alone', () => {
+    const points = [at(0), at(1000), at(2000)]
+    const result = thinToBudget(points, 10, undefined)
+    expect(result.points).toHaveLength(3)
+    expect(result.resolution).toBeUndefined()
+  })
+
+  it('widens the spacing until the budget fits, and reports it', () => {
+    const points = Array.from({ length: 100 }, (_, i) => at(i * 1000))
+    const result = thinToBudget(points, 10, undefined)
+    expect(result.points.length).toBeLessThanOrEqual(10)
+    expect(result.resolution).toBeGreaterThan(1000)
+  })
+
+  // `thin` appends the last point unconditionally, so a track whose final
+  // fixes share a timestamp still yields three points at a spacing of exactly
+  // the span — first, middle, and the appended last. Stopping the widening at
+  // the span rather than past it overran the budget.
+  it('meets the budget when the final timestamps are duplicated', () => {
+    const result = thinToBudget([at(0), at(100), at(100)], 2, undefined)
+    expect(result.points.length).toBeLessThanOrEqual(2)
+  })
+
+  it('never exceeds the budget across awkward spacings', () => {
+    for (const gaps of [
+      [0, 1, 1, 1, 1000],
+      [0, 0, 0, 0],
+      [0, 5, 5, 5, 5, 5, 1000000],
+      [0, 100, 100],
+    ]) {
+      const points = gaps.map((t) => at(t))
+      for (const budget of [2, 3, 4]) {
+        expect(thinToBudget(points, budget, undefined).points.length, `${gaps} @ ${budget}`).toBeLessThanOrEqual(budget)
+      }
+    }
+  })
+
+  it('honours a resolution floor while meeting the budget', () => {
+    const points = Array.from({ length: 100 }, (_, i) => at(i * 1000))
+    const result = thinToBudget(points, 10, 5000)
+    expect(result.points.length).toBeLessThanOrEqual(10)
+    expect(result.resolution!).toBeGreaterThanOrEqual(5000)
   })
 })

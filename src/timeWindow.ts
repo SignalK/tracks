@@ -216,8 +216,9 @@ export function thinToBudget(
   if (maxPoints <= 0 || start.length <= maxPoints) {
     return { points: start, resolution }
   }
-  // `thin` always keeps the first and last point, so a budget below 2 cannot be
-  // met by widening. Take the ends and say so.
+  // Defensive: the API rejects a non-positive maxPoints with a 400, so neither
+  // this nor the branch above is reachable over HTTP. `thin` always keeps the
+  // first and last point, so a budget below 2 cannot be met by widening at all.
   if (maxPoints < 2) {
     const ends = start.length > 0 ? [start[0]!] : []
     return { points: ends, resolution }
@@ -227,7 +228,12 @@ export function thinToBudget(
   // are not, so this is a starting guess that the loop below corrects.
   let spacing = Math.max(1, Math.ceil(span / (maxPoints - 1)), resolution ?? 0)
   let result = thin(points, spacing)
-  while (result.length > maxPoints && spacing < span) {
+  // Widened past the span, not up to it: `thin` keeps the last point
+  // unconditionally, so a track whose final fixes share a timestamp still
+  // yields three points at exactly `span` — first, middle, and the appended
+  // last. Doubling terminates because `thin` reaches two points once the
+  // spacing exceeds the span.
+  while (result.length > maxPoints && spacing <= span) {
     spacing *= 2
     result = thin(points, spacing)
   }
