@@ -398,7 +398,10 @@ describe('getTracks', () => {
       const props = budgeted.features[0]!.properties
       expect(props.pointCount).toBeLessThanOrEqual(50)
       expect(props.pointCount).toBeGreaterThan(40)
-      expect(props.resolution).toBe('PT24S')
+      // The exact spacing applied, not a tidier rounding of it: re-querying
+      // with a rounded PT24S returns 51 points against a budget of 50, so the
+      // reported value has to reproduce the result it describes.
+      expect(props.resolution).toBe('PT24.47S')
     } finally {
       h.stop()
     }

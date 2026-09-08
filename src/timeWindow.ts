@@ -213,15 +213,15 @@ export function thinToBudget(
   resolution: number | undefined,
 ): { points: TimedPosition[]; resolution: number | undefined } {
   const start = thin(points, resolution)
-  if (maxPoints <= 0 || start.length <= maxPoints) {
+  if (start.length <= maxPoints) {
     return { points: start, resolution }
   }
-  // Defensive: the API rejects a non-positive maxPoints with a 400, so neither
-  // this nor the branch above is reachable over HTTP. `thin` always keeps the
-  // first and last point, so a budget below 2 cannot be met by widening at all.
+  // A budget below two cannot be met by widening — `thin` keeps the first point
+  // and the last unconditionally — so it is met by truncation instead. The API
+  // rejects a non-positive maxPoints with a 400, so this only arises for a
+  // caller reaching the helper directly, and "at most" has to hold for them too.
   if (maxPoints < 2) {
-    const ends = start.length > 0 ? [start[0]!] : []
-    return { points: ends, resolution }
+    return { points: start.slice(0, Math.max(0, maxPoints)), resolution }
   }
   const span = start[start.length - 1]!.timestamp - start[0]!.timestamp
   // The spacing that would fit the budget if points were evenly spaced. They

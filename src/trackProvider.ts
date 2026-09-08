@@ -90,14 +90,14 @@ const totalMilliseconds = (duration: Temporal.Duration): number =>
 /**
  * Milliseconds back to a Duration, for reporting the spacing applied.
  *
- * Rounded to whole seconds when it is a second or more: a budget-derived
- * spacing lands on values like 24470ms, and `PT24.47S` reads as false precision
- * for something the server chose rather than the client asked for. Sub-second
- * spacings keep their milliseconds, because there rounding would lose the
- * distinction entirely.
+ * Exact, not rounded to something tidier. A budget-derived spacing lands on
+ * values like 24470ms, and `PT24.47S` does read as false precision — but the
+ * field says what was applied, and a client re-querying with a rounded `PT24S`
+ * gets 51 points where the budget it asked for was 50. Reproducibility beats
+ * tidiness.
  */
 const msToDuration = (ms: number): Temporal.Duration =>
-  Temporal.Duration.from({ milliseconds: ms >= 1000 ? Math.round(ms / 1000) * 1000 : ms }).round({
+  Temporal.Duration.from({ milliseconds: ms }).round({
     largestUnit: 'hour',
   })
 

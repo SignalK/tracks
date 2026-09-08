@@ -244,6 +244,23 @@ describe('thinToBudget', () => {
     }
   })
 
+  // The reported spacing is what the response advertises, so a client that
+  // re-queries with it must get the same track rather than one over budget.
+  it('reports a spacing that reproduces the result', () => {
+    const points = Array.from({ length: 1200 }, (_, i) => at(i * 1000))
+    const budgeted = thinToBudget(points, 50, undefined)
+
+    expect(thin(points, budgeted.resolution).length).toBe(budgeted.points.length)
+    expect(budgeted.points.length).toBeLessThanOrEqual(50)
+  })
+
+  it('meets a budget below two by truncating', () => {
+    const points = [at(0), at(1000), at(2000)]
+
+    expect(thinToBudget(points, 1, undefined).points).toHaveLength(1)
+    expect(thinToBudget(points, 0, undefined).points).toHaveLength(0)
+  })
+
   it('honours a resolution floor while meeting the budget', () => {
     const points = Array.from({ length: 100 }, (_, i) => at(i * 1000))
     const result = thinToBudget(points, 10, 5000)
