@@ -70,7 +70,13 @@ describe('history and store together', () => {
 
   it('prefers the provider where it has the same minute', async () => {
     // The same physical fix, timestamped differently by the two sources.
-    const minuteAgo = Date.now() - MINUTE
+    //
+    // Anchored to the start of a minute rather than taken from the clock:
+    // reconciliation buckets by `Math.floor(t / 60000)`, so a run starting in
+    // the last 1212 ms of a minute put the two fixes in *different* buckets
+    // and kept both. A 2% flake, and it does not test anything the aligned
+    // case does not.
+    const minuteAgo = Math.floor((Date.now() - MINUTE) / MINUTE) * MINUTE
     const h = stand([[new Date(minuteAgo).toISOString(), { latitude: 61, longitude: 24.9 }]])
     stop = h.stop
     h.plugin.getTracks()?.initialTrack(SELF, [[60, 24.9]], [minuteAgo + 1212])

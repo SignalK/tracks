@@ -194,6 +194,53 @@ export function thin(points: TimedPosition[], resolution: number | undefined): T
 }
 
 /**
+ * Thin to at most `maxPoints`, widening the spacing until the budget fits.
+ *
+ * A budget, not a fidelity contract: the caller has said how many points it can
+ * afford to transfer and draw, whatever shape the track is. Returns the
+ * resolution actually applied so the response can report it — a client that is
+ * given 29 points instead of the 546 it would otherwise have received should be
+ * able to see the spacing that produced them.
+ *
+ * Widening by doubling from the span-derived estimate rather than binary
+ * searching: `thin` keeps the first point and the last unconditionally, so the
+ * count is not a clean function of the spacing and an exact solve would be
+ * false precision. Two or three passes settle it in practice.
+ */
+export function thinToBudget(
+  points: TimedPosition[],
+  maxPoints: number,
+  resolution: number | undefined,
+): { points: TimedPosition[]; resolution: number | undefined } {
+  const start = thin(points, resolution)
+  if (start.length <= maxPoints) {
+    return { points: start, resolution }
+  }
+  // A budget below two cannot be met by widening — `thin` keeps the first point
+  // and the last unconditionally — so it is met by truncation instead. The API
+  // rejects a non-positive maxPoints with a 400, so this only arises for a
+  // caller reaching the helper directly, and "at most" has to hold for them too.
+  if (maxPoints < 2) {
+    return { points: start.slice(0, Math.max(0, maxPoints)), resolution }
+  }
+  const span = start[start.length - 1]!.timestamp - start[0]!.timestamp
+  // The spacing that would fit the budget if points were evenly spaced. They
+  // are not, so this is a starting guess that the loop below corrects.
+  let spacing = Math.max(1, Math.ceil(span / (maxPoints - 1)), resolution ?? 0)
+  let result = thin(points, spacing)
+  // Widened past the span, not up to it: `thin` keeps the last point
+  // unconditionally, so a track whose final fixes share a timestamp still
+  // yields three points at exactly `span` — first, middle, and the appended
+  // last. Doubling terminates because `thin` reaches two points once the
+  // spacing exceeds the span.
+  while (result.length > maxPoints && spacing <= span) {
+    spacing *= 2
+    result = thin(points, spacing)
+  }
+  return { points: result, resolution: spacing }
+}
+
+/**
  * Split points into segments wherever recording stopped for longer than `gap`.
  *
  * A track is not one continuous line: a vessel that stops for the night, or

@@ -18,13 +18,15 @@ export type TrackBoundingBox = [number, number, number, number]
 /**
  * A request as the server hands it to a provider.
  *
- * Not every field is honoured here. `maxPoints`, `simplify`, `epsilon` and
- * `properties` are accepted by the API and ignored by this provider: it serves
- * positions, and has no co-recorded values to attach or geometry simplifier to
- * run. A caller gets the full, unsimplified track for the window it asked for,
- * which is a superset of what it requested rather than a wrong answer. The
- * response echoes `resolution` when one was requested, so a client can tell a
- * thinned track from a full one.
+ * Not every field is honoured here. `simplify`, `epsilon` and `properties` are
+ * accepted by the API and ignored by this provider: it serves positions, and
+ * has no co-recorded values to attach or geometry simplifier to run. Geometry
+ * comes back unsimplified, which is a superset of what such a request asked for
+ * rather than a wrong answer.
+ *
+ * `resolution` and `maxPoints` are both applied, and the response reports the
+ * spacing actually used — which is not always the one asked for, since a
+ * budget widens it.
  *
  * Simplification and co-recorded properties are tracked separately; see
  * SignalK/tracks.

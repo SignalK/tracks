@@ -11,6 +11,8 @@ import type { TrackApi } from './trackApi.js'
  * offered to the server is as broken as one that answers wrongly.
  */
 
+const providerBbox = (res: Awaited<ReturnType<TrackApi['getTracks']>>) => res.features[0]!.properties.bbox
+
 const providerOf = (h: { trackProvider: () => TrackApi | undefined }): TrackApi => {
   const provider = h.trackProvider()
   if (!provider) {
@@ -284,6 +286,149 @@ describe('getTracks', () => {
     }
   })
 
+  // RFC 7946 writes a box crossing the antimeridian with west greater than
+  // east. A plain min/max reports two fixes two degrees apart as spanning 358.
+  it('reports a dateline-crossing track as the narrow box', async () => {
+    const h = createHarness()
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [0, 179],
+          [0, -179],
+        ],
+        [t0, t0 + 1000],
+      )
+
+      expect(providerBbox(await providerOf(h).getTracks({}))).toEqual([179, 0, -179, 0])
+    } finally {
+      h.stop()
+    }
+  })
+
+  it('leaves an ordinary track as west-to-east', async () => {
+    const h = createHarness()
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [60.1, 24.9],
+          [60.2, 25.1],
+        ],
+        [t0, t0 + 1000],
+      )
+
+      expect(providerBbox(await providerOf(h).getTracks({}))).toEqual([24.9, 60.1, 25.1, 60.2])
+    } finally {
+      h.stop()
+    }
+  })
+
+  // The v2 contract: "a vessel that crossed the box an hour ago and has since
+  // left still matches". The v1 routes match the last position instead, which
+  // is the right answer to their own question ("vessels near here now") and
+  // was wrong here — this returned nothing.
+  it('matches a track that crossed the box and left', async () => {
+    const h = createHarness()
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [60.2, 25.0],
+          [50, 22],
+          [10, 20],
+        ],
+        [t0, t0 + 1000, t0 + 2000],
+      )
+
+      const res = await providerOf(h).getTracks({ bbox: [24, 59, 26, 61] })
+
+      expect(res.features.map((f) => f.properties.context)).toEqual([SELF_CONTEXT])
+      // Selected, not clipped: the whole track comes back, including the
+      // stretches outside the box.
+      expect(res.features[0]!.properties.pointCount).toBe(3)
+    } finally {
+      h.stop()
+    }
+  })
+
+  it('still excludes a track that never entered the box', async () => {
+    const h = createHarness()
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [10, 20],
+          [11, 21],
+        ],
+        [t0, t0 + 1000],
+      )
+
+      const res = await providerOf(h).getTracks({ bbox: [24, 59, 26, 61] })
+
+      expect(res.features).toEqual([])
+    } finally {
+      h.stop()
+    }
+  })
+
+  // A budget, not a fidelity contract: the spacing widens until the count fits,
+  // and the response reports what was actually applied so a client can see it.
+  it('applies maxPoints and reports the resolution used', async () => {
+    const h = createHarness()
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      const positions: [number, number][] = []
+      const timestamps: number[] = []
+      for (let i = 0; i < 1200; i++) {
+        positions.push([60 + i * 0.0001, 24 + i * 0.0001])
+        timestamps.push(t0 + i * 1000)
+      }
+      h.seedTrack(SELF_CONTEXT, positions, timestamps)
+
+      const full = await providerOf(h).getTracks({})
+      expect(full.features[0]!.properties.pointCount).toBe(1200)
+      expect(full.features[0]!.properties.resolution).toBeUndefined()
+
+      const budgeted = await providerOf(h).getTracks({ maxPoints: 50 })
+      const props = budgeted.features[0]!.properties
+      expect(props.pointCount).toBeLessThanOrEqual(50)
+      expect(props.pointCount).toBeGreaterThan(40)
+      // The exact spacing applied, not a tidier rounding of it: re-querying
+      // with a rounded PT24S returns 51 points against a budget of 50, so the
+      // reported value has to reproduce the result it describes.
+      expect(props.resolution).toBe('PT24.47S')
+    } finally {
+      h.stop()
+    }
+  })
+
+  it('leaves a track alone when it already fits the budget', async () => {
+    const h = createHarness()
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [60, 24],
+          [61, 25],
+        ],
+        [t0, t0 + 1000],
+      )
+
+      const res = await providerOf(h).getTracks({ maxPoints: 50 })
+
+      expect(res.features[0]!.properties.pointCount).toBe(2)
+      expect(res.features[0]!.properties.resolution).toBeUndefined()
+    } finally {
+      h.stop()
+    }
+  })
+
   // The bbox arrives in GeoJSON order and has to be swapped to the [lat, lng]
   // corners the store filters on.
   it('filters by bbox in west,south,east,north order', async () => {
@@ -377,10 +522,37 @@ describe('getTracks', () => {
     }
   })
 
-  // The API validates `resolution` as any positive ISO 8601 duration, so a
-  // calendar unit reaches the provider. Temporal's total() refuses weeks,
-  // months and years without a reference point, which surfaced as a 500 for a
-  // perfectly valid query string.
+  // The API accepts `PT0.0005S`, which is half a millisecond, and hands it
+  // through intact. `Temporal.Duration.from` rejects a fractional value in any
+  // unit, so reporting it back needs the sub-millisecond part split out — this
+  // was a 500 for a query the server had already accepted.
+  it('reports a sub-millisecond resolution without throwing', async () => {
+    const h = createHarness()
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [60, 24],
+          [60.1, 24.1],
+        ],
+        [t0, t0 + 1000],
+      )
+
+      for (const unit of ['PT0.0005S', 'PT0.5S', 'PT24.47S']) {
+        const res = await providerOf(h).getTracks({ resolution: Temporal.Duration.from(unit) })
+        expect(res.features[0]!.properties.resolution, unit).toBe(unit)
+      }
+    } finally {
+      h.stop()
+    }
+  })
+
+  // Defensive: the server rejects months and years and normalises everything
+  // else to hours before a provider sees it, so these no longer arrive over
+  // HTTP. A provider called directly still must not throw on them — Temporal's
+  // total() refuses weeks and larger without a reference point, which is what
+  // surfaced as a 500 before the server normalised.
   it('accepts a calendar-unit resolution', async () => {
     const h = createHarness()
     try {
@@ -396,13 +568,20 @@ describe('getTracks', () => {
         [t0, t0 + 60_000, t0 + 120_000, t0 + 180_000],
       )
 
-      for (const unit of ['P1W', 'P1M', 'P1Y']) {
-        const res = await providerOf(h).getTracks({ resolution: Temporal.Duration.from(unit) })
+      for (const [unit, expected] of [
+        ['P1W', 'PT168H'],
+        ['P1M', 'PT744H'],
+        ['P1Y', 'PT8784H'],
+      ]) {
+        const res = await providerOf(h).getTracks({ resolution: Temporal.Duration.from(unit!) })
 
         // Each spacing is far wider than the whole track, so thinning keeps the
         // first point and the last — thin() always ends on the newest fix.
         expect(res.features[0]!.properties.pointCount).toBe(2)
-        expect(res.features[0]!.properties.resolution).toBe(unit)
+        // The spacing *applied*, in hours and below, rather than the calendar
+        // form asked for: a maxPoints budget can widen it, so the field has to
+        // report what was used. The server normalises the request the same way.
+        expect(res.features[0]!.properties.resolution).toBe(expected)
       }
     } finally {
       h.stop()
