@@ -1,8 +1,10 @@
 import express from 'express'
 import request from 'supertest'
+import { Temporal } from '@js-temporal/polyfill'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import ThePlugin from './index.js'
 import type { Debug } from './types.js'
+import type { TrackApi } from './trackApi.js'
 
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
 const API = '/signalk/v1/api'
@@ -37,11 +39,25 @@ const stand = (historyRows: unknown[] | null) => {
             }),
         }),
   }
-  const plugin = ThePlugin(app)
+  let trackProvider: TrackApi | undefined
+  const appWithV2 = {
+    ...app,
+    registerTrackApiProvider: (p: TrackApi) => {
+      trackProvider = p
+    },
+  }
+  const plugin = ThePlugin(appWithV2)
   plugin.start({ resolution: 60000, pointsToKeep: 1000, maxAge: 3600, source: 'memory' })
   const server = express()
   server.use(API, plugin.signalKApiRoutes(express.Router()))
-  return { plugin, server, stop: () => plugin.stop() }
+  return {
+    plugin,
+    server,
+    // The v2 provider, so a test can ask the same question through both routes
+    // and check the plugin gives one answer rather than two.
+    provider: () => trackProvider,
+    stop: () => plugin.stop(),
+  }
 }
 
 /** A stored point at a given latitude. */
@@ -208,8 +224,12 @@ describe('history and store together', () => {
       .get(`${API}/self/track?from=${from.toISOString()}&to=${to.toISOString()}`)
       .expect(200)
 
-    // The point exactly at `to` is excluded, as it is from the store.
-    expect(coords(res.body).map((p) => p[1])).not.toContain(61)
+    // The point exactly at `to` is excluded, as it is from the store. Asserted
+    // alongside what survives: an empty response would satisfy the exclusion on
+    // its own and prove nothing.
+    const latitudes = coords(res.body).map((p) => p[1])
+    expect(latitudes).not.toContain(61)
+    expect(latitudes.length).toBeGreaterThan(0)
   })
 
   it('ignores provider rows outside the requested window', async () => {
@@ -224,5 +244,40 @@ describe('history and store together', () => {
     const lats = coords(res.body).map((p) => p[1])
     expect(lats).toContain(62)
     expect(lats).not.toContain(61)
+  })
+})
+
+// The plugin has two entry points into the same data: the v1 routes and the v2
+// Track API provider. A query answered through one has to give the same answer
+// as the same query answered through the other — the v2 provider was written
+// without the history reconciliation the v1 routes have done since #73, so a
+// client moving to v2 silently lost every point the provider held.
+describe('v1 and v2 agree', () => {
+  it('serves history through the v2 provider too', async () => {
+    const minuteAgo = Math.floor((Date.now() - MINUTE) / MINUTE) * MINUTE
+    const h = stand([[new Date(minuteAgo - 5 * MINUTE).toISOString(), { latitude: 61, longitude: 24.9 }]])
+    stop = h.stop
+    h.plugin.getTracks()?.initialTrack(SELF, [[60, 24.9]], [minuteAgo])
+
+    const v1 = await request(h.server).get(`${API}/self/track?timespan=1h`).expect(200)
+    const v2 = await h.provider()!.getTracks({
+      contexts: [SELF],
+      from: Temporal.Instant.fromEpochMilliseconds(minuteAgo - 60 * MINUTE),
+      to: Temporal.Instant.fromEpochMilliseconds(Date.now()),
+    })
+
+    // Two points either way: the provider's older fix plus the stored one.
+    expect(coords(v1.body)).toHaveLength(2)
+    expect(v2.features[0]!.properties.pointCount).toBe(2)
+  })
+
+  it('serves the store alone when no provider is installed', async () => {
+    const h = stand(null)
+    stop = h.stop
+    h.plugin.getTracks()?.initialTrack(SELF, [storedAt(60.1)], [Date.now() - 5 * MINUTE])
+
+    const v2 = await h.provider()!.getTracks({ contexts: [SELF] })
+
+    expect(v2.features[0]!.properties.pointCount).toBe(1)
   })
 })

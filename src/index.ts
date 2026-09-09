@@ -727,6 +727,20 @@ export default function ThePlugin(app: App): Plugin {
           store: () => tracks,
           selfContext: () => app.selfContext,
           segmentGap: () => segmentGap,
+          // The same reconciliation the v1 routes have done since #73. Without
+          // it the plugin answers differently depending on which route a client
+          // uses: the store alone through v2, the store enriched by a history
+          // provider through v1.
+          reconcileWithHistory: async (context, stored, window, resolutionMs) => {
+            const effective = resolutionMs ?? storeResolution
+            // A query with no window still gets history, for the same reason
+            // the v1 route does: a context recorded only by the provider —
+            // before this plugin was installed — would otherwise never be asked
+            // about.
+            const asked = window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
+            const history = await historyPositions(app, context, asked, effective, app.debug)
+            return history.points.length ? reconcile(history.points, stored, history.resolutionMs).positions : stored
+          },
         }),
       )
 

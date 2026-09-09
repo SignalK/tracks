@@ -127,6 +127,29 @@ describe('bootstrap through a real history provider', () => {
     }
   })
 
+  // The plugin has two entry points into the same data. Both must reconcile
+  // with the history provider, or a client moving from v1 to v2 silently loses
+  // every point the provider held and the store did not.
+  it('serves history through the v2 Track API as well as v1', async () => {
+    if (!available || !server) return
+    const t0 = Date.now() - 5 * MINUTE
+    await server.feed(server.selfContext, [60.2, 25.0], t0)
+
+    const v1 = (await server.api(`${SELF_PATH}?duration=1d`)) as TrackResponse
+    const v2 = await server.apiV2(`/tracks?contexts=self&duration=P1D`)
+
+    const v1Points = v1.coordinates.flat().length
+    const feature = (v2.body as { features: { properties: { pointCount: number } }[] }).features[0]
+
+    expect(v2.status).toBe(200)
+    expect(feature).toBeDefined()
+    // Not asserting equality: the two routes thin independently. What must hold
+    // is that v2 is not answering from the store alone — one live fix — while
+    // v1 reaches the provider for the rest.
+    expect(v1Points).toBeGreaterThan(1)
+    expect(feature!.properties.pointCount).toBeGreaterThan(1)
+  })
+
   it('starts and serves even when the provider returns nothing useful', async () => {
     if (!available || !server) return
     // The bootstrap is best-effort: a provider with no data for the window must

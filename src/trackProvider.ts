@@ -23,6 +23,25 @@ export interface TrackProviderDeps {
   selfContext: () => string
   /** Gap in ms that starts a new segment; 0 leaves the track as one line. */
   segmentGap: () => number
+  /**
+   * Positions a history provider holds for a context and window, reconciled
+   * with the store's own.
+   *
+   * Injected rather than reached for directly: the reconciliation belongs to
+   * the plugin, and the v1 routes have done it since #73 — a query answered
+   * through the v2 provider has to give the same answer as the same query
+   * answered through v1, or the plugin contradicts itself depending on which
+   * route a client happens to use.
+   *
+   * Resolves to the store's own points unchanged when no provider is
+   * installed, which is the common case.
+   */
+  reconcileWithHistory: (
+    context: string,
+    stored: TimedPosition[],
+    window: TimeWindow | undefined,
+    resolutionMs: number | undefined,
+  ) => Promise<TimedPosition[]>
 }
 
 /** v2 sends `[west, south, east, north]`; a bounds here is `[lat, lng]` corners. */
@@ -160,10 +179,12 @@ const longitudeSpan = (longitudes: number[]): [number, number] => {
 }
 
 export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
-  const matching = async (query: TracksRequest): Promise<Map<string, TimedPosition[]>> => {
+  const matching = async (
+    query: TracksRequest,
+  ): Promise<{ tracks: Map<string, TimedPosition[]>; resolution: number | undefined }> => {
     const store = deps.store()
     if (!store) {
-      return new Map()
+      return { tracks: new Map(), resolution: undefined }
     }
     const window = toTimeWindow(query)
     const resolution = query.resolution ? totalMilliseconds(query.resolution) : undefined
@@ -191,10 +212,17 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     )
 
     const result = new Map<string, TimedPosition[]>()
-    for (const [context, points] of Object.entries(collection)) {
-      if (wanted && !wanted.has(context)) {
-        continue
-      }
+    // Reconciled per context rather than in one pass: a history provider is
+    // asked per context, and the store's own points are what a provider-less
+    // install returns unchanged.
+    const contexts = Object.entries(collection).filter(([context]) => !wanted || wanted.has(context))
+    const reconciled = await Promise.all(
+      contexts.map(
+        async ([context, stored]) =>
+          [context, await deps.reconcileWithHistory(context, stored, window, resolution)] as const,
+      ),
+    )
+    for (const [context, points] of reconciled) {
       // Dropped here rather than in getTracks, so both entry points agree on
       // what matched. A store filters on the *last* position, so a context can
       // match spatially and still have no point inside the time window;
@@ -205,15 +233,14 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
       }
       result.set(context, points)
     }
-    return result
+    return { tracks: result, resolution }
   }
 
   return {
     async getTracks(query: TracksRequest): Promise<TracksResponse> {
-      const matched = await matching(query)
+      const { tracks: matched, resolution: requested } = await matching(query)
       const gap = deps.segmentGap()
       const selfContext = deps.selfContext()
-      const requested = query.resolution ? totalMilliseconds(query.resolution) : undefined
       const features: TrackFeature[] = []
       for (const [context, all] of matched) {
         // The budget is applied per track, after the store's own thinning: a
@@ -258,7 +285,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     },
 
     async getTrackContexts(query: TracksRequest): Promise<string[]> {
-      return [...(await matching(query)).keys()]
+      return [...(await matching(query)).tracks.keys()]
     },
   }
 }
