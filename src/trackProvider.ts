@@ -97,7 +97,14 @@ const totalMilliseconds = (duration: Temporal.Duration): number =>
  * tidiness.
  */
 const msToDuration = (ms: number): Temporal.Duration =>
-  Temporal.Duration.from({ milliseconds: ms }).round({
+  // Split into whole milliseconds and a nanosecond remainder: `Duration.from`
+  // rejects a fractional value in any unit, and a resolution below a
+  // millisecond reaches here intact — the API accepts `PT0.0005S`, which is
+  // 0.5ms. Rounding it away would report a spacing that was not applied.
+  Temporal.Duration.from({
+    milliseconds: Math.trunc(ms),
+    nanoseconds: Math.round((ms - Math.trunc(ms)) * 1e6),
+  }).round({
     largestUnit: 'hour',
   })
 

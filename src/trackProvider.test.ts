@@ -522,6 +522,33 @@ describe('getTracks', () => {
     }
   })
 
+  // The API accepts `PT0.0005S`, which is half a millisecond, and hands it
+  // through intact. `Temporal.Duration.from` rejects a fractional value in any
+  // unit, so reporting it back needs the sub-millisecond part split out — this
+  // was a 500 for a query the server had already accepted.
+  it('reports a sub-millisecond resolution without throwing', async () => {
+    const h = createHarness()
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [60, 24],
+          [60.1, 24.1],
+        ],
+        [t0, t0 + 1000],
+      )
+
+      for (const unit of ['PT0.0005S', 'PT0.5S', 'PT24.47S']) {
+        const res = await providerOf(h).getTracks({ resolution: Temporal.Duration.from(unit) })
+        // Round-tripped exactly: the field reports the spacing applied.
+        expect(res.features[0]!.properties.resolution, unit).toBe(unit)
+      }
+    } finally {
+      h.stop()
+    }
+  })
+
   // Defensive: the server rejects months and years and normalises everything
   // else to hours before a provider sees it, so these no longer arrive over
   // HTTP. A provider called directly still must not throw on them — Temporal's

@@ -169,6 +169,15 @@ describe('a v2 query through the real HTTP route', () => {
     expect(feature.properties.resolution).toBeDefined()
   })
 
+  // The server accepts a sub-millisecond resolution, so the provider has to be
+  // able to report one back. This was a 500 for a query the parser had passed.
+  it('answers a sub-millisecond resolution', async () => {
+    const { status, body } = await server.apiV2(`/tracks?contexts=${CTX}&resolution=PT0.0005S`)
+
+    expect(status).toBe(200)
+    expect((body as Collection).features[0]!.properties.resolution).toBe('PT0.0005S')
+  })
+
   it('rejects a malformed query before reaching the provider', async () => {
     const { status } = await server.apiV2(`/tracks?contexts=${CTX}&bbox=1,2,3`)
     expect(status).toBe(400)
