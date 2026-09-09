@@ -541,7 +541,6 @@ describe('getTracks', () => {
 
       for (const unit of ['PT0.0005S', 'PT0.5S', 'PT24.47S']) {
         const res = await providerOf(h).getTracks({ resolution: Temporal.Duration.from(unit) })
-        // Round-tripped exactly: the field reports the spacing applied.
         expect(res.features[0]!.properties.resolution, unit).toBe(unit)
       }
     } finally {
