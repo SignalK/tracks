@@ -38,7 +38,7 @@ import type {
   TimedTrackCollection,
   TrackCollection,
 } from './types.js'
-import { resolveContext, toIsoTimes, validateParameters } from './utils.js'
+import { historyRowPosition, resolveContext, toIsoTimes, validateParameters } from './utils.js'
 
 export interface ContextPosition {
   context: Context
@@ -234,14 +234,6 @@ const HISTORY_QUERY_TIMEOUT_MS = 5000
  */
 const WINDOWLESS_HISTORY_SPAN_MS = 24 * 60 * 60 * 1000
 
-const BOOTSTRAP_INITIAL_DELAY = 5000
-const BOOTSTRAP_RETRY_DELAY = 15000
-const BOOTSTRAP_MAX_ATTEMPTS = 18
-
-// If getHistoryApi() reports "no provider configured" this many times consecutively,
-// assume no history provider plugin is installed and stop retrying.
-const BOOTSTRAP_MAX_NO_PROVIDER = 3
-
 /**
  * Config values arrive from the plugin UI as numbers, but a hand-edited
  * settings file can supply strings. Accept both, reject anything non-finite so
@@ -263,38 +255,7 @@ const notAvailable = (res: Response) => {
   res.json({ message: 'Tracks API not available because tracks plugin is not enabled' })
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
-
 const errorDetail = (err: unknown): string => (err instanceof Error && err.stack ? err.stack : String(err))
-
-const isNoProviderError = (err: unknown): boolean => {
-  const text = String(err)
-  return text.includes('No history') && text.includes('provider')
-}
-
-/**
- * A history row is `[timestamp, position]`. Providers disagree on how the
- * position is encoded: signalk-questdb returns `{latitude, longitude}`, while
- * a `[lon, lat]` pair is the shape the History API's own docs describe. Accept
- * both — rejecting either silently bootstraps an empty track.
- */
-const historyRowPosition = (row: unknown): LatLngTuple | undefined => {
-  if (!Array.isArray(row) || row.length < 2) {
-    return undefined
-  }
-  const value: unknown = row[1]
-  if (Array.isArray(value) && value.length === 2 && typeof value[0] === 'number' && typeof value[1] === 'number') {
-    // [lon, lat] -> [lat, lng]
-    return [value[1], value[0]]
-  }
-  if (value && typeof value === 'object' && 'latitude' in value && 'longitude' in value) {
-    const { latitude, longitude } = value as Partial<Position>
-    if (typeof latitude === 'number' && typeof longitude === 'number') {
-      return [latitude, longitude]
-    }
-  }
-  return undefined
-}
 
 /**
  * A window covering everything the store holds, up to now.
@@ -424,155 +385,6 @@ const historyRowTimestamp = (row: unknown): number => {
   }
   const parsed = Date.parse(raw)
   return Number.isNaN(parsed) ? 0 : parsed
-}
-
-async function bootstrapSelfTrack(
-  app: App,
-  tracks: TrackStore,
-  config: TracksPluginConfig,
-  glitchFilter: GlitchFilter,
-): Promise<void> {
-  const { debug } = app
-  const getHistoryApi = app.getHistoryApi
-
-  if (!getHistoryApi) {
-    debug('getHistoryApi not available on server, skipping track bootstrap')
-    return
-  }
-
-  if (!app.selfContext) {
-    debug('selfContext not available, skipping track bootstrap')
-    return
-  }
-
-  const configuredProvider = app.config?.settings?.historyApi?.defaultProvider
-
-  const resolution = toNumber(config.resolution) ?? DEFAULT_RESOLUTION
-  const pointsToKeep = toNumber(config.pointsToKeep) ?? DEFAULT_POINTS_TO_KEEP
-  const timespanMs = resolution * pointsToKeep
-  const resolutionSecs = Math.max(1, Math.round(resolution / 1000))
-  const timespanMinutes = Math.round(timespanMs / 1000 / 60)
-
-  debug(
-    `Track bootstrap: requesting ${timespanMinutes} minutes of history at ${resolutionSecs}s resolution ` +
-      `(max ${BOOTSTRAP_MAX_ATTEMPTS} attempts)`,
-  )
-
-  let noProviderCount = 0
-
-  for (let attempt = 1; attempt <= BOOTSTRAP_MAX_ATTEMPTS; attempt++) {
-    const delay = attempt === 1 ? BOOTSTRAP_INITIAL_DELAY : BOOTSTRAP_RETRY_DELAY
-    debug(`Track bootstrap attempt ${attempt}/${BOOTSTRAP_MAX_ATTEMPTS}, waiting ${delay / 1000}s...`)
-    await sleep(delay)
-
-    try {
-      // Ask for the configured provider by name. Without this the server hands
-      // back whichever provider registered first until the configured one is
-      // up, and an early bootstrap gets answered by a plugin that has no
-      // positions — indistinguishable from "no history exists". Naming it makes
-      // the not-yet-registered case a rejection, which the retry loop handles.
-      const historyApi = await getHistoryApi(configuredProvider)
-      noProviderCount = 0 // provider resolved — reset counter
-
-      const to = new Date()
-      const from = new Date(to.getTime() - timespanMs)
-
-      // The History API hands providers Temporal.Instant values, not strings —
-      // see parseTimeRangeParams in signalk-server. Providers call Instant
-      // methods on them (signalk-questdb does `from.add(duration)`), so passing
-      // ISO strings here yields a query that silently returns the wrong range.
-      const response = await historyApi.getValues({
-        context: app.selfContext,
-        from: Temporal.Instant.from(from.toISOString()),
-        to: Temporal.Instant.from(to.toISOString()),
-        pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
-        resolution: resolutionSecs,
-      })
-
-      if (response?.data && response.data.length > 0) {
-        const positions: LatLngTuple[] = []
-        // Carry the recorded times through so bootstrapped points answer
-        // time-window queries rather than looking infinitely old.
-        const timestamps: number[] = []
-        let dropped = 0
-        for (const row of response.data) {
-          const position = historyRowPosition(row)
-          if (position) {
-            const timestamp = historyRowTimestamp(row)
-            // An unusable timestamp reads as 0, which would file the position
-            // at 1970 — infinitely old to every window query, and permanent
-            // once a persistent store has it.
-            if (timestamp === 0) {
-              dropped++
-              continue
-            }
-            // History carries the same receiver glitches the live stream does,
-            // and bootstrap is how a persistent track is rehydrated — an
-            // unfiltered spike here would be baked in permanently.
-            if (!glitchFilter.accept(app.selfContext, position, timestamp)) {
-              dropped++
-              continue
-            }
-            positions.push(position)
-            timestamps.push(timestamp)
-          }
-        }
-        if (dropped > 0) {
-          debug(`Track bootstrap discarded ${dropped} position(s) as glitches`)
-        }
-
-        if (positions.length > 0) {
-          tracks.initialTrack(app.selfContext, positions, timestamps)
-          debug(
-            `Track bootstrap complete: loaded ${positions.length} positions for self ` +
-              `(${timespanMinutes} min window) on attempt ${attempt}`,
-          )
-          return
-        }
-      }
-
-      // An empty response is not proof there is no history. The server's
-      // default history provider falls back to whichever plugin registered
-      // first until the configured one is up, so an early bootstrap can be
-      // answered by the wrong provider — one that legitimately has no
-      // positions. Retrying costs a few seconds and is the difference between
-      // a restored track and an empty one.
-      debug(
-        `History API returned no position data on attempt ${attempt}/${BOOTSTRAP_MAX_ATTEMPTS}; ` +
-          'the configured provider may not have registered yet',
-      )
-      if (attempt === BOOTSTRAP_MAX_ATTEMPTS) {
-        debug('History API returned no position data for bootstrap')
-        return
-      }
-      continue
-    } catch (err) {
-      if (isNoProviderError(err)) {
-        noProviderCount++
-        debug(
-          `Track bootstrap attempt ${attempt}/${BOOTSTRAP_MAX_ATTEMPTS}: no history provider registered yet ` +
-            `(${noProviderCount}/${BOOTSTRAP_MAX_NO_PROVIDER})`,
-        )
-        if (noProviderCount >= BOOTSTRAP_MAX_NO_PROVIDER) {
-          debug(
-            `No history provider registered after ${BOOTSTRAP_MAX_NO_PROVIDER} consecutive checks — ` +
-              'no provider plugin appears to be installed. Giving up.',
-          )
-          return
-        }
-      } else {
-        noProviderCount = 0 // different error — provider exists but not ready
-        debug(`Track bootstrap attempt ${attempt}/${BOOTSTRAP_MAX_ATTEMPTS} failed: ${errorDetail(err)}`)
-      }
-
-      if (attempt === BOOTSTRAP_MAX_ATTEMPTS) {
-        app.error(
-          `Track bootstrap from History API failed after ${BOOTSTRAP_MAX_ATTEMPTS} attempts. ` +
-            'Tracks will start empty and accumulate from live data.',
-        )
-      }
-    }
-  }
 }
 
 export default function ThePlugin(app: App): Plugin {
@@ -743,15 +555,6 @@ export default function ThePlugin(app: App): Plugin {
           },
         }),
       )
-
-      // Bootstrap self track from History API (async, non-blocking).
-      // Only for `history`: a sqlite store already holds what it recorded, and
-      // refilling it from a provider would duplicate those positions.
-      if (source === 'history') {
-        bootstrapSelfTrack(app, tracks, config, glitchFilter).catch((err: unknown) => {
-          app.error(`Unexpected error in track bootstrap: ${errorDetail(err)}`)
-        })
-      }
     },
 
     stop: function () {
