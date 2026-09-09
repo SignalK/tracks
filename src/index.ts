@@ -560,6 +560,12 @@ export default function ThePlugin(app: App): Plugin {
         tracks?.close?.()
       } catch (err) {
         app.error(err)
+      } finally {
+        // Cleared even when close() throws: a closed store is worse than none.
+        // The next start() can fail — an unusable data directory, say — and
+        // without this getTracks() and the registered provider keep handing out
+        // a handle that rejects every query with "database is closed".
+        tracks = undefined
       }
     },
 

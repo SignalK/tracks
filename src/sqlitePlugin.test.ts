@@ -137,11 +137,54 @@ describe('an unusable data directory', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  // The failure above is reachable from a *running* plugin, not only a fresh
+  // one: the server calls stop() then start() on every config save, and a data
+  // directory that has become unusable in between fails the second start. If
+  // stop() left the closed handle in place, the failed start reports itself
+  // correctly and every query still goes to a database that is closed.
+  it('does not serve the closed store when a restart fails', () => {
+    const good = mkdtempSync(join(tmpdir(), 'sk-tracks-restart-'))
+    const bad = mkdtempSync(join(tmpdir(), 'sk-tracks-restart-bad-'))
+    mkdirSync(join(bad, 'tracks.db'))
+    let dataDir = good
+    const { app, errors } = createApp(good)
+    // getDataDirPath is read on each start(), so the second one lands on the
+    // unusable directory while the plugin instance stays the same.
+    app.getDataDirPath = () => dataDir
+    const plugin = ThePlugin(app)
+    try {
+      plugin.start({ resolution: 0 })
+      expect(plugin.getTracks()).toBeDefined()
+
+      plugin.stop()
+      dataDir = bad
+      plugin.start({ resolution: 0 })
+
+      expect(errors.flat().join(' ')).toMatch(/track database/)
+      expect(plugin.getTracks()).toBeUndefined()
+    } finally {
+      plugin.stop()
+      rmSync(good, { recursive: true, force: true })
+      rmSync(bad, { recursive: true, force: true })
+    }
+  })
 })
 
 // The two retentions are configured separately, so neither may switch the other
 // off. Gating the prune call on the AIS setting meant `aisRetentionDays: 0` —
 // "keep every vessel" — silently stopped trimming the own vessel's track too.
+// A track recorder is only useful if it is recording. Installing it and then
+// having to find and enable it loses exactly the passage the user installed it
+// for, so the descriptor says so and this pins it.
+describe('the plugin descriptor', () => {
+  it('is enabled by default on install', () => {
+    const { app } = createApp(dir)
+
+    expect(ThePlugin(app).enabledByDefault).toBe(true)
+  })
+})
+
 describe('retention settings are independent', () => {
   it('still trims the own track when AIS retention is disabled', async () => {
     vi.useFakeTimers()
