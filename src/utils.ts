@@ -1,4 +1,4 @@
-import type { LatLngTuple, GeoBounds, QueryParameters, TimedPosition, TrackParams, Debug } from './types.js'
+import type { LatLngTuple, GeoBounds, Position, QueryParameters, TimedPosition, TrackParams, Debug } from './types.js'
 
 const LAT = 0
 const LNG = 1
@@ -178,4 +178,33 @@ export function createMatcher(
     return (track: LatLngTuple[]) => distanceFromSelf(lastPoint(track)) < radius
   }
   return () => true
+}
+
+/**
+ * A history row is `[timestamp, position]`. Both encodings are legal: the
+ * History API types a value as `unknown` and its own comment names "objects
+ * (like navigation.position)" alongside primitives, so signalk-questdb returns
+ * `{latitude, longitude}` and signalk-to-influxdb2 returns `[lon, lat]`.
+ * Accept both — neither is an error, so rejecting one silently yields an empty
+ * track rather than a failure anybody can see.
+ */
+export const historyRowPosition = (row: unknown): LatLngTuple | undefined => {
+  if (!Array.isArray(row) || row.length < 2) {
+    return undefined
+  }
+  const value: unknown = row[1]
+  // isFinite, not typeof number: NaN and Infinity are numbers, and one of them
+  // in a coordinate reaches the store and stretches every bounding box that
+  // track appears in — silently, since nothing downstream re-checks.
+  if (Array.isArray(value) && value.length === 2 && Number.isFinite(value[0]) && Number.isFinite(value[1])) {
+    const [longitude, latitude] = value as [number, number]
+    return [latitude, longitude]
+  }
+  if (value && typeof value === 'object' && 'latitude' in value && 'longitude' in value) {
+    const { latitude, longitude } = value as Partial<Position>
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+      return [latitude as number, longitude as number]
+    }
+  }
+  return undefined
 }
