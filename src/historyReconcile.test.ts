@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import express from 'express'
 import request from 'supertest'
 import { Temporal } from '@js-temporal/polyfill'
@@ -17,6 +20,7 @@ const MINUTE = 60_000
  * what remains of everything older, and of any period the provider missed.
  */
 const stand = (historyRows: unknown[] | null) => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'sk-tracks-hist-'))
   const debug: Debug = Object.assign(() => undefined, { enabled: false })
   const app = {
     debug,
@@ -24,6 +28,8 @@ const stand = (historyRows: unknown[] | null) => {
     selfContext: SELF,
     getSelfPath: () => undefined,
     streambundle: { getBus: () => ({ onValue: () => () => undefined }) },
+    // SQLite is the only store, so the plugin needs somewhere to write.
+    getDataDirPath: () => dataDir,
     ...(historyRows === null
       ? {}
       : {
@@ -47,7 +53,7 @@ const stand = (historyRows: unknown[] | null) => {
     },
   }
   const plugin = ThePlugin(appWithV2)
-  plugin.start({ resolution: 60000, pointsToKeep: 1000, maxAge: 3600, source: 'memory' })
+  plugin.start({ resolution: 60000 })
   const server = express()
   server.use(API, plugin.signalKApiRoutes(express.Router()))
   return {
@@ -56,7 +62,10 @@ const stand = (historyRows: unknown[] | null) => {
     // The v2 provider, so a test can ask the same question through both routes
     // and check the plugin gives one answer rather than two.
     provider: () => trackProvider,
-    stop: () => plugin.stop(),
+    stop: () => {
+      plugin.stop()
+      rmSync(dataDir, { recursive: true, force: true })
+    },
   }
 }
 
@@ -139,6 +148,7 @@ describe('history and store together', () => {
 
   it('falls back to the store when the provider fails', async () => {
     // Best-effort: a broken provider must not fail a query the store can answer.
+    const dataDir = mkdtempSync(join(tmpdir(), 'sk-tracks-hist-'))
     const debug: Debug = Object.assign(() => undefined, { enabled: false })
     const app = {
       debug,
@@ -146,10 +156,12 @@ describe('history and store together', () => {
       selfContext: SELF,
       getSelfPath: () => undefined,
       streambundle: { getBus: () => ({ onValue: () => () => undefined }) },
+      // SQLite is the only store, so the plugin needs somewhere to write.
+      getDataDirPath: () => dataDir,
       getHistoryApi: () => Promise.reject(new Error('provider down')),
     }
     const plugin = ThePlugin(app)
-    plugin.start({ resolution: 60000, pointsToKeep: 1000, maxAge: 3600, source: 'memory' })
+    plugin.start({ resolution: 60000 })
     stop = () => plugin.stop()
     const server = express()
     server.use(API, plugin.signalKApiRoutes(express.Router()))
@@ -163,6 +175,7 @@ describe('history and store together', () => {
     // The provider is an enrichment, not a dependency. Without a bound on the
     // await, a wedged provider would hold the request open and the store
     // fallback would never be reached.
+    const dataDir = mkdtempSync(join(tmpdir(), 'sk-tracks-hist-'))
     const debug: Debug = Object.assign(() => undefined, { enabled: false })
     const app = {
       debug,
@@ -170,11 +183,13 @@ describe('history and store together', () => {
       selfContext: SELF,
       getSelfPath: () => undefined,
       streambundle: { getBus: () => ({ onValue: () => () => undefined }) },
+      // SQLite is the only store, so the plugin needs somewhere to write.
+      getDataDirPath: () => dataDir,
       // Never settles, which is the point of this test.
       getHistoryApi: () => new Promise<never>(() => undefined),
     }
     const plugin = ThePlugin(app)
-    plugin.start({ resolution: 60000, pointsToKeep: 1000, maxAge: 3600, source: 'memory' })
+    plugin.start({ resolution: 60000 })
     stop = () => plugin.stop()
     const server = express()
     server.use(API, plugin.signalKApiRoutes(express.Router()))

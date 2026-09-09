@@ -381,27 +381,29 @@ describe('getTracks', () => {
   it('applies maxPoints and reports the resolution used', async () => {
     const h = createHarness()
     try {
+      // 300 rather than a longer track: every point is a real insert now that
+      // the store is sqlite, and this is enough to make the budget bind. The
+      // exact spacing arithmetic is pinned in timeWindow.test.ts, which is pure.
       const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
       const positions: [number, number][] = []
       const timestamps: number[] = []
-      for (let i = 0; i < 1200; i++) {
+      for (let i = 0; i < 300; i++) {
         positions.push([60 + i * 0.0001, 24 + i * 0.0001])
         timestamps.push(t0 + i * 1000)
       }
       h.seedTrack(SELF_CONTEXT, positions, timestamps)
 
       const full = await providerOf(h).getTracks({})
-      expect(full.features[0]!.properties.pointCount).toBe(1200)
+      expect(full.features[0]!.properties.pointCount).toBe(300)
       expect(full.features[0]!.properties.resolution).toBeUndefined()
 
       const budgeted = await providerOf(h).getTracks({ maxPoints: 50 })
       const props = budgeted.features[0]!.properties
       expect(props.pointCount).toBeLessThanOrEqual(50)
       expect(props.pointCount).toBeGreaterThan(40)
-      // The exact spacing applied, not a tidier rounding of it: re-querying
-      // with a rounded PT24S returns 51 points against a budget of 50, so the
-      // reported value has to reproduce the result it describes.
-      expect(props.resolution).toBe('PT24.47S')
+      // Reported, and exact rather than rounded — a client re-querying with a
+      // tidier value would get a different count than the budget it asked for.
+      expect(props.resolution).toBe('PT6.103S')
     } finally {
       h.stop()
     }

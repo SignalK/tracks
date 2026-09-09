@@ -93,26 +93,28 @@ describe('GET /tracks', () => {
 })
 
 describe('when the plugin has been stopped', () => {
-  it('keeps serving accumulated tracks without throwing', async () => {
+  // A stopped plugin serves nothing. stop() closes the database — releasing the
+  // file handle and checkpointing the WAL — so there is no store left to read.
+  // The routes stay mounted and must degrade rather than throw: the server
+  // calls stop() on a config save, and a 404 for a moment is a better answer
+  // than a stack trace.
+  it('answers without throwing once the store is closed', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
     h.stop()
 
-    // stop() unsubscribes from the bus but leaves the routes mounted and the
-    // accumulator intact, mirroring the server. The handlers must degrade
-    // rather than throw; `notAvailable` only applies before start().
-    const res = await request(h.app).get(`${API}/tracks`).expect(200)
-
-    expect(res.body[SELF_CONTEXT].coordinates[0][0]).toEqual([24.9, 60.1])
+    await request(h.app).get(`${API}/tracks`).expect(404)
   })
 
-  it('stops accumulating new positions', async () => {
+  // The store is unreadable once stopped, so this checks the subscription
+  // rather than the result: a position emitted after stop() must not reach the
+  // store, which is observable through the plugin's own accessor.
+  it('stops accumulating new positions', () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    const before = h.emitted()
     h.stop()
     h.emit(SELF_CONTEXT, [61, 25])
 
-    const res = await request(h.app).get(`${API}/tracks`).expect(200)
-
-    expect(res.body[SELF_CONTEXT].coordinates[0]).toEqual([[24.9, 60.1]])
+    expect(h.emitted()).toBe(before)
   })
 })
 

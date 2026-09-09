@@ -93,9 +93,9 @@ export interface E2EOptions {
    * Other plugins to install and enable alongside this one, as
    * `{ 'npm-package-name': pluginConfiguration }`.
    *
-   * Used to stand up a real history provider so the bootstrap can be exercised
-   * through `getHistoryApi()` — the interface this plugin actually depends on —
-   * rather than against a provider's private storage.
+   * Used to stand up a real history provider so the reconciliation can be
+   * exercised through `getHistoryApi()` — the interface this plugin actually
+   * depends on — rather than against a provider's private storage.
    */
   plugins?: Record<string, Record<string, unknown>>
   /** Port to boot on, when a test needs its own server. */
@@ -115,9 +115,6 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
         enabled: true,
         configuration: {
           resolution: 0,
-          pointsToKeep: 1000,
-          maxAge: 3600,
-          source: 'memory',
           ...options.config,
         },
       },

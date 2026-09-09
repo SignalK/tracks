@@ -10,11 +10,21 @@ const OTHER = 'vessels.urn:mrn:imo:mmsi:987654321' as Context
 const gate = (states: readonly string[] = ['moored']) => new StateGate(SELF, states)
 
 describe('StateGate', () => {
-  it('is off by default, so nothing changes for an install that has not opted in', () => {
-    expect(DEFAULT_PAUSE_STATES).toEqual([])
+  // A vessel that is not going anywhere produces a smear of GPS noise rather
+  // than a track, so the default pauses on the states that mean "parked".
+  it('pauses by default on the states that mean parked', () => {
+    expect(DEFAULT_PAUSE_STATES).toEqual(['moored', 'not-under-way', 'aground'])
     const g = new StateGate(SELF, DEFAULT_PAUSE_STATES)
-    expect(g.enabled).toBe(false)
-    expect(g.accept(SELF, 'moored')).toBe(true)
+    expect(g.enabled).toBe(true)
+    expect(g.accept(SELF, 'moored')).toBe(false)
+    expect(g.accept(SELF, 'under way sailing')).toBe(true)
+  })
+
+  // Deliberately not in the default set: an anchor alarm watches exactly the
+  // track a vessel makes while swinging on its rode.
+  it('does not pause while anchored', () => {
+    const g = new StateGate(SELF, DEFAULT_PAUSE_STATES)
+    expect(g.accept(SELF, 'anchored')).toBe(true)
   })
 
   it('pauses on a configured state', () => {
@@ -214,11 +224,31 @@ describe('state gating through the plugin', () => {
     }
   })
 
-  it('records everything when no states are configured', async () => {
+  // The default an install gets without touching the config. A boat wintering
+  // on a mooring records nothing rather than a season of GPS noise.
+  it('pauses on the default states without any configuration', async () => {
     const h = createHarness({
       selfPosition: [60, 24],
       selfState: 'sailing',
       config: { resolution: 0 },
+    })
+    try {
+      const coordinates = await feedAcrossStateChange(h, 'moored')
+
+      expect(coordinates).toContainEqual([24.9, 60.1])
+      expect(coordinates).not.toContainEqual([24.9, 60.11])
+    } finally {
+      h.stop()
+    }
+  })
+
+  // An explicitly empty list opts out of the default, which now pauses on the
+  // states that mean parked.
+  it('records everything when the pause list is explicitly empty', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      selfState: 'sailing',
+      config: { resolution: 0, pauseWhenState: [] },
     })
     try {
       const coordinates = await feedAcrossStateChange(h, 'moored')

@@ -108,6 +108,44 @@ describe.each(implementations)('TrackStore contract: %s', (_name, newStore) => {
     expect(remaining.map(({ context }) => context)).toEqual([ctx])
   })
 
+  // The v2 Track API asks a different question from the v1 routes: "which
+  // tracks passed through this box", not "which vessels are near me now". Both
+  // stores have to answer it the same way, or the same query returns different
+  // vessels depending on which one is installed.
+  it('selects a track that crossed the bbox and left, when asked to intersect', async () => {
+    const store = newStore()
+    store.initialTrack(
+      ctx,
+      [
+        [60, 25],
+        [10, 10],
+      ],
+      [1000, 2000],
+    )
+
+    const filtered = await store.getFilteredTracks({
+      bbox: { sw: [59, 24], ne: [61, 26] },
+      radius: null,
+      intersects: true,
+    })
+
+    expect(filtered[ctx]).toBeDefined()
+  })
+
+  // The own vessel's track has to survive a winter on a mooring, a passage with
+  // the server off, and any gap in reception. Other vessels age out; this one
+  // never does, however long it has been idle.
+  it('never prunes the context it is told to keep', async () => {
+    const store = newStore()
+    store.newPosition(ctx, [60, 25], Date.now() - 10_000)
+    store.newPosition('vessels.stale' as Context, [1, 1], Date.now() - 10_000)
+
+    store.prune(5_000, ctx)
+
+    const remaining = await store.getAllTracks()
+    expect(remaining.map(({ context }) => context)).toEqual([ctx])
+  })
+
   it('returns timed tracks carrying each point timestamp', async () => {
     const store = newStore()
     // initialTrack, not newPosition: the in-memory accumulator throttles on the

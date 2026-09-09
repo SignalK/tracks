@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { s2 } from 's2js'
 import { SqliteTrackStore } from './sqliteStore.js'
@@ -215,5 +218,73 @@ describe('retention', () => {
     store.prune(60_000)
     await expect(store.get(ctx)).resolves.toEqual([[61, 26]])
     store.close()
+  })
+})
+
+// `retentionDays` is configured as "days of the own vessel's track to keep", so
+// it must not reach into another vessel's rows — and the AIS sweep must not be
+// what decides whether it runs at all.
+describe('retention scope', () => {
+  it('trims only the kept context, not every vessel', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-ret-'))
+    const store = new SqliteTrackStore({ file: join(dir, 'tracks.db'), resolution: 0, retention: 10_000 }, debug)
+    try {
+      const self = 'vessels.self' as Context
+      const ais = 'vessels.ais' as Context
+      const old = Date.now() - 60_000
+      store.newPosition(self, [60, 24], old)
+      store.newPosition(self, [60.1, 24.1], Date.now())
+      store.newPosition(ais, [61, 25], old)
+      store.newPosition(ais, [61.1, 25.1], Date.now())
+
+      // Infinity: nothing is idle enough to drop, so only the retention runs.
+      store.prune(Infinity, self)
+
+      await expect(store.getTimed(self)).resolves.toHaveLength(1)
+      await expect(store.getTimed(ais)).resolves.toHaveLength(2)
+    } finally {
+      store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps every context when asked to age nothing out', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-inf-'))
+    const store = new SqliteTrackStore({ file: join(dir, 'tracks.db'), resolution: 0, retention: 0 }, debug)
+    try {
+      const ais = 'vessels.ais' as Context
+      store.newPosition(ais, [61, 25], Date.now() - 999_999_999)
+
+      store.prune(Infinity, 'vessels.self' as Context)
+
+      await expect(store.getTimed(ais)).resolves.toHaveLength(1)
+    } finally {
+      store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// The write-throttle map is keyed by context and nothing else clears it, so a
+// pruned vessel would leave an entry behind for the life of the process.
+describe('prune and the write throttle', () => {
+  it('forgets a pruned context, so a later fix is stored', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-prune-'))
+    const store = new SqliteTrackStore({ file: join(dir, 'tracks.db'), resolution: 60_000 }, debug)
+    try {
+      const ctx = 'vessels.gone' as Context
+      store.newPosition(ctx, [60, 24], 1000)
+      store.prune(1, 'vessels.self' as Context)
+
+      // Same context, a timestamp inside the throttle window of the pruned one.
+      // If prune left the map entry behind, this write is throttled away and
+      // the vessel silently never reappears.
+      store.newPosition(ctx, [61, 25], 2000)
+
+      await expect(store.getTimed(ctx)).resolves.toHaveLength(1)
+    } finally {
+      store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

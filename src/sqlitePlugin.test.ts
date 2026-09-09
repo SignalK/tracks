@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ThePlugin from './index.js'
 import type { ContextPosition } from './index.js'
 import type { Debug, LatLngTuple, Position } from './types.js'
@@ -65,7 +65,7 @@ describe('source: sqlite', () => {
   it('writes a database file in the plugin data directory', () => {
     const { app } = createApp(dir)
     const plugin = ThePlugin(app)
-    plugin.start({ source: 'sqlite', resolution: 0 })
+    plugin.start({ resolution: 0 })
     plugin.stop()
 
     expect(existsSync(join(dir, 'tracks.db'))).toBe(true)
@@ -74,29 +74,30 @@ describe('source: sqlite', () => {
   it('keeps positions across a stop and start', async () => {
     const first = createApp(dir)
     const pluginA = ThePlugin(first.app)
-    pluginA.start({ source: 'sqlite', resolution: 0 })
+    pluginA.start({ resolution: 0 })
     first.emit(SELF_CONTEXT, [60.1, 24.9], 1000)
     pluginA.stop()
 
     // A fresh plugin instance against the same directory, as a server restart
-    // would produce. This is the whole point of the sqlite source: without it
-    // the track starts empty.
+    // would produce. This is the whole point of recording to disk:
+    // without it the track starts empty.
     const second = createApp(dir)
     const pluginB = ThePlugin(second.app)
-    pluginB.start({ source: 'sqlite', resolution: 0 })
+    pluginB.start({ resolution: 0 })
     await expect(pluginB.getTracks()?.get(SELF_CONTEXT as ContextPosition['context'])).resolves.toEqual([[60.1, 24.9]])
     pluginB.stop()
   })
 
-  it('falls back to memory and reports it when the server has no data directory', async () => {
+  // There is no in-memory fallback any more: a track recorder that forgets
+  // everything on restart is not worth starting, so it says why and stops.
+  // Every server that can load this plugin provides a data directory.
+  it('reports and does not start when the server has no data directory', () => {
     const { app, emit, errors } = createApp(undefined)
     const plugin = ThePlugin(app)
-    plugin.start({ source: 'sqlite', resolution: 0 })
+    plugin.start({ resolution: 0 })
     emit(SELF_CONTEXT, [60.1, 24.9], 1000)
 
-    // Still functional, just not persistent — and it says so rather than
-    // failing to start.
-    await expect(plugin.getTracks()?.get(SELF_CONTEXT as ContextPosition['context'])).resolves.toEqual([[60.1, 24.9]])
+    expect(plugin.getTracks()).toBeUndefined()
     expect(errors.flat().join(' ')).toMatch(/data directory/)
     plugin.stop()
   })
@@ -104,14 +105,63 @@ describe('source: sqlite', () => {
   it('does not reuse a closed store after a restart', async () => {
     const { app, emit } = createApp(dir)
     const plugin = ThePlugin(app)
-    plugin.start({ source: 'sqlite', resolution: 0 })
+    plugin.start({ resolution: 0 })
     plugin.stop()
 
     // stop() closes the handle. Starting again must build a new store rather
     // than keep the closed one, which would throw on the next write.
-    plugin.start({ source: 'sqlite', resolution: 0 })
+    plugin.start({ resolution: 0 })
     emit(SELF_CONTEXT, [61, 25], 2000)
     await expect(plugin.getTracks()?.get(SELF_CONTEXT as ContextPosition['context'])).resolves.toEqual([[61, 25]])
     plugin.stop()
+  })
+})
+
+// Opening a database touches the filesystem, so a read-only or full data
+// directory throws — and an uncaught throw out of start() takes down more than
+// this plugin.
+describe('an unusable data directory', () => {
+  it('reports the failure and does not start', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-ro-'))
+    // A directory where the database file should be: sqlite cannot open it.
+    mkdirSync(join(dir, 'tracks.db'))
+    const { app, errors } = createApp(dir)
+    const plugin = ThePlugin(app)
+    try {
+      plugin.start({ resolution: 0 })
+
+      expect(plugin.getTracks()).toBeUndefined()
+      expect(errors.flat().join(' ')).toMatch(/track database/)
+    } finally {
+      plugin.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// The two retentions are configured separately, so neither may switch the other
+// off. Gating the prune call on the AIS setting meant `aisRetentionDays: 0` —
+// "keep every vessel" — silently stopped trimming the own vessel's track too.
+describe('retention settings are independent', () => {
+  it('still trims the own track when AIS retention is disabled', async () => {
+    vi.useFakeTimers()
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-both-'))
+    const { app, emit } = createApp(dir)
+    const plugin = ThePlugin(app)
+    try {
+      plugin.start({ resolution: 0, retentionDays: 1, aisRetentionDays: 0 })
+      const self = SELF_CONTEXT as ContextPosition['context']
+      emit(self, [60, 24], Date.now() - 3 * 24 * 60 * 60 * 1000)
+      emit(self, [60.1, 24.1], Date.now())
+
+      // One hour on: the prune timer fires.
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+
+      await expect(plugin.getTracks()?.get(self)).resolves.toHaveLength(1)
+    } finally {
+      plugin.stop()
+      vi.useRealTimers()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

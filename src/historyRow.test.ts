@@ -5,8 +5,7 @@ import { historyRowPosition } from './utils.js'
 // names objects like navigation.position explicitly — so signalk-questdb's
 // `{latitude, longitude}` and signalk-to-influxdb2's `[lon, lat]` both have to
 // work. Rejecting one returns an empty track rather than an error, so it fails
-// silently. The startup-bootstrap suite covered this; the bootstrap is gone but
-// the parsing is still on the live reconciliation path.
+// silently.
 describe('historyRowPosition', () => {
   it('accepts {latitude, longitude}, as signalk-questdb returns', () => {
     expect(historyRowPosition(['2026-01-01T00:00:00Z', { latitude: 60.1, longitude: 24.9 }])).toEqual([60.1, 24.9])

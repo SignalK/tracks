@@ -32,9 +32,12 @@ export interface TracksConfig {
 }
 
 /**
- * The in-memory store: a bounded sliding window of positions per context,
- * held in RxJS accumulators and lost on restart. `bootstrapSelfTrack()` in
- * index.ts is what re-hydrates it from a History provider at startup.
+ * The in-memory store: a bounded sliding window of positions per context, held
+ * in RxJS accumulators and lost on restart.
+ *
+ * No longer used by the plugin, which always records to SQLite. It remains as
+ * the client-side `TrackAccumulator` this package exports, where a browser
+ * holding one vessel's recent track in memory is exactly the right shape.
  */
 export class Tracks implements TrackStore {
   tracks: TracksMap = {}
@@ -154,11 +157,11 @@ export class Tracks implements TrackStore {
     }, {})
   }
 
-  prune(maxAge: number): void {
+  prune(maxAge: number, keep?: Context): void {
     const cutoff = Date.now() - maxAge
     const deleted: string[] = []
     Object.entries(this.tracks).forEach(([key, value]) => {
-      if (value.latestLatLngTuple < cutoff) {
+      if (key !== keep && value.latestLatLngTuple < cutoff) {
         delete this.tracks[key]
         deleted.push(key)
       }
@@ -198,8 +201,8 @@ export class TrackAccumulator {
         }, []),
         // combineLatest below only emits once every source has, and `scan` stays
         // silent until the first live position. Without this an accumulator that
-        // has only been given an initial track — the state after a History API
-        // bootstrap, before any live delta — never yields a readable track.
+        // has only been given an initial track, before any live delta, never
+        // yields a readable track.
         startWith<TimedPosition[]>([]),
       ),
       { connector: () => new ReplaySubject<TimedPosition[]>(1), resetOnDisconnect: false },

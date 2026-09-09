@@ -27,5 +27,11 @@ export default defineConfig({
     // e2e runs against a real Signal K server and a real QuestDB, neither of
     // which exists in CI. `npm run test:e2e` opts in.
     exclude: ['**/node_modules/**', '**/dist/**', 'src/**/*.e2e.test.ts'],
+    // Above vitest's 5s default because every harness now creates a real sqlite
+    // file rather than an in-memory accumulator, and CI's Windows runners are
+    // slow enough at filesystem work to cross that line. The tests themselves
+    // finish in milliseconds locally; this is headroom for the platform, not
+    // permission for a slow test.
+    testTimeout: 20_000,
   },
 })
