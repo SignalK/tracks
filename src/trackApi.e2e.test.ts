@@ -169,13 +169,22 @@ describe('a v2 query through the real HTTP route', () => {
     expect(feature.properties.resolution).toBeDefined()
   })
 
-  // The server accepts a sub-millisecond resolution, so the provider has to be
-  // able to report one back. This was a 500 for a query the parser had passed.
-  it('answers a sub-millisecond resolution', async () => {
-    const { status, body } = await server.apiV2(`/tracks?contexts=${CTX}&resolution=PT0.0005S`)
+  // A spacing finer than a timestamp cannot thin anything, so the server
+  // rejects it rather than handing a provider a value no store can act on.
+  it('rejects a sub-millisecond resolution', async () => {
+    const { status } = await server.apiV2(`/tracks?contexts=${CTX}&resolution=PT0.0005S`)
+
+    expect(status).toBe(400)
+  })
+
+  // A fractional millisecond still reaches the provider from anything at or
+  // above the floor, and `Duration.from` rejects a fractional value in any
+  // unit, so reporting the applied spacing back has to survive it.
+  it('answers a fractional-second resolution', async () => {
+    const { status, body } = await server.apiV2(`/tracks?contexts=${CTX}&resolution=PT0.5S`)
 
     expect(status).toBe(200)
-    expect((body as Collection).features[0]!.properties.resolution).toBe('PT0.0005S')
+    expect((body as Collection).features[0]!.properties.resolution).toBe('PT0.5S')
   })
 
   it('rejects a malformed query before reaching the provider', async () => {
