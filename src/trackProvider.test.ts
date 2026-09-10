@@ -930,7 +930,7 @@ describe('simplify in v2', () => {
     // point and preserves them, while the reverse order would not.
     const leg: [number, number][] = Array.from(
       { length: 100 },
-      (_, i) => [60 + (i % 10 === 5 ? 0.002 : 0), 24 + i * 0.002] as [number, number],
+      (_, i) => [60 + (i % 10 === 4 ? 0.02 : 0), 24 + i * 0.002] as [number, number],
     )
     const t0 = Date.now() - 100 * 5000
     h.seedTrack(
@@ -958,6 +958,9 @@ describe('simplify in v2', () => {
       expect(thinnedCoords.has(c)).toBe(true)
     }
     expect(both.features[0]!.properties.resolution).toBe(thinnedOnly.features[0]!.properties.resolution)
+    // A corner sits on a kept sample, so it survives both steps -- without
+    // this the subset assertions above would hold for an empty-ish result.
+    expect(bothCoords).toContain('24.008,60.02')
   })
 
   it('keeps the endpoints, so from and to still bound the track', async () => {

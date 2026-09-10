@@ -83,6 +83,18 @@ describe('simplify', () => {
     expect(simplify(leg, 10)).toHaveLength(3)
   })
 
+  // Longitudes are scaled at the segment's midpoint latitude. Scaling at its
+  // start instead shrinks an 80N-to-equator segment by cos(80), reporting a
+  // point 111 km off the line as 19 km and dropping it well inside tolerance.
+  it('measures correctly across a large latitude span', () => {
+    // The segment is the lng=0 meridian; the middle point is ~111 km east of
+    // it at the equator.
+    const spanning = [at(80, 0), at(0, 1), at(0, 0)]
+
+    expect(simplify(spanning, 20_000)).toHaveLength(3)
+    expect(simplify(spanning, 200_000)).toHaveLength(2)
+  })
+
   // The antimeridian is written 179.9 then -179.9: a tenth of a degree apart
   // on the ground, 359.8 apart numerically. Read literally, a straight line
   // across it spans most of the globe and every point on it measures

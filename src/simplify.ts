@@ -65,9 +65,12 @@ export function simplify(points: TimedPosition[], epsilon: number): TimedPositio
  * point per recursion level.
  */
 function perpendicularDistance(p: TimedPosition, a: TimedPosition, b: TimedPosition): number {
-  // Scale longitudes at the segment's own latitude, so a track near the poles
-  // is not simplified as though a degree of longitude were 111 km wide.
-  const cos = Math.cos((a.position[LAT] * Math.PI) / 180)
+  // Scale longitudes at the latitude midway along the segment, so a track near
+  // the poles is not simplified as though a degree of longitude were 111 km
+  // wide. Taking the *midpoint* rather than the start matters once a segment
+  // spans latitudes: scaling an 80N-to-equator segment at 80N shrinks every
+  // longitude by cos(80) and reports a point 111 km off the line as 19 km.
+  const cos = Math.cos((((a.position[LAT] + b.position[LAT]) / 2) * Math.PI) / 180)
   const originLng = a.position[LNG]
   const ax = originLng * cos
   const ay = a.position[LAT]
