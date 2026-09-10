@@ -785,9 +785,9 @@ describe('contextName in v2 properties', () => {
   })
 })
 
-// The v2 contract declares `simplify` and `epsilon`; until now the provider
-// accepted and ignored them, which returns a superset of what was asked for
-// rather than a wrong answer, but is not what the client wanted.
+// `simplify` and `epsilon` from the v2 contract: `epsilon` is a tolerance in
+// metres and implies `simplify`, the response reports the tolerance actually
+// applied, and `simplify` alone leaves the choice to the provider.
 describe('simplify in v2', () => {
   // A zigzag: thinning by time keeps every other point, simplification by
   // shape keeps the corners. The two are not interchangeable.
@@ -918,6 +918,46 @@ describe('simplify in v2', () => {
 
     expect(res.features[0]!.geometry!.coordinates.map((seg) => seg.length)).toEqual([2, 2])
     expect(res.features[0]!.properties.pointCount).toBe(4)
+  })
+
+  // Order matters and is not commutative. Thinning first spends the shape
+  // budget only on points that survive; simplifying first would hand the
+  // thinner a track whose corners are already the only points left, and time
+  // decimation would then drop some of those corners.
+  it('thins before simplifying when a request asks for both', async () => {
+    const h = createHarness()
+    // Corners every 10th point, so time-thinning at 5 s keeps every other
+    // point and preserves them, while the reverse order would not.
+    const leg: [number, number][] = Array.from(
+      { length: 100 },
+      (_, i) => [60 + (i % 10 === 5 ? 0.002 : 0), 24 + i * 0.002] as [number, number],
+    )
+    const t0 = Date.now() - 100 * 5000
+    h.seedTrack(
+      SELF_CONTEXT,
+      leg,
+      leg.map((_, i) => t0 + i * 5000),
+    )
+
+    const both = await providerOf(h).getTracks({
+      contexts: [SELF_CONTEXT],
+      resolution: Temporal.Duration.from({ seconds: 10 }),
+      epsilon: 50,
+    })
+    const thinnedOnly = await providerOf(h).getTracks({
+      contexts: [SELF_CONTEXT],
+      resolution: Temporal.Duration.from({ seconds: 10 }),
+    })
+
+    // Simplification ran on the thinned track, so the result is a subset of
+    // it -- never larger, and never containing a point thinning removed.
+    const thinnedCoords = new Set(thinnedOnly.features[0]!.geometry!.coordinates.flat().map((c) => c.join(',')))
+    const bothCoords = both.features[0]!.geometry!.coordinates.flat().map((c) => c.join(','))
+    expect(bothCoords.length).toBeLessThanOrEqual(thinnedCoords.size)
+    for (const c of bothCoords) {
+      expect(thinnedCoords.has(c)).toBe(true)
+    }
+    expect(both.features[0]!.properties.resolution).toBe(thinnedOnly.features[0]!.properties.resolution)
   })
 
   it('keeps the endpoints, so from and to still bound the track', async () => {
