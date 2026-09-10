@@ -208,3 +208,47 @@ export const historyRowPosition = (row: unknown): LatLngTuple | undefined => {
   }
   return undefined
 }
+
+/**
+ * A human name for a context, as a chart plotter would label the track.
+ *
+ * TimeZero's GPX exports name tracks `Own Ship` and `AIS <shipname>` — never a
+ * serial number — and that is what makes a list of tracks readable. A UI
+ * listing `vessels.urn:mrn:imo:mmsi:211234567` is unusable, so this is the
+ * piece everything else in the management UI is built on.
+ *
+ * `lookup` reads the data model (`app.getPath`). Note the shape: a vessel's
+ * `name` is a bare string in the full model, not the `{value}` wrapper that
+ * `navigation.position` and friends carry, so both are accepted rather than
+ * guessed at.
+ *
+ * Falls back to the MMSI, and then to the raw context, because a name that is
+ * merely unknown must still be distinguishable from another unknown vessel.
+ */
+export function trackName(context: string, selfContext: string | undefined, lookup: (path: string) => unknown): string {
+  if (context === selfContext) {
+    return 'Own Ship'
+  }
+  const name = unwrapString(lookup(`${context}.name`))
+  if (name !== undefined) {
+    return `AIS ${name}`
+  }
+  const mmsi = unwrapString(lookup(`${context}.mmsi`)) ?? mmsiFromContext(context)
+  return mmsi === undefined ? context : `AIS ${mmsi}`
+}
+
+/** Accepts both a bare string and the `{value}` wrapper deltas arrive in. */
+function unwrapString(raw: unknown): string | undefined {
+  const value: unknown = raw && typeof raw === 'object' && 'value' in raw ? raw.value : raw
+  if (typeof value !== 'string') {
+    return undefined
+  }
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
+}
+
+/** `vessels.urn:mrn:imo:mmsi:211234567` -> `211234567`. */
+function mmsiFromContext(context: string): string | undefined {
+  const match = /urn:mrn:imo:mmsi:(\d+)$/.exec(context)
+  return match?.[1]
+}

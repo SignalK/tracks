@@ -322,3 +322,51 @@ describe('GET /tracks?times', () => {
     expect(res.body[SELF_CONTEXT].times).toEqual([['2026-08-14T09:01:00.000Z']])
   })
 })
+
+// A list of tracks is only usable if each one is labelled the way a plotter
+// labels it. TimeZero's exports name tracks `Own Ship` and `AIS <shipname>`,
+// never a serial number, and the management UI is built on this.
+describe('track names', () => {
+  it('names the own vessel Own Ship', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    const res = await request(h.app).get(`${API}/vessels/self/track`).expect(200)
+
+    expect(res.body.name).toBe('Own Ship')
+  })
+
+  it('names another vessel from its AIS name', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      paths: { [`${OTHER_CONTEXT}.name`]: 'MIA' },
+    })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/tracks`).expect(200)
+
+    expect(res.body[OTHER_CONTEXT].name).toBe('AIS MIA')
+  })
+
+  // Older servers have no getPath at all, and a vessel can be tracked before
+  // its static report arrives. Neither may leave the track unlabelled.
+  it('falls back to the mmsi when the server cannot resolve a name', async () => {
+    const h = createHarness({ selfPosition: [60, 24] })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/tracks`).expect(200)
+
+    expect(res.body[OTHER_CONTEXT].name).toBe('AIS 987654321')
+  })
+
+  it('names tracks in the timed response too', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      paths: { [`${OTHER_CONTEXT}.name`]: 'MIA' },
+    })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/tracks?times`).expect(200)
+
+    expect(res.body[OTHER_CONTEXT].name).toBe('AIS MIA')
+  })
+})
