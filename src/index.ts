@@ -37,7 +37,7 @@ import type {
   TimedTrackCollection,
   TrackCollection,
 } from './types.js'
-import { historyRowPosition, resolveContext, toIsoTimes, validateParameters, trackName } from './utils.js'
+import { historyRowPosition, resolveContext, toIsoTimes, validateParameters, trackLabel, contextName } from './utils.js'
 
 export interface ContextPosition {
   context: Context
@@ -532,6 +532,7 @@ export default function ThePlugin(app: App): Plugin {
           store: () => tracks,
           selfContext: () => app.selfContext,
           segmentGap: () => segmentGap,
+          contextName: (context: string) => contextName(context, (path: string) => app.getPath?.(path)),
           // The same reconciliation the v1 routes have done since #73. Without
           // it the plugin answers differently depending on which route a client
           // uses: the store alone through v2, the store enriched by a history
@@ -589,7 +590,7 @@ export default function ThePlugin(app: App): Plugin {
       // Resolved per request rather than cached: an AIS target's static report
       // can arrive long after its first position, so a track named from the
       // MMSI early on picks up the real name as soon as the server has it.
-      const nameOf = (context: string) => trackName(context, app.selfContext, (path) => app.getPath?.(path))
+      const nameOf = (context: string) => trackLabel(context, app.selfContext, (path: string) => app.getPath?.(path))
 
       const singleTrackHandler =
         (contextOf: (req: Request) => string): RequestHandler =>

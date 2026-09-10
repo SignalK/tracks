@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createInBounds, resolveContext, toIsoTimes, validateParameters, trackName } from './utils.js'
+import { createInBounds, resolveContext, toIsoTimes, validateParameters, trackLabel, contextName } from './utils.js'
 
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
 
@@ -115,48 +115,84 @@ describe('toIsoTimes', () => {
   })
 })
 
-describe('trackName', () => {
+// The v2 Track API's contextName: "Name of the vessel, aircraft or other
+// context, where known. Not a name for the track itself." Bare, so a client
+// can decorate it however it likes -- which is why it is separate from
+// trackLabel below.
+describe('contextName', () => {
+  const OTHER = 'vessels.urn:mrn:imo:mmsi:244813000'
+  const none = () => undefined
+
+  it('is the bare vessel name, undecorated', () => {
+    expect(contextName(OTHER, (p: string) => (p === `${OTHER}.name` ? 'Ariadne' : undefined))).toBe('Ariadne')
+  })
+
+  it('does not special-case the own vessel', () => {
+    expect(contextName(OTHER, (p: string) => (p === `${OTHER}.name` ? 'Ariadne' : undefined))).toBe('Ariadne')
+  })
+
+  it('accepts the {value} wrapper as well as a bare string', () => {
+    expect(contextName(OTHER, (p: string) => (p === `${OTHER}.name` ? { value: 'Ariadne' } : undefined))).toBe(
+      'Ariadne',
+    )
+  })
+
+  it('falls back to the mmsi so two unnamed vessels stay distinct', () => {
+    expect(contextName(OTHER, none)).toBe('244813000')
+  })
+
+  // "where known" means absent, not a context string nobody can read.
+  it('is undefined when nothing is known', () => {
+    expect(contextName('vessels.urn:mrn:signalk:uuid:abc', none)).toBeUndefined()
+  })
+})
+
+describe('trackLabel', () => {
   const SELF = 'vessels.urn:mrn:imo:mmsi:211111111'
   const OTHER = 'vessels.urn:mrn:imo:mmsi:244813000'
   const none = () => undefined
 
   it('names the own vessel Own Ship', () => {
-    expect(trackName(SELF, SELF, none)).toBe('Own Ship')
+    expect(trackLabel(SELF, SELF, none)).toBe('Own Ship')
   })
 
   it('prefixes another vessel with AIS, as a plotter does', () => {
-    expect(trackName(OTHER, SELF, (p) => (p === `${OTHER}.name` ? 'MIA' : undefined))).toBe('AIS MIA')
+    expect(trackLabel(OTHER, SELF, (p: string) => (p === `${OTHER}.name` ? 'MIA' : undefined))).toBe('AIS MIA')
   })
 
   // The full data model holds `name` as a bare string, while deltas carry the
   // {value} wrapper. Reading only one shape yields the MMSI fallback for a
   // vessel whose name is perfectly well known.
   it('accepts the {value} wrapper as well as a bare string', () => {
-    expect(trackName(OTHER, SELF, (p) => (p === `${OTHER}.name` ? { value: 'MIA' } : undefined))).toBe('AIS MIA')
+    expect(trackLabel(OTHER, SELF, (p: string) => (p === `${OTHER}.name` ? { value: 'MIA' } : undefined))).toBe(
+      'AIS MIA',
+    )
   })
 
   it('falls back to the mmsi from the data model', () => {
-    expect(trackName(OTHER, SELF, (p) => (p === `${OTHER}.mmsi` ? '244813000' : undefined))).toBe('AIS 244813000')
+    expect(trackLabel(OTHER, SELF, (p: string) => (p === `${OTHER}.mmsi` ? '244813000' : undefined))).toBe(
+      'AIS 244813000',
+    )
   })
 
   // A vessel can be tracked before any static report arrives, so the context is
   // all there is. Two unnamed vessels must still be distinguishable.
   it('falls back to the mmsi parsed out of the context', () => {
-    expect(trackName(OTHER, SELF, none)).toBe('AIS 244813000')
+    expect(trackLabel(OTHER, SELF, none)).toBe('AIS 244813000')
   })
 
   it('falls back to the context when there is no mmsi anywhere', () => {
     const odd = 'vessels.urn:mrn:signalk:uuid:abc'
-    expect(trackName(odd, SELF, none)).toBe(odd)
+    expect(trackLabel(odd, SELF, none)).toBe(odd)
   })
 
   it('ignores a blank name rather than rendering "AIS "', () => {
-    expect(trackName(OTHER, SELF, (p) => (p === `${OTHER}.name` ? '   ' : undefined))).toBe('AIS 244813000')
+    expect(trackLabel(OTHER, SELF, (p: string) => (p === `${OTHER}.name` ? '   ' : undefined))).toBe('AIS 244813000')
   })
 
   // Without selfContext there is nothing to compare against, so the own vessel
   // is labelled like any other target rather than guessed at.
   it('falls back to the mmsi when selfContext is unknown', () => {
-    expect(trackName(SELF, undefined, none)).toBe('AIS 211111111')
+    expect(trackLabel(SELF, undefined, none)).toBe('AIS 211111111')
   })
 })

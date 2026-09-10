@@ -740,3 +740,41 @@ describe('getTrackContexts', () => {
     }
   })
 })
+
+// The v2 contract declares contextName: "Name of the vessel, aircraft or other
+// context, where known. Not a name for the track itself." Leaving it empty
+// while v1 carries a label makes the plugin contradict itself depending on
+// which route a client uses.
+describe('contextName in v2 properties', () => {
+  it('carries the bare vessel name, not the v1 display label', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      paths: { [`${OTHER_CONTEXT}.name`]: 'Ariadne' },
+    })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await providerOf(h).getTracks({ contexts: [OTHER_CONTEXT] })
+
+    expect(res.features[0]!.properties.contextName).toBe('Ariadne')
+  })
+
+  it('falls back to the mmsi when the name is not known yet', async () => {
+    const h = createHarness({ selfPosition: [60, 24] })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await providerOf(h).getTracks({ contexts: [OTHER_CONTEXT] })
+
+    expect(res.features[0]!.properties.contextName).toBe('987654321')
+  })
+
+  // "where known" — an absent field, not an empty string or a raw context.
+  it('omits the field entirely when nothing is known', async () => {
+    const odd = 'vessels.urn:mrn:signalk:uuid:abc'
+    const h = createHarness({ selfPosition: [60, 24] })
+    h.emit(odd, [60.2, 24.8])
+
+    const res = await providerOf(h).getTracks({ contexts: [odd] })
+
+    expect(res.features[0]!.properties).not.toHaveProperty('contextName')
+  })
+})

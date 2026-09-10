@@ -24,6 +24,15 @@ export interface TrackProviderDeps {
   /** Gap in ms that starts a new segment; 0 leaves the track as one line. */
   segmentGap: () => number
   /**
+   * The vessel's name for `contextName`, or undefined when unknown.
+   *
+   * Injected like the rest: resolving it needs the server's data model, which
+   * the provider has no handle on. Called per query rather than cached,
+   * because an AIS target's static report routinely lands well after its
+   * first position.
+   */
+  contextName: (context: string) => string | undefined
+  /**
    * Positions a history provider holds for a context and window, reconciled
    * with the store's own.
    *
@@ -255,6 +264,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
         }
         const segments = segment(points, gap)
         const bbox = boundsOf(points)
+        const name = deps.contextName(context)
         features.push({
           type: 'Feature',
           // geometry=false asks for the metadata only, so a client can list
@@ -269,6 +279,8 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
           properties: {
             context,
             isSelf: context === selfContext,
+            // Omitted rather than empty: the spec says "where known".
+            ...(name === undefined ? {} : { contextName: name }),
             from: new Date(points[0]!.timestamp).toISOString(),
             to: new Date(points[points.length - 1]!.timestamp).toISOString(),
             ...(bbox ? { bbox } : {}),
