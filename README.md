@@ -149,7 +149,8 @@ the own vessel. Asking for `self` resolves the alias, so the response tells you 
 
 _`name` is a display label, the way a chart plotter shows one: `Own Ship`, or `AIS <shipname>`
 falling back to `AIS <mmsi>` and finally the raw context. It is for putting in a list — the v2
-Track API's `contextName` carries the undecorated vessel name instead._
+Track API's `contextName` carries the undecorated vessel name instead, and is absent for a
+vessel that has not sent one._
 
 ---
 

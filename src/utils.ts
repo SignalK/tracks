@@ -222,12 +222,14 @@ export const historyRowPosition = (row: unknown): LatLngTuple | undefined => {
  * `navigation.position` and friends carry, so both are accepted rather than
  * guessed at.
  *
- * Falls back to the MMSI so that two unnamed vessels stay distinguishable, and
- * returns undefined when even that is unknown — "where known" in the spec means
- * the field is absent rather than filled with a context nobody can read.
+ * Resolves `name` and nothing else, matching the server's own `findContextName`
+ * (`packages/server-admin-ui/src/utils/pathKeys.ts`), which returns undefined
+ * rather than substituting an identifier. An MMSI is how a vessel is addressed,
+ * not what it is called, so it belongs in `trackLabel` where something has to
+ * render — putting it here would make "where known" untrue.
  */
 export function contextName(context: string, lookup: (path: string) => unknown): string | undefined {
-  return unwrapString(lookup(`${context}.name`)) ?? unwrapString(lookup(`${context}.mmsi`)) ?? mmsiFromContext(context)
+  return unwrapString(lookup(`${context}.name`))
 }
 
 /**
@@ -249,8 +251,8 @@ export function trackLabel(
   if (context === selfContext) {
     return 'Own Ship'
   }
-  const name = contextName(context, lookup)
-  return name === undefined ? context : `AIS ${name}`
+  const identity = contextName(context, lookup) ?? unwrapString(lookup(`${context}.mmsi`)) ?? mmsiFromContext(context)
+  return identity === undefined ? context : `AIS ${identity}`
 }
 
 /** Accepts both a bare string and the `{value}` wrapper deltas arrive in. */

@@ -140,11 +140,13 @@ describe('contextName', () => {
     )
   })
 
-  it('falls back to the mmsi so two unnamed vessels stay distinct', () => {
-    expect(contextName(OTHER, none)).toBe('244813000')
+  // An MMSI is how a vessel is addressed, not what it is called. The server's
+  // own findContextName resolves `name` and nothing else, and "where known"
+  // means an absent field -- so the MMSI fallback lives in trackLabel instead.
+  it('is undefined when the vessel has no name, even with an mmsi', () => {
+    expect(contextName(OTHER, (p: string) => (p === `${OTHER}.mmsi` ? '244813000' : undefined))).toBeUndefined()
   })
 
-  // "where known" means absent, not a context string nobody can read.
   it('is undefined when nothing is known', () => {
     expect(contextName('vessels.urn:mrn:signalk:uuid:abc', none)).toBeUndefined()
   })
