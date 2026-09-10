@@ -784,3 +784,96 @@ describe('contextName in v2 properties', () => {
     expect(res.features[0]!.properties).not.toHaveProperty('contextName')
   })
 })
+
+// The v2 contract declares `simplify` and `epsilon`; until now the provider
+// accepted and ignored them, which returns a superset of what was asked for
+// rather than a wrong answer, but is not what the client wanted.
+describe('simplify in v2', () => {
+  // A zigzag: thinning by time keeps every other point, simplification by
+  // shape keeps the corners. The two are not interchangeable.
+  const zigzag = (n: number): [number, number][] =>
+    Array.from({ length: n }, (_, i) => [60 + (i % 2 ? 0.0003 : 0), 24 + i * 0.0002] as [number, number])
+
+  const seed = (h: ReturnType<typeof createHarness>, pts: [number, number][]) => {
+    h.seedTrack(
+      SELF_CONTEXT,
+      pts,
+      pts.map((_, i) => Date.now() - (pts.length - i) * 1000),
+    )
+  }
+
+  it('leaves the geometry alone when nothing asked for simplification', async () => {
+    const h = createHarness()
+    seed(h, zigzag(60))
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT] })
+
+    expect(res.features[0]!.properties.pointCount).toBe(60)
+    expect(res.features[0]!.properties).not.toHaveProperty('epsilon')
+  })
+
+  it('honours an explicit epsilon and reports it back', async () => {
+    const h = createHarness()
+    seed(h, zigzag(60))
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100 })
+
+    expect(res.features[0]!.properties.pointCount).toBeLessThan(60)
+    expect(res.features[0]!.properties.epsilon).toBe(100)
+  })
+
+  // "Simplification tolerance in metres. Implies simplify=true."
+  it('treats epsilon as implying simplify', async () => {
+    const h = createHarness()
+    seed(h, zigzag(60))
+
+    const withFlag = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100, simplify: true })
+    const without = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100 })
+
+    expect(without.features[0]!.properties.pointCount).toBe(withFlag.features[0]!.properties.pointCount)
+  })
+
+  // The auto tolerance is one part in a thousand of the track's extent, so the
+  // track has to actually cover ground for it to bite -- which a real one
+  // does. A long leg with jitter on it stands in for a passage.
+  it('chooses a tolerance when simplify comes without one', async () => {
+    const h = createHarness()
+    const leg: [number, number][] = Array.from(
+      { length: 200 },
+      (_, i) => [60 + i * 0.001 + (i % 2 ? 0.000005 : 0), 24 + i * 0.002] as [number, number],
+    )
+    seed(h, leg)
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
+
+    expect(res.features[0]!.properties.epsilon).toBeGreaterThan(0)
+    expect(res.features[0]!.properties.pointCount).toBeLessThan(200)
+  })
+
+  // pointCount, from/to and bbox must describe what was returned, not what was
+  // read from the store — a client drawing the bbox of an unsimplified track
+  // around a simplified one would draw the wrong box.
+  it('describes the simplified track, not the stored one', async () => {
+    const h = createHarness()
+    seed(h, zigzag(60))
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100, times: true })
+    const props = res.features[0]!.properties
+    const coords = res.features[0]!.geometry!.coordinates.flat()
+
+    expect(props.pointCount).toBe(coords.length)
+    expect(props.coordTimes!.flat()).toHaveLength(coords.length)
+  })
+
+  it('keeps the endpoints, so from and to still bound the track', async () => {
+    const h = createHarness()
+    const pts = zigzag(60)
+    seed(h, pts)
+
+    const full = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT] })
+    const cut = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100 })
+
+    expect(cut.features[0]!.properties.from).toBe(full.features[0]!.properties.from)
+    expect(cut.features[0]!.properties.to).toBe(full.features[0]!.properties.to)
+  })
+})

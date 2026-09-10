@@ -1,4 +1,5 @@
 import { Temporal } from '@js-temporal/polyfill'
+import { simplify } from './simplify.js'
 import { segment, thinToBudget } from './timeWindow.js'
 import type { TrackStore } from './store.js'
 import type { TrackApi, TrackFeature, TracksRequest, TracksResponse } from './trackApi.js'
@@ -262,8 +263,18 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
         if (points.length === 0) {
           continue
         }
-        const segments = segment(points, gap)
-        const bbox = boundsOf(points)
+        // Simplification runs after thinning, not before: thinning is what a
+        // client asked for explicitly, and simplifying first would spend the
+        // shape budget on points that are about to be dropped anyway.
+        //
+        // `epsilon` implies `simplify`, per the spec. With `simplify` and no
+        // epsilon the tolerance is chosen from the track's own extent, which
+        // is the spec's "a tolerance suited to the size of the box" — derived
+        // from what was actually returned rather than from the query, so a
+        // bbox-less request still gets a sensible one.
+        const { points: shaped, epsilon: appliedEpsilon } = applySimplify(points, query)
+        const segments = segment(shaped, gap)
+        const bbox = boundsOf(shaped)
         const name = deps.contextName(context)
         features.push({
           type: 'Feature',
@@ -281,14 +292,17 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
             isSelf: context === selfContext,
             // Omitted rather than empty: the spec says "where known".
             ...(name === undefined ? {} : { contextName: name }),
-            from: new Date(points[0]!.timestamp).toISOString(),
-            to: new Date(points[points.length - 1]!.timestamp).toISOString(),
+            from: new Date(shaped[0]!.timestamp).toISOString(),
+            to: new Date(shaped[shaped.length - 1]!.timestamp).toISOString(),
             ...(bbox ? { bbox } : {}),
-            pointCount: points.length,
+            pointCount: shaped.length,
             // The spacing actually applied, which is not always the one asked
             // for: a maxPoints budget widens it. Reported so a client can tell
             // a thinned track from a full one, and see what produced it.
             ...(appliedMs === undefined ? {} : { resolution: msToDuration(appliedMs).toString() }),
+            // "Present when the provider simplified the geometry" — so absent
+            // when it did not, rather than reported as 0.
+            ...(appliedEpsilon === undefined ? {} : { epsilon: appliedEpsilon }),
             ...(query.times ? { coordTimes: segments.map(toIsoTimes) } : {}),
           },
         })
@@ -300,6 +314,56 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
       return [...(await matching(query)).tracks.keys()]
     },
   }
+}
+
+/**
+ * Simplify a track when the query asked for it, reporting the tolerance used.
+ *
+ * `epsilon` implies `simplify=true`, so an explicit tolerance is honoured
+ * whether or not the flag came with it. `simplify` alone leaves the tolerance
+ * to the provider: the spec says "a tolerance suited to the size of the box",
+ * and the track's own extent is the honest basis for that — a bbox may be
+ * absent, and when present it is what the client searched in rather than what
+ * came back.
+ *
+ * Returns `epsilon: undefined` when nothing was simplified, because the
+ * response field is specified as "present when the provider simplified the
+ * geometry".
+ */
+function applySimplify(
+  points: TimedPosition[],
+  query: TracksRequest,
+): { points: TimedPosition[]; epsilon: number | undefined } {
+  const explicit = query.epsilon
+  if (explicit !== undefined && explicit > 0) {
+    return { points: simplify(points, explicit), epsilon: explicit }
+  }
+  if (query.simplify !== true) {
+    return { points, epsilon: undefined }
+  }
+  const auto = autoEpsilon(points)
+  return auto === undefined ? { points, epsilon: undefined } : { points: simplify(points, auto), epsilon: auto }
+}
+
+/**
+ * A tolerance scaled to how much ground a track covers.
+ *
+ * One part in a thousand of the track's diagonal: enough to drop the jitter of
+ * a boat holding station while keeping every turn a passage is made of. A
+ * fixed metre value cannot do both — 10 m erases nothing on an ocean crossing
+ * and erases a marina approach entirely.
+ */
+function autoEpsilon(points: TimedPosition[]): number | undefined {
+  const bounds = boundsOf(points)
+  if (!bounds) {
+    return undefined
+  }
+  const [west, south, east, north] = bounds
+  const midLat = (south + north) / 2
+  const height = (north - south) * 111_320
+  const width = (east - west) * 111_320 * Math.cos((midLat * Math.PI) / 180)
+  const diagonal = Math.hypot(width, height)
+  return diagonal > 0 ? diagonal / 1000 : undefined
 }
 
 /** v2 accepts the `self` alias; the store keys on the qualified context. */
