@@ -398,11 +398,12 @@ function autoEpsilon(points: TimedPosition[]): number | undefined {
   const lngSpan = east >= west ? east - west : east + 360 - west
   const width = lngSpan * M_PER_DEG * Math.cos((midLat * Math.PI) / 180)
   const diagonal = Math.hypot(width, height)
-  // A track that never moved has no extent to scale by, but it is exactly the
-  // track worth collapsing: hours at anchor is thousands of points describing
-  // one spot. A metre is below any GPS's own noise, so it drops the duplicates
-  // without touching a track that did go somewhere.
-  return diagonal > 0 ? diagonal / AUTO_EPSILON_DIVISOR : STATIONARY_EPSILON
+  // A floor, not a fallback for a zero extent. A vessel swinging at anchor
+  // covers tens of metres, so the proportional tolerance works out at
+  // centimetres and drops nothing -- leaving the track most worth collapsing
+  // untouched. One metre is below any GPS's own noise, so applying it as a
+  // minimum cannot alter a track that actually went somewhere.
+  return Math.max(diagonal / AUTO_EPSILON_DIVISOR, STATIONARY_EPSILON)
 }
 
 /** v2 accepts the `self` alias; the store keys on the qualified context. */

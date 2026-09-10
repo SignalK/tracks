@@ -1020,10 +1020,26 @@ describe('simplify in v2', () => {
     expect(res.features[0]!.properties.epsilon).toBe(1)
   })
 
-  // A vessel at anchor records thousands of points describing one spot. That
-  // track has no extent to scale a tolerance by, and is the one most worth
-  // collapsing -- returning it unsimplified would be the opposite of useful.
-  it('collapses a stationary track', async () => {
+  // A vessel at anchor covers tens of metres, so the proportional tolerance
+  // works out at centimetres -- below the noise in the fixes themselves, so
+  // every jitter point survives. The floor is what drops them.
+  it('applies the floor tolerance to a track swinging at anchor', async () => {
+    const h = createHarness()
+    // A 20 m swing with sub-metre jitter along it, as a fix on a mooring makes.
+    seed(
+      h,
+      Array.from({ length: 50 }, (_, i) => [60 + i * 0.000004, 24 + (i % 2 ? 0.000005 : 0)] as [number, number]),
+    )
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
+
+    // The jitter is well under a metre, so the floor removes it; without the
+    // floor the 0.01 m proportional tolerance would keep all 50.
+    expect(res.features[0]!.properties.pointCount).toBeLessThan(10)
+    expect(res.features[0]!.properties.epsilon).toBe(1)
+  })
+
+  it('collapses a track that never moved at all', async () => {
     const h = createHarness()
     seed(
       h,
@@ -1033,7 +1049,6 @@ describe('simplify in v2', () => {
     const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
 
     expect(res.features[0]!.properties.pointCount).toBe(2)
-    expect(res.features[0]!.properties.epsilon).toBeGreaterThan(0)
   })
 
   // boundsOf writes a crossing box as west > east, so a plain subtraction
