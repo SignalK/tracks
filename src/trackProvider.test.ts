@@ -847,12 +847,17 @@ describe('simplify in v2', () => {
     const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
     const props = res.features[0]!.properties
 
-    // One part in a thousand of the track's diagonal -- pinned, so a change to
-    // the documented policy shows up here rather than silently altering what
-    // every simplify-only request returns.
-    const [west, south, east, north] = props.bbox!
+    // One part in a thousand of the diagonal of the track *as seeded*, which
+    // is what the tolerance is derived from -- it cannot come from the
+    // simplified extent, since that is what the tolerance produces. Computed
+    // from the fixture rather than from props.bbox so the assertion pins the
+    // policy instead of this fixture's endpoints happening to be its extremes.
+    const lats = leg.map(([lat]) => lat)
+    const lngs = leg.map(([, lng]) => lng)
+    const south = Math.min(...lats)
+    const north = Math.max(...lats)
     const height = (north - south) * 111_320
-    const width = (east - west) * 111_320 * Math.cos((((south + north) / 2) * Math.PI) / 180)
+    const width = (Math.max(...lngs) - Math.min(...lngs)) * 111_320 * Math.cos((((south + north) / 2) * Math.PI) / 180)
     expect(props.epsilon).toBeCloseTo(Math.hypot(width, height) / 1000, 6)
     expect(props.pointCount).toBeLessThan(200)
   })
@@ -961,6 +966,39 @@ describe('simplify in v2', () => {
     // A corner sits on a kept sample, so it survives both steps -- without
     // this the subset assertions above would hold for an empty-ish result.
     expect(bothCoords).toContain('24.008,60.02')
+  })
+
+  // The schema declares exclusiveMinimum: 0, so the server rejects these
+  // before they reach a provider; handled defensively rather than left to
+  // simplify by zero and report a tolerance that did nothing.
+  it('ignores a non-positive epsilon', async () => {
+    const h = createHarness()
+    seed(h, zigzag(60))
+
+    for (const epsilon of [0, -1]) {
+      const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon })
+
+      expect(res.features[0]!.properties.pointCount).toBe(60)
+      expect(res.features[0]!.properties).not.toHaveProperty('epsilon')
+    }
+  })
+
+  // A tolerance that changes nothing is still a tolerance that was applied:
+  // the field reports what simplification ran with, not that the geometry
+  // differs from what is stored.
+  it('reports the tolerance even when it removed nothing', async () => {
+    const h = createHarness()
+    // Three points making a sharp corner: nothing to drop at 1 m.
+    seed(h, [
+      [60, 24],
+      [60.01, 24.005],
+      [60, 24.01],
+    ])
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 1 })
+
+    expect(res.features[0]!.properties.pointCount).toBe(3)
+    expect(res.features[0]!.properties.epsilon).toBe(1)
   })
 
   it('keeps the endpoints, so from and to still bound the track', async () => {

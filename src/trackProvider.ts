@@ -309,8 +309,11 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
             // for: a maxPoints budget widens it. Reported so a client can tell
             // a thinned track from a full one, and see what produced it.
             ...(appliedMs === undefined ? {} : { resolution: msToDuration(appliedMs).toString() }),
-            // "Present when the provider simplified the geometry" — so absent
-            // when it did not, rather than reported as 0.
+            // The tolerance simplification ran with, absent when it did not
+            // run at all. Note a tolerance can legitimately change nothing —
+            // a track with no point further than epsilon from its own line is
+            // already as simple as it gets — so this reports what was applied
+            // rather than implying the geometry differs from the stored one.
             ...(appliedEpsilon === undefined ? {} : { epsilon: appliedEpsilon }),
             ...(query.times ? { coordTimes: segments.map(toIsoTimes) } : {}),
           },
@@ -331,13 +334,20 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
  * `epsilon` implies `simplify=true`, so an explicit tolerance is honoured
  * whether or not the flag came with it. `simplify` alone leaves the tolerance
  * to the provider: the spec says "a tolerance suited to the size of the box",
- * and the track's own extent is the honest basis for that — a bbox may be
- * absent, and when present it is what the client searched in rather than what
- * came back.
+ * and the extent of the track *as thinning left it* is the honest basis for
+ * that — a query bbox may be absent, and when present it is what the client
+ * searched in rather than what came back. It cannot be the simplified extent,
+ * since that is the thing being computed.
  *
  * Chosen from the whole track rather than per segment, so every leg of one
  * track is simplified to the same tolerance and the single reported `epsilon`
  * describes all of them.
+ *
+ * A non-positive `epsilon` is not reachable through the API — the schema
+ * declares `exclusiveMinimum: 0`, so the server rejects it — and is treated
+ * here as no tolerance given, falling through to `simplify` if that was asked
+ * for. Simplifying by zero would be a no-op reported as if it had done
+ * something.
  */
 function chooseEpsilon(points: TimedPosition[], query: TracksRequest): number | undefined {
   const explicit = query.epsilon
