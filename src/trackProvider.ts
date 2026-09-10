@@ -272,8 +272,17 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
         // is the spec's "a tolerance suited to the size of the box" — derived
         // from what was actually returned rather than from the query, so a
         // bbox-less request still gets a sensible one.
-        const { points: shaped, epsilon: appliedEpsilon } = applySimplify(points, query)
-        const segments = segment(shaped, gap)
+        //
+        // Segmenting comes first and each segment is simplified on its own.
+        // The simplifier has no notion of a time gap, so given the whole track
+        // it can drop the points either side of one — two collinear legs
+        // three hours apart reduce to a single line, and segmenting that
+        // afterwards yields one-point segments, which are not drawable
+        // geometry. Splitting first keeps every leg's own endpoints.
+        const chosenEpsilon = chooseEpsilon(points, query)
+        const segments = segment(points, gap).map((s) => (chosenEpsilon === undefined ? s : simplify(s, chosenEpsilon)))
+        const shaped = segments.flat()
+        const appliedEpsilon = chosenEpsilon
         const bbox = boundsOf(shaped)
         const name = deps.contextName(context)
         features.push({
@@ -317,7 +326,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
 }
 
 /**
- * Simplify a track when the query asked for it, reporting the tolerance used.
+ * The tolerance to simplify with, or undefined to leave the geometry alone.
  *
  * `epsilon` implies `simplify=true`, so an explicit tolerance is honoured
  * whether or not the flag came with it. `simplify` alone leaves the tolerance
@@ -326,23 +335,16 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
  * absent, and when present it is what the client searched in rather than what
  * came back.
  *
- * Returns `epsilon: undefined` when nothing was simplified, because the
- * response field is specified as "present when the provider simplified the
- * geometry".
+ * Chosen from the whole track rather than per segment, so every leg of one
+ * track is simplified to the same tolerance and the single reported `epsilon`
+ * describes all of them.
  */
-function applySimplify(
-  points: TimedPosition[],
-  query: TracksRequest,
-): { points: TimedPosition[]; epsilon: number | undefined } {
+function chooseEpsilon(points: TimedPosition[], query: TracksRequest): number | undefined {
   const explicit = query.epsilon
   if (explicit !== undefined && explicit > 0) {
-    return { points: simplify(points, explicit), epsilon: explicit }
+    return explicit
   }
-  if (query.simplify !== true) {
-    return { points, epsilon: undefined }
-  }
-  const auto = autoEpsilon(points)
-  return auto === undefined ? { points, epsilon: undefined } : { points: simplify(points, auto), epsilon: auto }
+  return query.simplify === true ? autoEpsilon(points) : undefined
 }
 
 /**
@@ -361,7 +363,11 @@ function autoEpsilon(points: TimedPosition[]): number | undefined {
   const [west, south, east, north] = bounds
   const midLat = (south + north) / 2
   const height = (north - south) * 111_320
-  const width = (east - west) * 111_320 * Math.cos((midLat * Math.PI) / 180)
+  // boundsOf writes an antimeridian-crossing box as west > east (RFC 7946), so
+  // a plain subtraction turns a tenth of a degree into -359.8 and the derived
+  // tolerance into something that would erase the whole track.
+  const lngSpan = east >= west ? east - west : east + 360 - west
+  const width = lngSpan * 111_320 * Math.cos((midLat * Math.PI) / 180)
   const diagonal = Math.hypot(width, height)
   return diagonal > 0 ? diagonal / 1000 : undefined
 }

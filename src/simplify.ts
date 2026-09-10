@@ -68,11 +68,12 @@ function perpendicularDistance(p: TimedPosition, a: TimedPosition, b: TimedPosit
   // Scale longitudes at the segment's own latitude, so a track near the poles
   // is not simplified as though a degree of longitude were 111 km wide.
   const cos = Math.cos((a.position[LAT] * Math.PI) / 180)
-  const ax = a.position[LNG] * cos
+  const originLng = a.position[LNG]
+  const ax = originLng * cos
   const ay = a.position[LAT]
-  const bx = b.position[LNG] * cos
+  const bx = nearestLongitude(b.position[LNG], originLng) * cos
   const by = b.position[LAT]
-  const px = p.position[LNG] * cos
+  const px = nearestLongitude(p.position[LNG], originLng) * cos
   const py = p.position[LAT]
 
   const dx = bx - ax
@@ -133,4 +134,17 @@ export function simplifyToBudget(
     }
   }
   return { points: best, epsilon: bestEpsilon }
+}
+
+/**
+ * `lng` shifted by whole turns to sit within 180 degrees of `origin`.
+ *
+ * A track crossing the antimeridian is stored as 179.9 then -179.9, a tenth of
+ * a degree apart on the ground but 359.8 apart numerically. Without this, a
+ * straight line across it reads as a segment spanning almost the whole globe,
+ * and points that lie exactly on that line measure kilometres away from it —
+ * so simplification keeps every one of them.
+ */
+function nearestLongitude(lng: number, origin: number): number {
+  return lng - 360 * Math.round((lng - origin) / 360)
 }

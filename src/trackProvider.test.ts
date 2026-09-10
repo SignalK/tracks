@@ -865,6 +865,54 @@ describe('simplify in v2', () => {
     expect(props.coordTimes!.flat()).toHaveLength(coords.length)
   })
 
+  // The bbox must bound what came back. A fixture with an interior extremum
+  // that simplification removes tells a bbox computed from the returned track
+  // from one computed from the stored one -- the latter would draw a box the
+  // track no longer reaches into.
+  it('bounds the simplified track, not the stored one', async () => {
+    const h = createHarness()
+    // A long straight leg with one small northward blip in the middle: well
+    // inside a 500 m tolerance, so it goes, taking the maximum latitude with it.
+    const leg: [number, number][] = Array.from(
+      { length: 40 },
+      (_, i) => [60 + (i === 20 ? 0.0005 : 0), 24 + i * 0.01] as [number, number],
+    )
+    seed(h, leg)
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 500 })
+    const coords = res.features[0]!.geometry!.coordinates.flat()
+    const north = Math.max(...coords.map(([, lat]) => lat))
+
+    expect(res.features[0]!.properties.bbox![3]).toBeCloseTo(north, 10)
+    // ...and the blip really was dropped, or the assertion above is vacuous.
+    expect(north).toBeLessThan(60.0005)
+  })
+
+  // The simplifier knows nothing about time gaps. Given the whole track it
+  // sees two collinear legs as one straight line and keeps only the global
+  // endpoints -- segmenting that afterwards yields one-point segments, which
+  // are not drawable geometry. Splitting first is what keeps each leg whole.
+  it('keeps each leg when a time gap splits the track', async () => {
+    const h = createHarness({ config: { segmentGapMinutes: 10 } })
+    const base = Date.now() - 5 * 60 * 60 * 1000
+    const hours = 3 * 60 * 60 * 1000
+    h.seedTrack(
+      SELF_CONTEXT,
+      [
+        [60, 24],
+        [60, 24.01],
+        [60, 24.02],
+        [60, 24.03],
+      ],
+      [base, base + 1000, base + hours, base + hours + 1000],
+    )
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100 })
+
+    expect(res.features[0]!.geometry!.coordinates.map((seg) => seg.length)).toEqual([2, 2])
+    expect(res.features[0]!.properties.pointCount).toBe(4)
+  })
+
   it('keeps the endpoints, so from and to still bound the track', async () => {
     const h = createHarness()
     const pts = zigzag(60)

@@ -69,13 +69,34 @@ describe('simplify', () => {
 
   // Longitude degrees shrink towards the poles. Scaling by cos(latitude) is
   // what keeps a tolerance in metres meaning the same thing at every latitude.
+  //
+  // A north-south leg at 80N with an east-west deviation: 0.001 deg of
+  // longitude is ~19 m there but would read as ~111 m unscaled. An epsilon
+  // between the two tells the scaled implementation from the unscaled one.
   it('applies the tolerance in metres, not degrees, at high latitude', () => {
-    // ~11 m of longitude at 80N, which is ~0.00057 deg rather than 0.0001.
-    const north = [at(80, 0), at(80, 0.00057), at(80, 0.00114)]
+    const leg = [at(80, 0), at(80.001, 0.001), at(80.002, 0)]
 
-    // The midpoint is on the line, so it goes regardless; the point is that
-    // the same shape at a different latitude behaves the same way.
-    expect(simplify(north, 1)).toHaveLength(2)
+    // Truly ~19 m out, so a 50 m tolerance drops it.
+    expect(simplify(leg, 50)).toHaveLength(2)
+    // ...and a 10 m tolerance keeps it. Unscaled, the deviation would read as
+    // ~111 m and the first assertion would fail.
+    expect(simplify(leg, 10)).toHaveLength(3)
+  })
+
+  // The antimeridian is written 179.9 then -179.9: a tenth of a degree apart
+  // on the ground, 359.8 apart numerically. Read literally, a straight line
+  // across it spans most of the globe and every point on it measures
+  // kilometres away, so nothing is ever simplified.
+  it('simplifies a straight line across the antimeridian', () => {
+    const crossing = [at(0, 179.9), at(0, 180), at(0, -179.9)]
+
+    expect(simplify(crossing, 100)).toHaveLength(2)
+  })
+
+  it('still keeps a real corner at the antimeridian', () => {
+    const corner = [at(0, 179.9), at(0.01, 180), at(0, -179.9)]
+
+    expect(simplify(corner, 100)).toHaveLength(3)
   })
 })
 
