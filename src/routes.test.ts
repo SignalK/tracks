@@ -358,6 +358,24 @@ describe('track names', () => {
     expect(res.body[OTHER_CONTEXT].name).toBe('AIS 987654321')
   })
 
+  // The whole reason names are resolved per request rather than cached at first
+  // fix: an AIS target's static report routinely arrives minutes after its
+  // first position, and a track stuck at "AIS 987654321" forever is the bug.
+  it('picks up a name that arrives after the first request', async () => {
+    const paths: Record<string, unknown> = {}
+    const h = createHarness({ selfPosition: [60, 24], paths })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const before = await request(h.app).get(`${API}/tracks`).expect(200)
+    expect(before.body[OTHER_CONTEXT].name).toBe('AIS 987654321')
+
+    // The static report lands.
+    paths[`${OTHER_CONTEXT}.name`] = 'MIA'
+
+    const after = await request(h.app).get(`${API}/tracks`).expect(200)
+    expect(after.body[OTHER_CONTEXT].name).toBe('AIS MIA')
+  })
+
   it('names tracks in the timed response too', async () => {
     const h = createHarness({
       selfPosition: [60, 24],

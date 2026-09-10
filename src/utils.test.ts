@@ -154,7 +154,9 @@ describe('trackName', () => {
     expect(trackName(OTHER, SELF, (p) => (p === `${OTHER}.name` ? '   ' : undefined))).toBe('AIS 244813000')
   })
 
-  it('names the own vessel even when selfContext is unknown', () => {
+  // Without selfContext there is nothing to compare against, so the own vessel
+  // is labelled like any other target rather than guessed at.
+  it('falls back to the mmsi when selfContext is unknown', () => {
     expect(trackName(SELF, undefined, none)).toBe('AIS 211111111')
   })
 })
