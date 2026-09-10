@@ -154,6 +154,18 @@ describe('simplifyToBudget', () => {
     expect(simplifyToBudget(short, 10)).toEqual({ points: short, epsilon: 0 })
   })
 
+  // Every segment spans more latitude than the projection is trusted across,
+  // so no tolerance can drop a point. Reporting the ceiling the search stopped
+  // at would claim a billion-metre tolerance had been applied.
+  it('reports a zero tolerance when the budget cannot be met', () => {
+    const wide = [at(80, 0), at(60, 1), at(40, 0), at(20, 1), at(0, 0)]
+
+    const { points, epsilon } = simplifyToBudget(wide, 3)
+
+    expect(points).toEqual(wide)
+    expect(epsilon).toBe(0)
+  })
+
   it('never returns fewer than the two endpoints', () => {
     const { points } = simplifyToBudget(zigzag, 1)
 

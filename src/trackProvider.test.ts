@@ -983,8 +983,7 @@ describe('simplify in v2', () => {
     }
   })
 
-  // ...but `simplify: true` alongside one still means simplify. The unusable
-  // tolerance is ignored, not the request.
+  // The unusable tolerance is ignored, not the request.
   it('falls back to the automatic tolerance when a non-positive epsilon comes with simplify', async () => {
     const h = createHarness()
     const leg: [number, number][] = Array.from(
@@ -1019,6 +1018,22 @@ describe('simplify in v2', () => {
 
     expect(res.features[0]!.properties.pointCount).toBe(3)
     expect(res.features[0]!.properties.epsilon).toBe(1)
+  })
+
+  // A vessel at anchor records thousands of points describing one spot. That
+  // track has no extent to scale a tolerance by, and is the one most worth
+  // collapsing -- returning it unsimplified would be the opposite of useful.
+  it('collapses a stationary track', async () => {
+    const h = createHarness()
+    seed(
+      h,
+      Array.from({ length: 50 }, () => [60, 24] as [number, number]),
+    )
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
+
+    expect(res.features[0]!.properties.pointCount).toBe(2)
+    expect(res.features[0]!.properties.epsilon).toBeGreaterThan(0)
   })
 
   it('keeps the endpoints, so from and to still bound the track', async () => {

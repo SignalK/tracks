@@ -164,6 +164,14 @@ export function simplifyToBudget(
   }
   let best = simplify(points, hi)
   let bestEpsilon = hi
+  // A budget the tolerance cannot reach: every remaining segment spans more
+  // latitude than the projection is trusted across, so no epsilon drops
+  // another point. Report the smallest track achievable and the tolerance that
+  // achieved it, rather than the ceiling the search happened to stop at --
+  // which would be a billion-metre tolerance that explains nothing.
+  if (best.length > budget) {
+    return { points: best, epsilon: 0 }
+  }
   for (let i = 0; i < 40 && hi - lo > 0.01; i++) {
     const mid = (lo + hi) / 2
     const candidate = simplify(points, mid)

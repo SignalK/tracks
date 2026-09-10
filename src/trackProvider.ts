@@ -368,6 +368,15 @@ function chooseEpsilon(points: TimedPosition[], query: TracksRequest): number | 
 const AUTO_EPSILON_DIVISOR = 1000
 
 /**
+ * Tolerance, in metres, for a track with no extent at all.
+ *
+ * Below the noise of any GPS fix, so it collapses the thousands of near
+ * identical points a vessel records at anchor without altering a track that
+ * actually moved.
+ */
+const STATIONARY_EPSILON = 1
+
+/**
  * A tolerance scaled to how much ground a track covers.
  *
  * One part in a thousand of the track's diagonal: enough to drop the jitter of
@@ -389,7 +398,11 @@ function autoEpsilon(points: TimedPosition[]): number | undefined {
   const lngSpan = east >= west ? east - west : east + 360 - west
   const width = lngSpan * M_PER_DEG * Math.cos((midLat * Math.PI) / 180)
   const diagonal = Math.hypot(width, height)
-  return diagonal > 0 ? diagonal / AUTO_EPSILON_DIVISOR : undefined
+  // A track that never moved has no extent to scale by, but it is exactly the
+  // track worth collapsing: hours at anchor is thousands of points describing
+  // one spot. A metre is below any GPS's own noise, so it drops the duplicates
+  // without touching a track that did go somewhere.
+  return diagonal > 0 ? diagonal / AUTO_EPSILON_DIVISOR : STATIONARY_EPSILON
 }
 
 /** v2 accepts the `self` alias; the store keys on the qualified context. */
