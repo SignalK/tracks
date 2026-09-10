@@ -830,7 +830,7 @@ describe('simplify in v2', () => {
     const withFlag = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100, simplify: true })
     const without = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100 })
 
-    expect(without.features[0]!.properties.pointCount).toBe(withFlag.features[0]!.properties.pointCount)
+    expect(without).toEqual(withFlag)
   })
 
   // The auto tolerance is one part in a thousand of the track's extent, so the
@@ -845,9 +845,16 @@ describe('simplify in v2', () => {
     seed(h, leg)
 
     const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
+    const props = res.features[0]!.properties
 
-    expect(res.features[0]!.properties.epsilon).toBeGreaterThan(0)
-    expect(res.features[0]!.properties.pointCount).toBeLessThan(200)
+    // One part in a thousand of the track's diagonal -- pinned, so a change to
+    // the documented policy shows up here rather than silently altering what
+    // every simplify-only request returns.
+    const [west, south, east, north] = props.bbox!
+    const height = (north - south) * 111_320
+    const width = (east - west) * 111_320 * Math.cos((((south + north) / 2) * Math.PI) / 180)
+    expect(props.epsilon).toBeCloseTo(Math.hypot(width, height) / 1000, 6)
+    expect(props.pointCount).toBeLessThan(200)
   })
 
   // pointCount, from/to and bbox must describe what was returned, not what was

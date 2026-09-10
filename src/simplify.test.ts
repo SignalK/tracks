@@ -114,7 +114,7 @@ describe('simplifyToBudget', () => {
 
     // The reported epsilon must reproduce the result, or a client re-querying
     // with it gets a different track than the one it was told about.
-    expect(simplify(zigzag, epsilon).length).toBe(points.length)
+    expect(simplify(zigzag, epsilon)).toEqual(points)
   })
 
   it('leaves a track already within budget alone, at zero tolerance', () => {
