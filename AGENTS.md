@@ -34,8 +34,8 @@ real streambundle.
 Point it at a checkout with `SIGNALK_SERVER_DIR`, default `~/dev/xxx_signalk-server`; build
 that checkout first with `npm run build:all`.
 
-The second tier installs **signalk-questdb** into that server and lets the startup bootstrap run
-through `getHistoryApi()` for real. Test the History API contract, not a provider's storage: how
+The second tier installs **signalk-questdb** into that server and exercises the query-time
+reconciliation through `getHistoryApi()` for real. Test the History API contract, not a provider's storage: how
 questdb, influx or anything else keeps its rows is its own business, and a test asserting that
 would fail on a provider change that this plugin is unaffected by. It skips itself when nothing
 answers at `QUESTDB_URL` (default `http://localhost:9000`), so the server tier still runs
@@ -56,8 +56,8 @@ Vite transpiles without type checking, so **`npm run build` passing does not mea
 
 ## Architecture
 
-- **Storage depends on the `source` setting.** `memory` and `history` keep a `TrackAccumulator` per context, fed by an RxJS `scan` that slices its buffer to `pointsToKeep`, and a restart loses whatever is not re-hydrated. `sqlite` writes to a database file in the plugin's data directory instead, so tracks survive a restart, subject to its retention setting.
-- **A history provider enriches a query, it does not replace the store.** Queries reconcile the two: the provider answers for buckets where it has data, the store answers everywhere else. `bootstrapSelfTrack()` additionally refills the in-memory buffer at startup for `history`. Retries there are deliberately patient — a cold boot may need minutes before a provider answers — and it gives up quietly after `BOOTSTRAP_MAX_NO_PROVIDER` "no provider" replies, because most installs have none. **The plugin must stay fully functional with no history provider installed**; see `docs/history-and-storage.md`.
+- **Storage is always SQLite.** `start()` builds a `SqliteTrackStore` in the plugin's data directory, so tracks survive a restart with no other plugin involved; without a data directory it reports why and does not start. There is no in-memory alternative and no `source` setting — a track recorder that forgets everything on restart is not worth starting. `TrackAccumulator` remains as the exported client-side helper, not as plugin storage.
+- **A history provider enriches a query, it does not replace the store.** Every query reconciles the two through `historyPositions()`: the provider answers for buckets where it has data, the store answers everywhere else. This is best-effort and per query — there is no startup pre-fill. **The plugin must stay fully functional with no history provider installed**; see `docs/history-and-storage.md`.
 - **v1 and v2 are different purposes, not old and new.** Both are current, and neither supersedes the other.
   - **v1 `/signalk/v1/api/tracks`** is a **spatial query**: `radius` and `bbox` filter by the vessel's _last_ position — "which vessels are near me now". Situational awareness and collision avoidance; this is what Freeboard uses. It is the one thing the core v2 History API cannot answer, since that has no spatial predicate, and it's the reason this plugin exists as more than a cache.
   - **v2 `/signalk/v2/api/tracks`** is a **track query**: `bbox` matches _any_ position within the window — "which tracks passed through this box" — served through the provider registry with fan-out and `providerId` stamping.

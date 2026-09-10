@@ -11,12 +11,10 @@ Neither is simply better than the other, which is why both are used.
 | How long it is kept          | see below                          | until its retention drops it                     |
 | Size                         | small                              | far larger, which is why retention exists        |
 
-How long the plugin keeps a position depends on the **Where tracks come from
-after a restart** setting: `sqlite` writes to a database file and keeps
-positions for as long as its retention setting says;
-`memory` and `history` hold them in memory only, so a restart empties them.
-This page describes the `sqlite` case, where there is a durable store to
-reconcile against.
+The plugin writes its positions to a SQLite file in its data directory, so they
+survive a restart. How long they are kept depends on two settings: the own
+vessel's track is kept indefinitely by default, and another vessel is dropped
+30 days after its last fix.
 
 So the provider is the finer record of the recent past, and the plugin's store
 is what remains of everything older. The interval and the retention are both

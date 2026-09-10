@@ -23,11 +23,11 @@
  */
 import type { Context } from './types.js'
 
-/**
- * Off unless a user opts in, per the request and because the states worth
- * pausing on depend on how a boat is used.
- */
-export const DEFAULT_PAUSE_STATES: string[] = []
+// Recording a vessel that is not going anywhere costs rows and produces a
+// smear of GPS noise rather than a track. `anchored` is deliberately absent: an
+// anchor alarm watches exactly the track a vessel makes while swinging on its
+// rode, so pausing there would remove the one thing that use case needs.
+export const DEFAULT_PAUSE_STATES: string[] = ['moored', 'not-under-way', 'aground']
 
 /**
  * The states a boat is plausibly parked in, offered in the plugin UI.

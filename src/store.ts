@@ -18,12 +18,12 @@ import type { TrackQuery } from './timeWindow.js'
  * calls in `index.ts` and nothing more, so that adding an implementation cannot
  * quietly widen what a store is expected to do.
  *
- * Note what is *not* here. `getAllTracks` and `getFilteredTracks` are derived
- * operations — filtering is a predicate over whole tracks, which the in-memory
- * implementation applies in JS and a database implementation will want to push
- * into the query. Both stay on the interface for that reason: a store that can
- * filter in SQL must be allowed to, rather than being forced to materialise
- * every track so a caller can filter it afterwards.
+ * `getAllTracks` and `getFilteredTracks` are derived operations, and they are
+ * on the interface deliberately: filtering is a predicate over whole tracks,
+ * which the in-memory implementation applies in JS and a database
+ * implementation will want to push into the query. A store that can filter in
+ * SQL must be allowed to, rather than being forced to materialise every track
+ * so a caller can filter it afterwards.
  */
 export interface TrackStore {
   /** Record a position for a context. `timestamp` defaults to now. */
@@ -32,7 +32,8 @@ export interface TrackStore {
   /**
    * Seed a context's track, replacing whatever it held.
    *
-   * Used by the History API bootstrap at startup. `timestamps` is positional
+   * A test helper: it is how a known track is installed without going through
+   * the position bus, which throttles on write. `timestamps` is positional
    * against `track`; points without one are dated to the start of time so a
    * time-window query treats them as older than anything live.
    */
@@ -74,8 +75,26 @@ export interface TrackStore {
     query?: TrackQuery,
   ): Promise<TrackCollection>
 
-  /** Drop contexts whose newest position is older than `maxAge` ms. */
-  prune(maxAge: number): void
+  /**
+   * Drop contexts whose newest position is older than `maxAge` ms.
+   *
+   * `keep` is never pruned however long it has been idle. The own vessel's
+   * track is the one a user came for — it has to survive a winter on a
+   * mooring, a passage with the server off, and any gap in reception. Other
+   * vessels age out: a harbour puts hundreds of AIS targets past a receiver in
+   * a day, and keeping every one of them forever is not what anybody asked for.
+   *
+   * An implementation must also apply whatever row-level retention it was
+   * configured with, scoped to `keep`. The two are separate: one drops a whole
+   * vessel that has gone quiet, the other trims old points from the vessel a
+   * user is actually recording, and neither may switch the other off.
+   *
+   * `Infinity` ages nothing out, which is how a caller asks for the retention
+   * pass alone. A negative `maxAge` puts the cutoff in the future and so drops
+   * every context — the tests use `-1` for exactly that; the plugin's schema
+   * keeps it out of a real configuration.
+   */
+  prune(maxAge: number, keep?: Context): void
 
   /**
    * Release any resources held by the store.

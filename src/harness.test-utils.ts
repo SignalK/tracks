@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import express from 'express'
 import type { Express } from 'express'
 import ThePlugin from './index.js'
@@ -34,7 +37,7 @@ export interface TestHarness {
   statuses: string[]
   /**
    * Install a track with explicit timestamps, bypassing the throttled bus. This
-   * is the entry point the History API bootstrap uses.
+   * bypasses the throttle, which is what makes a back-dated track testable.
    */
   seedTrack: (context: string, positions: LatLngTuple[], timestamps: number[]) => void
   /** Self position as reported by `getSelfPath`, used for radius filtering. */
@@ -42,6 +45,13 @@ export interface TestHarness {
   /** The own vessel's navigation.state, as reported by `getSelfPath`. */
   setSelfState: (state: string | undefined) => void
   stop: () => void
+  /**
+   * How many positions the plugin's bus subscription has accepted.
+   *
+   * Observable after stop(), when the store itself is closed and unreadable —
+   * which is how a test can still tell that the subscription was torn down.
+   */
+  emitted: () => number
   errors: unknown[][]
   /**
    * The v2 Track API provider the plugin registered, or undefined when the
@@ -67,7 +77,11 @@ export interface HarnessOptions {
 }
 
 export function createHarness(options: HarnessOptions = {}): TestHarness {
+  // SQLite is the only store, so the harness needs somewhere to put the file.
+  // A fresh directory per harness keeps tests from sharing state.
+  const dataDir = mkdtempSync(join(tmpdir(), 'sk-tracks-test-'))
   const listeners: PositionListener[] = []
+  let emitted = 0
   const errors: unknown[][] = []
   const statuses: string[] = []
   let selfPosition: LatLngTuple | undefined = options.selfPosition
@@ -83,6 +97,7 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     error: (...args: unknown[]) => errors.push(args),
     setPluginStatus: (msg: string) => statuses.push(msg),
     selfContext,
+    getDataDirPath: () => dataDir,
     ...(options.withoutTrackApi
       ? {}
       : {
@@ -117,11 +132,10 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
 
   const plugin = ThePlugin(app)
   plugin.start({
-    // resolution 0 so every fed position is accepted without waiting on throttleTime
+    // No minimum spacing, so a synchronous burst of fed positions is all kept.
+    // The sqlite store enforces resolution on write rather than through rxjs
+    // throttling, so 0 genuinely means every position lands.
     resolution: 0,
-    pointsToKeep: 1000,
-    maxAge: 600,
-    bootstrapFromHistory: false,
     ...options.config,
   })
 
@@ -132,6 +146,7 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     app: expressApp,
     emit: (context, position, timestamp, source) => {
       for (const cb of listeners) {
+        emitted++
         cb({
           context,
           value: { latitude: position[0], longitude: position[1] },
@@ -149,7 +164,13 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     setSelfState: (state) => {
       selfState = state
     },
+    // Only the plugin is stopped. The data directory stays: stop() leaves the
+    // routes mounted and keeps serving what was accumulated, which routes.test
+    // pins, and a test that queries after stopping needs the file to still be
+    // there. The directory is a mkdtemp under the OS temp dir, so leaving it is
+    // harmless.
     stop: () => plugin.stop(),
+    emitted: () => emitted,
     errors,
     statuses,
     trackProvider: () => trackProvider,

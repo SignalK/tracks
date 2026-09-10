@@ -175,8 +175,8 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   initialTrack(context: Context, track: LatLngTuple[], timestamps?: number[]): void {
-    // Replaces the context's history, matching the in-memory store: the
-    // bootstrap is authoritative for the window it covers.
+    // Replaces the context's history, matching the in-memory store: a caller
+    // installing a known track is authoritative for the window it covers.
     this.db.prepare('DELETE FROM positions WHERE context = ?').run(context)
     // Bypasses the throttle: these points are already at whatever resolution
     // the history provider returned, and they are back-dated, so throttling
@@ -240,16 +240,20 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   /**
-   * Tracks whose last position matches the spatial predicate.
+   * Tracks matching the spatial predicate, which depends on who is asking.
+   *
+   * `intersects: false` — the v1 routes — matches a track's *last* position:
+   * "which vessels are near me now". `intersects: true` — the v2 Track API —
+   * matches a track that passed through the box at any point in the window,
+   * including one that has since left.
    *
    * Two filters run, and they are not redundant despite both testing bounds:
    *
    * - `contextsInBounds` asks the cell index which contexts have *any* position
    *   near the box. It is a cheap prefilter that keeps the query off every row
    *   in the table, and it decides nothing on its own.
-   * - `matcher` — the same predicate the in-memory store uses — then tests each
-   *   track's *last* position, which is what the endpoint actually means by
-   *   "in this box". That test is authoritative.
+   * - `matcher` — the same predicate the in-memory store uses — then applies
+   *   whichever rule the caller asked for. That test is authoritative.
    *
    * Because `matcher` has the final say, dropping the exact-bounds check inside
    * `contextsInBounds` does not change any result; it only widens the candidate
@@ -355,17 +359,36 @@ export class SqliteTrackStore implements TrackStore {
     return result
   }
 
-  prune(maxAge: number): void {
+  prune(maxAge: number, keep?: Context): void {
     const cutoff = Date.now() - maxAge
-    // Drop whole contexts that have gone quiet, matching the in-memory store,
-    // then apply the row-level retention if one is configured.
+    // Drop whole contexts that have gone quiet, then apply the row-level
+    // retention if one is configured. `keep` — the own vessel — is excluded:
+    // its track has to survive a winter on a mooring.
+    const dropped = this.db
+      .prepare('SELECT context FROM positions GROUP BY context HAVING MAX(timestamp) < ? AND context IS NOT ?')
+      .all(cutoff, keep ?? null) as { context: string }[]
     this.db
       .prepare(
-        'DELETE FROM positions WHERE context IN (SELECT context FROM positions GROUP BY context HAVING MAX(timestamp) < ?)',
+        'DELETE FROM positions WHERE context IN (SELECT context FROM positions GROUP BY context HAVING MAX(timestamp) < ?) AND context IS NOT ?',
       )
-      .run(cutoff)
+      .run(cutoff, keep ?? null)
+    // The write-throttle map is keyed by context and nothing else clears it, so
+    // without this every vessel that ever passed leaves an entry behind — an
+    // unbounded map on a server watching a busy harbour.
+    for (const { context } of dropped) {
+      this.lastStored.delete(context)
+    }
+    // Scoped to `keep` when there is one: this retention is configured as "days
+    // of the own vessel's track to keep", and applying it to every context
+    // would truncate an AIS vessel's track on a setting that does not name it.
+    // Unscoped without a `keep`, which is how a standalone store behaves.
     if (this.retention > 0) {
-      this.db.prepare('DELETE FROM positions WHERE timestamp < ?').run(Date.now() - this.retention)
+      const oldest = Date.now() - this.retention
+      if (keep === undefined) {
+        this.db.prepare('DELETE FROM positions WHERE timestamp < ?').run(oldest)
+      } else {
+        this.db.prepare('DELETE FROM positions WHERE timestamp < ? AND context IS ?').run(oldest, keep)
+      }
     }
   }
 

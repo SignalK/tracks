@@ -2,21 +2,17 @@
 
 Signal K server plugin that accumulates vessel positions into tracks and implements the track API.
 
-Positions are accumulated into a per-vessel sliding window using a configured time resolution. The
-**Where tracks come from after a restart** setting chooses what happens to them:
+Positions are recorded to a SQLite file in the plugin's data directory, at a configured time
+resolution, so tracks survive a restart with no other plugin required. The plugin is enabled on
+install and needs no configuration to start recording.
 
-| Setting   | Behaviour                                                                                                                                                  |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `history` | _(default)_ Held in memory, and the own vessel's track is refilled on startup from a history provider such as `signalk-to-influxdb2` or `signalk-questdb`. |
-| `sqlite`  | Recorded to a database file in the plugin's data directory, so every vessel's track survives a restart with no other plugin required.                      |
-| `memory`  | Held in memory only; tracks start empty after a restart.                                                                                                   |
+| Setting                                        | Behaviour                                                                      |
+| ---------------------------------------------- | ------------------------------------------------------------------------------ |
+| Track resolution                               | Minimum spacing between recorded positions.                                    |
+| Days of the own vessel's track to keep         | Trims only the own vessel. 0 keeps everything; it is never dropped for idling. |
+| Days to keep another vessel after its last fix | Drops a vessel that has gone quiet. 0 keeps every vessel indefinitely.         |
 
-All three work with no other plugin installed — with `history` and no provider present, tracks simply
-build up from live data. `sqlite` also takes a retention setting, in days, for how long to keep
-positions.
-
-This replaces the earlier `bootstrapFromHistory` checkbox. Existing configurations keep working:
-the setting is still read, with `false` mapping to `memory` and anything else to `history`.
+The plugin's configuration page shows the current defaults, and is the authority on them.
 
 The package also exports a client side `TrackAccumulator` class that manages the track for a single
 vessel, exposing the result as `Observable<LatLngTuple[]>`.
@@ -28,9 +24,13 @@ With a history provider installed — [signalk-questdb](https://www.npmjs.com/pa
 both it and the plugin's own store: the provider is the finer record for as long as its retention
 reaches, and the store is what remains of everything older or of any period the provider missed.
 
-Nothing needs configuring for this, and the plugin works exactly as before with no provider
-installed. See [docs/history-and-storage.md](docs/history-and-storage.md) for what that means in
-practice.
+Nothing needs configuring for this, and the plugin works fully with no provider installed. Its own
+store is a SQLite file in the plugin's data directory, so tracks survive a restart on their own.
+See [docs/history-and-storage.md](docs/history-and-storage.md) for what that means in practice.
+
+The own vessel is kept indefinitely by default. Other vessels are kept for 30 days after their last
+fix — a harbour puts hundreds of AIS targets past a receiver in a day, and keeping every one of them
+forever is rarely what anybody wants. Both are settings.
 
 ## Glitch filtering
 
@@ -45,17 +45,18 @@ vessel, and glitches usually miss it by orders of magnitude rather than by a lit
 speed rather than distance, so a track resuming after a long gap — a passage with the plugin
 stopped, or an AIS target reappearing — is not filtered. Set it to 0 to record everything.
 
-The same check runs over positions loaded from a history provider at startup, since those carry
-the same glitches.
+Positions a history provider supplies are not filtered here — they are that provider's record, and
+it is the one that decides what to keep.
 
 ## Pausing while not under way
 
 A boat on a mooring for the winter emits a position every second and travels nowhere. Setting
 **Pause recording while navigation.state is one of** stops those months costing any rows.
 
-Off by default, and it needs `navigation.state` to be set — by
-[signalk-autostate](https://github.com/meri-imperiumi/signalk-autostate) or by hand. A vessel
-that reports no state is always recorded, so nothing changes for an install that has not opted in.
+On by default for `moored`, `not-under-way` and `aground`. It needs `navigation.state` to be set —
+by [signalk-autostate](https://github.com/meri-imperiumi/signalk-autostate) or by hand — and a
+vessel that reports no state is always recorded, so an install with no state source behaves as
+though this were off. Clear the list to record regardless of state.
 
 Two limits are deliberate. **`anchored` is offered but rarely wanted**: an anchor alarm watches
 exactly the track a vessel makes while swinging on its rode, so pausing there would break it.
@@ -151,7 +152,7 @@ the own vessel. Asking for `self` resolves the alias, so the response tells you 
 
 `/signalk/v1/api/tracks`
 
-_If `maxRadius` is specified only vessels with last track position within this distance are returned._
+_Every vessel the plugin holds a track for. Add `?radius=` to narrow it to vessels near your own._
 
 _Each entry carries `isSelf`, so the own vessel can be told from an AIS target without
 string-matching the context against the server's self identity._
@@ -166,7 +167,7 @@ without `times` each vessel keeps its single unsegmented line._
 
 `/signalk/v1/api/tracks?radius=50000`
 
-_Note: This value overrides the `maxRadius` value specified in plugin configuration._
+_Distance from the own vessel's current position, matched against each track's **last** position — "which vessels are near me now". The v2 Track API asks a different question and matches any position in the window._
 
 ---
 
@@ -203,10 +204,10 @@ npm run format     # prettier --write
 Signal K server against it and feeds positions as deltas — so it covers plugin loading, route
 mounting and the delta path, none of which the unit suite can. It needs a built server checkout;
 set `SIGNALK_SERVER_DIR` if yours is not at `~/dev/xxx_signalk-server`. A second tier installs a
-real history provider (signalk-questdb) into that server and exercises the startup bootstrap
-through it; it skips itself if no QuestDB is reachable at `QUESTDB_URL`. Neither tier runs in CI.
+real history provider (signalk-questdb) into that server and exercises the reconciliation through
+it; it skips itself if no QuestDB is reachable at `QUESTDB_URL`. Neither tier runs in CI.
 
 The package is ESM only and targets Node >= 22.5.0, the release that added `node:sqlite`. ESM alone
 would only need 20.19, the first release in which the Signal K server's `require()`-based plugin
-loader can load an ES module, but the sqlite track source raises the floor. The server itself
+loader can load an ES module, but recording to SQLite raises the floor. The server itself
 requires Node >= 22, so this rules out nothing that could have run the plugin anyway.

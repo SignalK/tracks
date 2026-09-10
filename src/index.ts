@@ -16,7 +16,6 @@
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
 import { join } from 'node:path'
-import { Tracks as Tracks_ } from './tracks.js'
 import { createTrackProvider } from './trackProvider.js'
 import type { TrackApi } from './trackApi.js'
 import { SqliteTrackStore } from './sqliteStore.js'
@@ -129,6 +128,8 @@ interface App {
 
 interface Plugin {
   start: (c: TracksPluginConfig) => void
+  /** Enable on install, without waiting for a visit to the plugin config page. */
+  enabledByDefault: boolean
   stop: () => void
   signalKApiRoutes: (r: Router) => Router
   id: string
@@ -145,29 +146,12 @@ interface Plugin {
   getTracks: () => TrackStore | undefined
 }
 
-/**
- * Where tracks come from when the server starts.
- *
- * - `memory`: start empty, accumulate from the position bus only.
- * - `history`: refill from a History provider at startup, then accumulate.
- * - `sqlite`: persist to disk, so a restart resumes from what was recorded.
- *
- * One setting rather than a boolean per source: they are alternatives, and as
- * independent booleans a user could enable two and have the same positions
- * loaded twice.
- */
-export type TrackSource = 'memory' | 'history' | 'sqlite'
-
 interface TracksPluginConfig {
   resolution?: number
-  pointsToKeep?: number
-  maxAge?: number
-  maxRadius?: number
-  source?: TrackSource
-  /** @deprecated superseded by `source`; still honoured for existing configs. */
-  bootstrapFromHistory?: boolean
-  /** Days of history to keep when `source` is `sqlite`. 0 keeps everything. */
+  /** Days of the own vessel's track to keep. 0 keeps everything. */
   retentionDays?: number
+  /** Days another vessel is kept after its last fix. 0 keeps every vessel. */
+  aisRetentionDays?: number
   /** Minutes without a fix that start a new track segment. 0 disables. */
   segmentGapMinutes?: number
   /** Speed above which a position is treated as a glitch. 0 disables. */
@@ -176,28 +160,17 @@ interface TracksPluginConfig {
   pauseWhenState?: string[]
 }
 
-/**
- * Resolve the effective source, honouring the setting this replaced.
- *
- * `bootstrapFromHistory` shipped as a boolean defaulting to true, so an
- * installed plugin has it saved in its config either way. Reading `source`
- * first and only then falling back keeps those installs working: an explicit
- * `false` still means "do not touch the History API", and everything else
- * lands on the old default of `history`.
- */
-export const resolveSource = (config: TracksPluginConfig): TrackSource => {
-  if (config.source) {
-    return config.source
-  }
-  return config.bootstrapFromHistory === false ? 'memory' : 'history'
-}
-
 const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
 
 const DEFAULT_RESOLUTION = 60000
-const DEFAULT_POINTS_TO_KEEP = 60 * 2 // 2 hours with default resolution
-const DEFAULT_MAX_AGE = 60 * 10 // ten minutes
-const DEFAULT_MAX_RADIUS = 50 * 1000 //50 kilometers
+// How long a vessel other than the own one is kept after its last fix. The own
+// vessel is never dropped — see TrackStore.prune. A month is long enough that a
+// passage last week is still there to compare against, and short enough that a
+// season in a busy harbour does not accumulate every target that ever passed.
+const DEFAULT_AIS_RETENTION_DAYS = 30
+
+// A vessel that has aged out is not urgent, so this need not be frequent.
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000
 // Off by default. Segmenting changes the shape of every response, and measured
 // against real AIS traffic a 5-minute rule split 61 of 879 gaps that were just
 // a slow-updating target rather than a stop. Opt in, and pick a threshold that
@@ -209,10 +182,6 @@ const DEFAULT_SEGMENT_GAP_MINUTES = 0
 // plugin page after enabling it.
 const SOURCE_STATUS_INTERVAL_MS = 30000
 
-// Bootstrap retry configuration:
-// First attempt after 5s (sufficient for warm restarts where InfluxDB is already running).
-// Subsequent attempts every 15s, up to 18 total (~260s window), covering cold boot scenarios
-// where InfluxDB may take 2+ minutes to accept connections after systemd reports it active.
 /**
  * How long a history provider gets to answer a query before the store answers
  * alone.
@@ -399,7 +368,6 @@ export default function ThePlugin(app: App): Plugin {
    * own.
    */
   let storeResolution = DEFAULT_RESOLUTION
-  let defaultMaxRadius: number | undefined = undefined
   const sourceWatch = new SourceWatch()
   let glitchFilter = new GlitchFilter({ maxSpeedKnots: DEFAULT_MAX_SPEED_KNOTS })
   let stateGate = new StateGate(app.selfContext, DEFAULT_PAUSE_STATES)
@@ -427,9 +395,7 @@ export default function ThePlugin(app: App): Plugin {
 
   return {
     start: function (config: TracksPluginConfig) {
-      const { resolution, pointsToKeep, maxAge, maxRadius } = config
-      defaultMaxRadius = toNumber(maxRadius)
-      const source = resolveSource(config)
+      const { resolution } = config
       storeResolution = toNumber(config.resolution) ?? DEFAULT_RESOLUTION
       const segmentGapMinutes = toNumber(config.segmentGapMinutes) ?? DEFAULT_SEGMENT_GAP_MINUTES
       segmentGap = segmentGapMinutes > 0 ? segmentGapMinutes * 60 * 1000 : 0
@@ -445,34 +411,36 @@ export default function ThePlugin(app: App): Plugin {
         Array.isArray(config.pauseWhenState) ? config.pauseWhenState : DEFAULT_PAUSE_STATES,
       )
 
-      // getDataDirPath is what makes the file the server's to manage (backed up
-      // and removed with the plugin). Without it there is nowhere safe to
-      // write, so fall back to memory rather than guessing at a path.
-      const dataDir = source === 'sqlite' ? app.getDataDirPath?.() : undefined
-      if (source === 'sqlite' && !dataDir) {
-        app.error('source is sqlite but this server provides no plugin data directory; using memory instead')
+      // getDataDirPath is what makes the file the server's to manage: backed up
+      // and removed with the plugin. Every server that can load this plugin
+      // provides it, so there is no in-memory fallback — a track recorder that
+      // forgets everything on restart is not what anyone installs.
+      const dataDir = app.getDataDirPath?.()
+      if (!dataDir) {
+        app.error('This server provides no plugin data directory, so tracks cannot be recorded.')
+        return
       }
 
-      // Always a fresh store, as before this setting existed: a restart must
-      // not keep an accumulator built with a resolution the user has since
-      // changed, and for sqlite the previous handle has been closed by stop().
-      tracks = dataDir
-        ? new SqliteTrackStore(
-            {
-              file: join(dataDir, 'tracks.db'),
-              resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
-              retention: (toNumber(config.retentionDays) ?? 0) * 24 * 60 * 60 * 1000,
-              segmentGap,
-            },
-            app.debug,
-          )
-        : new Tracks_(
-            {
-              resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
-              pointsToKeep: toNumber(pointsToKeep) ?? DEFAULT_POINTS_TO_KEEP,
-            },
-            app.debug,
-          )
+      // Always a fresh store: stop() has closed the previous handle, and a
+      // restart must not keep one built with a resolution since changed.
+      //
+      // Guarded because opening a database touches the filesystem: a read-only
+      // or full data directory throws here, and an uncaught throw out of
+      // start() takes down more than this plugin.
+      try {
+        tracks = new SqliteTrackStore(
+          {
+            file: join(dataDir, 'tracks.db'),
+            resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
+            retention: (toNumber(config.retentionDays) ?? 0) * 24 * 60 * 60 * 1000,
+            segmentGap,
+          },
+          app.debug,
+        )
+      } catch (err) {
+        app.error(`Could not open the track database in ${dataDir}: ${errorDetail(err)}`)
+        return
+      }
       onStop.push(
         app.streambundle.getBus('navigation.position').onValue((update: ContextPosition): void => {
           if (!update.value || update.value.latitude == null || update.value.longitude == null) return
@@ -496,9 +464,18 @@ export default function ThePlugin(app: App): Plugin {
           tracks?.newPosition(update.context, position, timestamp)
         }),
       )
-      const theMaxAge = toNumber(maxAge) ?? DEFAULT_MAX_AGE
-
-      const pruneInterval = setInterval(() => tracks?.prune(theMaxAge * 1000), (theMaxAge * 1000) / 2)
+      // Days rather than the seconds the old maxAge used: this is about how long
+      // a passing vessel stays interesting, not about clearing a live display.
+      // 0 keeps every vessel forever.
+      const aisRetentionMs = (toNumber(config.aisRetentionDays) ?? DEFAULT_AIS_RETENTION_DAYS) * 24 * 60 * 60 * 1000
+      // prune() does two things: drop whole contexts that have gone quiet, and
+      // apply the own vessel's row-level retention. They are configured
+      // separately, so it runs whenever either is set — gating the call on the
+      // AIS setting alone meant `aisRetentionDays: 0` silently disabled the
+      // own vessel's retention too. A maxAge of Infinity ages nothing out.
+      const pruneInterval = setInterval(() => {
+        tracks?.prune(aisRetentionMs > 0 ? aisRetentionMs : Infinity, app.selfContext)
+      }, PRUNE_INTERVAL_MS)
       onStop.push(() => {
         clearInterval(pruneInterval)
       })
@@ -575,14 +552,20 @@ export default function ThePlugin(app: App): Plugin {
       // Release the file handle a sqlite store holds, so a plugin restart does
       // not leak it and the WAL gets checkpointed.
       //
-      // The store itself stays in place: stop() leaves the routes mounted and
-      // keeps serving what was already accumulated, which routes.test.ts pins.
-      // Only a store that needs closing is affected, and it is replaced
-      // wholesale on the next start().
+      // A stopped plugin serves nothing: closing the database releases the file
+      // handle and checkpoints the WAL, so the routes answer 404 until the next
+      // start() builds a fresh store. They stay mounted and degrade rather than
+      // throw, because the server calls stop() on a config save.
       try {
         tracks?.close?.()
       } catch (err) {
         app.error(err)
+      } finally {
+        // Cleared even when close() throws: a closed store is worse than none.
+        // The next start() can fail — an unusable data directory, say — and
+        // without this getTracks() and the registered provider keep handing out
+        // a handle that rejects every query with "database is closed".
+        tracks = undefined
       }
     },
 
@@ -676,7 +659,7 @@ export default function ThePlugin(app: App): Plugin {
           res.json({ message: err instanceof TimeWindowError ? err.message : 'Invalid query parameters' })
           return
         }
-        const params = validateParameters(req.query, defaultMaxRadius)
+        const params = validateParameters(req.query, undefined)
         const selfPosition = getVesselPosition()
 
         // Two paths on purpose. Without `times` the response keeps its
@@ -729,47 +712,34 @@ export default function ThePlugin(app: App): Plugin {
 
     id: 'tracks',
     name: 'Tracks',
-    description: 'Accumulate tracks in memory for the track API implementation',
+    // On by default: a track recorder that records nothing until someone finds
+    // and enables it loses exactly the passage the user wanted kept.
+    enabledByDefault: true,
+    description: 'Record vessel tracks to SQLite and serve them through the track API',
     schema: {
       type: 'object',
       properties: {
         resolution: {
           type: 'integer',
+          minimum: 0,
           title: 'Track resolution (milliseconds)',
           default: DEFAULT_RESOLUTION,
         },
-        pointsToKeep: {
-          type: 'integer',
-          title: 'Points to keep',
-          description: 'How many trackpoints to keep for each track',
-          default: DEFAULT_POINTS_TO_KEEP,
-        },
-        maxAge: {
-          type: 'integer',
-          title: 'Maximum idle time (seconds)',
-          description: 'Tracks with no updates longer than this are removed',
-          default: DEFAULT_MAX_AGE,
-        },
-        maxRadius: {
-          type: 'integer',
-          title: 'Maximum Radius (meters) ',
-          description: 'Include only vessels with position within this range. 0= all vessels',
-          default: DEFAULT_MAX_RADIUS,
-        },
-        source: {
-          type: 'string',
-          title: 'Where tracks come from after a restart',
-          description:
-            'In memory only: start empty and accumulate from live positions. History API: refill on startup from a history provider such as signalk-to-influxdb2 or signalk-questdb. SQLite: record positions to a database file so they survive a restart with no other plugin required.',
-          enum: ['memory', 'history', 'sqlite'],
-          enumNames: ['In memory only', 'Load from the History API on startup', 'Record to a SQLite database'],
-          default: 'history',
-        },
         retentionDays: {
           type: 'integer',
-          title: 'Days of track history to keep (SQLite only)',
-          description: 'Positions older than this are deleted. 0 keeps everything.',
+          minimum: 0,
+          title: "Days of the own vessel's track to keep",
+          description:
+            'Positions older than this are deleted. 0, the default, keeps everything — a track is worth more the longer it goes back, and a year of one vessel at the default resolution is a few megabytes.',
           default: 0,
+        },
+        aisRetentionDays: {
+          type: 'integer',
+          minimum: 0,
+          title: 'Days to keep another vessel after its last fix',
+          description:
+            'The own vessel is never removed. Other vessels are: a busy harbour puts hundreds of AIS targets past the receiver in a day, and keeping all of them forever is rarely what anyone wants. 0 keeps every vessel indefinitely.',
+          default: DEFAULT_AIS_RETENTION_DAYS,
         },
         segmentGapMinutes: {
           type: 'integer',
