@@ -120,6 +120,7 @@ describe('toIsoTimes', () => {
 // can decorate it however it likes -- which is why it is separate from
 // trackLabel below.
 describe('contextName', () => {
+  const SELF = 'vessels.urn:mrn:imo:mmsi:211111111'
   const OTHER = 'vessels.urn:mrn:imo:mmsi:244813000'
   const none = () => undefined
 
@@ -127,8 +128,10 @@ describe('contextName', () => {
     expect(contextName(OTHER, (p: string) => (p === `${OTHER}.name` ? 'Ariadne' : undefined))).toBe('Ariadne')
   })
 
+  // trackLabel turns the own vessel into `Own Ship`; contextName must not,
+  // because the v2 field names the vessel rather than the track.
   it('does not special-case the own vessel', () => {
-    expect(contextName(OTHER, (p: string) => (p === `${OTHER}.name` ? 'Ariadne' : undefined))).toBe('Ariadne')
+    expect(contextName(SELF, (p: string) => (p === `${SELF}.name` ? 'Ariadne' : undefined))).toBe('Ariadne')
   })
 
   it('accepts the {value} wrapper as well as a bare string', () => {
