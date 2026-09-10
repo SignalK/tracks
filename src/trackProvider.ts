@@ -1,5 +1,5 @@
 import { Temporal } from '@js-temporal/polyfill'
-import { simplify } from './simplify.js'
+import { M_PER_DEG, simplify } from './simplify.js'
 import { segment, thinToBudget } from './timeWindow.js'
 import type { TrackStore } from './store.js'
 import type { TrackApi, TrackFeature, TracksRequest, TracksResponse } from './trackApi.js'
@@ -282,7 +282,6 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
         const chosenEpsilon = chooseEpsilon(points, query)
         const segments = segment(points, gap).map((s) => (chosenEpsilon === undefined ? s : simplify(s, chosenEpsilon)))
         const shaped = segments.flat()
-        const appliedEpsilon = chosenEpsilon
         const bbox = boundsOf(shaped)
         const name = deps.contextName(context)
         features.push({
@@ -314,7 +313,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
             // a track with no point further than epsilon from its own line is
             // already as simple as it gets — so this reports what was applied
             // rather than implying the geometry differs from the stored one.
-            ...(appliedEpsilon === undefined ? {} : { epsilon: appliedEpsilon }),
+            ...(chosenEpsilon === undefined ? {} : { epsilon: chosenEpsilon }),
             ...(query.times ? { coordTimes: segments.map(toIsoTimes) } : {}),
           },
         })
@@ -358,6 +357,17 @@ function chooseEpsilon(points: TimedPosition[], query: TracksRequest): number | 
 }
 
 /**
+ * How much of a track's own extent the automatic tolerance may deviate by.
+ *
+ * One part in a thousand. Provisional while the v2 API is designed in
+ * SignalK/signalk-server#2504: it is only a provider-chosen default for
+ * `simplify` without an explicit epsilon, and a client that calibrates against
+ * the exact ratio rather than reading the reported `epsilon` back would make
+ * it expensive to change.
+ */
+const AUTO_EPSILON_DIVISOR = 1000
+
+/**
  * A tolerance scaled to how much ground a track covers.
  *
  * One part in a thousand of the track's diagonal: enough to drop the jitter of
@@ -372,14 +382,14 @@ function autoEpsilon(points: TimedPosition[]): number | undefined {
   }
   const [west, south, east, north] = bounds
   const midLat = (south + north) / 2
-  const height = (north - south) * 111_320
+  const height = (north - south) * M_PER_DEG
   // boundsOf writes an antimeridian-crossing box as west > east (RFC 7946), so
   // a plain subtraction turns a tenth of a degree into -359.8 and the derived
   // tolerance into something that would erase the whole track.
   const lngSpan = east >= west ? east - west : east + 360 - west
-  const width = lngSpan * 111_320 * Math.cos((midLat * Math.PI) / 180)
+  const width = lngSpan * M_PER_DEG * Math.cos((midLat * Math.PI) / 180)
   const diagonal = Math.hypot(width, height)
-  return diagonal > 0 ? diagonal / 1000 : undefined
+  return diagonal > 0 ? diagonal / AUTO_EPSILON_DIVISOR : undefined
 }
 
 /** v2 accepts the `self` alias; the store keys on the qualified context. */

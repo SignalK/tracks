@@ -28,7 +28,7 @@ export type TrackBoundingBox = [number, number, number, number]
  * the one asked for, since a budget widens the spacing and `simplify` without
  * an epsilon leaves the tolerance to the provider.
  *
- * Co-recorded properties are tracked separately; see SignalK/tracks.
+ * Co-recorded properties are not implemented yet.
  */
 export interface TracksRequest {
   contexts?: string[]

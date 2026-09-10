@@ -983,6 +983,26 @@ describe('simplify in v2', () => {
     }
   })
 
+  // ...but `simplify: true` alongside one still means simplify. The unusable
+  // tolerance is ignored, not the request.
+  it('falls back to the automatic tolerance when a non-positive epsilon comes with simplify', async () => {
+    const h = createHarness()
+    const leg: [number, number][] = Array.from(
+      { length: 200 },
+      (_, i) => [60 + i * 0.001 + (i % 2 ? 0.000005 : 0), 24 + i * 0.002] as [number, number],
+    )
+    seed(h, leg)
+    const auto = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
+
+    for (const epsilon of [0, -1]) {
+      const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true, epsilon })
+
+      expect(res.features[0]!.properties.epsilon).toBe(auto.features[0]!.properties.epsilon)
+      expect(res.features[0]!.properties.pointCount).toBe(auto.features[0]!.properties.pointCount)
+      expect(res.features[0]!.properties.pointCount).toBeLessThan(200)
+    }
+  })
+
   // A tolerance that changes nothing is still a tolerance that was applied:
   // the field reports what simplification ran with, not that the geometry
   // differs from what is stored.

@@ -3,8 +3,14 @@ import type { TimedPosition } from './types.js'
 const LAT = 0
 const LNG = 1
 
-/** Metres per degree of latitude. Good to ~0.5% over the WGS84 ellipsoid. */
-const M_PER_DEG = 111_320
+/**
+ * Metres per degree of latitude. Good to ~0.5% over the WGS84 ellipsoid.
+ *
+ * Exported because the provider derives its automatic tolerance from the same
+ * figure: "one part in a thousand of the diagonal" only holds while both use
+ * one metres-per-degree value.
+ */
+export const M_PER_DEG = 111_320
 
 /**
  * Douglas-Peucker simplification of a recorded track.
@@ -107,12 +113,21 @@ function perpendicularDistance(p: TimedPosition, a: TimedPosition, b: TimedPosit
  * monotonic in epsilon — a larger tolerance never keeps more points — so this
  * converges, and the search is bounded by iteration count rather than by
  * reaching an exact hit that may not exist.
+ *
+ * Not reachable through the v2 API, which takes a tolerance rather than a
+ * budget. It is here for the track-management webapp's "convert to route",
+ * where the user asks for a usable number of waypoints and is told the
+ * accuracy that produced them.
  */
 export function simplifyToBudget(
   points: TimedPosition[],
   target: number,
 ): { points: TimedPosition[]; epsilon: number } {
-  if (points.length <= Math.max(2, target)) {
+  // Two endpoints always survive, so a smaller budget is unmeetable: the
+  // search would grow its bound to the 1e9 ceiling and return the endpoints
+  // anyway, having reported an absurd tolerance for doing so.
+  const budget = Math.max(2, target)
+  if (points.length <= budget) {
     return { points, epsilon: 0 }
   }
   let lo = 0
@@ -120,7 +135,7 @@ export function simplifyToBudget(
   // Grow the upper bound until it is loose enough to meet the budget. A track
   // can span an ocean, so a fixed ceiling would either fail on large tracks or
   // waste iterations on small ones.
-  while (simplify(points, hi).length > target && hi < 1e9) {
+  while (simplify(points, hi).length > budget && hi < 1e9) {
     hi *= 4
   }
   let best = simplify(points, hi)
@@ -128,7 +143,7 @@ export function simplifyToBudget(
   for (let i = 0; i < 40 && hi - lo > 0.01; i++) {
     const mid = (lo + hi) / 2
     const candidate = simplify(points, mid)
-    if (candidate.length > target) {
+    if (candidate.length > budget) {
       lo = mid
     } else {
       hi = mid
