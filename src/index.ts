@@ -37,7 +37,7 @@ import type {
   TimedTrackCollection,
   TrackCollection,
 } from './types.js'
-import { historyRowPosition, resolveContext, toIsoTimes, validateParameters } from './utils.js'
+import { historyRowPosition, resolveContext, toIsoTimes, validateParameters, trackLabel, contextName } from './utils.js'
 
 export interface ContextPosition {
   context: Context
@@ -70,6 +70,14 @@ interface AllTracksResult {
      * context. Getting it wrong draws someone else's track as your own.
      */
     isSelf: boolean
+    /**
+     * A human label for the track, as a chart plotter would show it.
+     *
+     * `Own Ship` or `AIS <shipname>`, falling back to the MMSI. A client
+     * listing tracks otherwise has to render a `urn:mrn:` context, and no
+     * user recognises their own boat that way.
+     */
+    name: string
   }
 }
 
@@ -104,6 +112,14 @@ interface App {
     }
   }
   getSelfPath: (path: string) => unknown
+  /**
+   * Read any path in the full data model, including other vessels'.
+   *
+   * `getSelfPath` only reaches the own vessel, so naming an AIS track needs
+   * this. Optional: absent on older servers, where tracks fall back to the
+   * MMSI parsed out of the context.
+   */
+  getPath?: (path: string) => unknown
   selfContext: string
   /** Shown against the plugin in the server's dashboard. Absent on older servers. */
   setPluginStatus?: (msg: string) => void
@@ -516,6 +532,7 @@ export default function ThePlugin(app: App): Plugin {
           store: () => tracks,
           selfContext: () => app.selfContext,
           segmentGap: () => segmentGap,
+          contextName: (context: string) => contextName(context, (path: string) => app.getPath?.(path)),
           // The same reconciliation the v1 routes have done since #73. Without
           // it the plugin answers differently depending on which route a client
           // uses: the store alone through v2, the store enriched by a history
@@ -570,6 +587,11 @@ export default function ThePlugin(app: App): Plugin {
     },
 
     signalKApiRoutes: function (router: Router) {
+      // Resolved per request rather than cached: an AIS target's static report
+      // can arrive long after its first position, so a track named from the
+      // MMSI early on picks up the real name as soon as the server has it.
+      const nameOf = (context: string) => trackLabel(context, app.selfContext, (path: string) => app.getPath?.(path))
+
       const singleTrackHandler =
         (contextOf: (req: Request) => string): RequestHandler =>
         (req: Request, res: Response) => {
@@ -625,6 +647,7 @@ export default function ThePlugin(app: App): Plugin {
                 ...(query.times ? { times: segments.map(toIsoTimes) } : {}),
                 context,
                 isSelf: context === app.selfContext,
+                name: nameOf(context),
               })
             })
             .catch(() => {
@@ -676,6 +699,7 @@ export default function ThePlugin(app: App): Plugin {
                   coordinates: segments.map((s) => s.map(({ position }) => toLngLat(position))),
                   times: segments.map(toIsoTimes),
                   isSelf: context === app.selfContext,
+                  name: nameOf(context),
                 }
                 return acc
               }, {}),
@@ -686,6 +710,7 @@ export default function ThePlugin(app: App): Plugin {
                   type: 'MultiLineString',
                   coordinates: [track.map(toLngLat)],
                   isSelf: context === app.selfContext,
+                  name: nameOf(context),
                 }
                 return acc
               }, {}),

@@ -133,7 +133,8 @@ so thinning never shortens the track._
   ],
   "times": [["2026-08-14T09:00:00.000Z", "2026-08-14T09:01:00.000Z"]],
   "context": "vessels.urn:mrn:imo:mmsi:123456789",
-  "isSelf": true
+  "isSelf": true,
+  "name": "Own Ship"
 }
 ```
 
@@ -146,6 +147,11 @@ _`context` is the fully qualified context the track belongs to, and `isSelf` say
 the own vessel. Asking for `self` resolves the alias, so the response tells you which vessel
 `self` actually is._
 
+_`name` is a display label, the way a chart plotter shows one: `Own Ship`, or `AIS <shipname>`
+falling back to `AIS <mmsi>` and finally the raw context. It is for putting in a list — the v2
+Track API's `contextName` carries the undecorated vessel name instead, and is absent for a
+vessel that has not sent one._
+
 ---
 
 **Retrieve tracks for all vessels:**
@@ -155,7 +161,7 @@ the own vessel. Asking for `self` resolves the alias, so the response tells you 
 _Every vessel the plugin holds a track for. Add `?radius=` to narrow it to vessels near your own._
 
 _Each entry carries `isSelf`, so the own vessel can be told from an AIS target without
-string-matching the context against the server's self identity._
+string-matching the context against the server's self-identity, and `name` for display._
 
 _`?times` works here too, adding a `times` array to every vessel's entry. Note that asking for
 times also segments each track on the gap threshold, so `coordinates` and `times` line up;

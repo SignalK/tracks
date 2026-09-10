@@ -70,6 +70,12 @@ export interface HarnessOptions {
   /** Initial navigation.state for the own vessel. */
   selfState?: string
   /**
+   * Data-model entries other vessels' paths resolve to, keyed by full path
+   * (e.g. `vessels.urn:...:244813000.name`). Omit to stand in for an older
+   * server with no `getPath`, where track naming falls back to the MMSI.
+   */
+  paths?: Record<string, unknown>
+  /**
    * Stand in for a server without the v2 Track API, to check the plugin still
    * starts when `registerTrackApiProvider` is absent.
    */
@@ -98,6 +104,7 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     setPluginStatus: (msg: string) => statuses.push(msg),
     selfContext,
     getDataDirPath: () => dataDir,
+    ...(options.paths === undefined ? {} : { getPath: (path: string): unknown => options.paths?.[path] }),
     ...(options.withoutTrackApi
       ? {}
       : {

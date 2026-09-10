@@ -740,3 +740,47 @@ describe('getTrackContexts', () => {
     }
   })
 })
+
+// The v2 contract declares contextName: "Name of the vessel, aircraft or other
+// context, where known. Not a name for the track itself." So a name the server
+// knows must reach this field undecorated -- not missing, and not carrying v1's
+// `AIS `/`Own Ship` label, which names the track rather than the vessel.
+//
+// The two routes differing for an *unidentified* context is correct, not a
+// contradiction: v1 always renders something because a label has to, while v2
+// omits the field because "where known" means absent.
+describe('contextName in v2 properties', () => {
+  it('carries the bare vessel name, not the v1 display label', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      paths: { [`${OTHER_CONTEXT}.name`]: 'Ariadne' },
+    })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await providerOf(h).getTracks({ contexts: [OTHER_CONTEXT] })
+
+    expect(res.features[0]!.properties.contextName).toBe('Ariadne')
+  })
+
+  // v1 still labels this track `AIS 987654321` -- a label has to render
+  // something -- but the v2 field names the vessel, and an MMSI is not a name.
+  it('omits the field for a vessel whose name is not known yet', async () => {
+    const h = createHarness({ selfPosition: [60, 24] })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await providerOf(h).getTracks({ contexts: [OTHER_CONTEXT] })
+
+    expect(res.features[0]!.properties).not.toHaveProperty('contextName')
+  })
+
+  // "where known" — an absent field, not an empty string or a raw context.
+  it('omits the field entirely when nothing is known', async () => {
+    const odd = 'vessels.urn:mrn:signalk:uuid:abc'
+    const h = createHarness({ selfPosition: [60, 24] })
+    h.emit(odd, [60.2, 24.8])
+
+    const res = await providerOf(h).getTracks({ contexts: [odd] })
+
+    expect(res.features[0]!.properties).not.toHaveProperty('contextName')
+  })
+})

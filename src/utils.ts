@@ -208,3 +208,65 @@ export const historyRowPosition = (row: unknown): LatLngTuple | undefined => {
   }
   return undefined
 }
+
+/**
+ * The name of the vessel (or aircraft, or aton) a context refers to.
+ *
+ * Deliberately bare — `Ariadne`, not `AIS Ariadne` and not `Own Ship`. This is
+ * the v2 Track API's `contextName`, whose spec says "Name of the vessel,
+ * aircraft or other context, where known. Not a name for the track itself."
+ * Decoration belongs to whoever is drawing a list; see `trackLabel`.
+ *
+ * `lookup` reads the data model (`app.getPath`). Note the shape: a vessel's
+ * `name` is a bare string in the full model, not the `{value}` wrapper that
+ * `navigation.position` and friends carry, so both are accepted rather than
+ * guessed at.
+ *
+ * Resolves `name` and nothing else, matching the server's own `findContextName`
+ * (`packages/server-admin-ui/src/utils/pathKeys.ts`), which returns undefined
+ * rather than substituting an identifier. An MMSI is how a vessel is addressed,
+ * not what it is called, so it belongs in `trackLabel` where something has to
+ * render — putting it here would make "where known" untrue.
+ */
+export function contextName(context: string, lookup: (path: string) => unknown): string | undefined {
+  return unwrapString(lookup(`${context}.name`))
+}
+
+/**
+ * A display label for a track, as a chart plotter would show it.
+ *
+ * TimeZero's GPX exports label tracks `Own Ship` and `AIS <shipname>` — never a
+ * serial number — and that is what makes a list of tracks readable. A UI
+ * listing `vessels.urn:mrn:imo:mmsi:211234567` is unusable.
+ *
+ * Distinct from `contextName`: this one *is* a name for the track, so it says
+ * whose track it is and where the identity came from. Falls back to the raw
+ * context, because a label has to render something.
+ */
+export function trackLabel(
+  context: string,
+  selfContext: string | undefined,
+  lookup: (path: string) => unknown,
+): string {
+  if (context === selfContext) {
+    return 'Own Ship'
+  }
+  const identity = contextName(context, lookup) ?? unwrapString(lookup(`${context}.mmsi`)) ?? mmsiFromContext(context)
+  return identity === undefined ? context : `AIS ${identity}`
+}
+
+/** Accepts both a bare string and the `{value}` wrapper deltas arrive in. */
+function unwrapString(raw: unknown): string | undefined {
+  const value: unknown = raw && typeof raw === 'object' && 'value' in raw ? raw.value : raw
+  if (typeof value !== 'string') {
+    return undefined
+  }
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
+}
+
+/** `vessels.urn:mrn:imo:mmsi:211234567` -> `211234567`. */
+function mmsiFromContext(context: string): string | undefined {
+  const match = /urn:mrn:imo:mmsi:(\d+)$/.exec(context)
+  return match?.[1]
+}
