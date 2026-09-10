@@ -83,16 +83,35 @@ describe('simplify', () => {
     expect(simplify(leg, 10)).toHaveLength(3)
   })
 
-  // Longitudes are scaled at the segment's midpoint latitude. Scaling at its
-  // start instead shrinks an 80N-to-equator segment by cos(80), reporting a
-  // point 111 km off the line as 19 km and dropping it well inside tolerance.
-  it('measures correctly across a large latitude span', () => {
-    // The segment is the lng=0 meridian; the middle point is ~111 km east of
-    // it at the equator.
-    const spanning = [at(80, 0), at(0, 1), at(0, 0)]
+  // Longitudes are scaled at the segment's midpoint latitude, not its start:
+  // scaling a 60N-to-50N segment at 60N shrinks every longitude by cos(60)
+  // rather than cos(55), understating the deviation by about a tenth.
+  it('scales longitude at the segment midpoint', () => {
+    const leg = [at(60, 0), at(55, 1), at(50, 0)]
 
-    expect(simplify(spanning, 20_000)).toHaveLength(3)
-    expect(simplify(spanning, 200_000)).toHaveLength(2)
+    // ~63.8 km out, measured at the midpoint latitude.
+    expect(simplify(leg, 60_000)).toHaveLength(3)
+    expect(simplify(leg, 70_000)).toHaveLength(2)
+  })
+
+  // One flat longitude scale cannot hold across most of a hemisphere: the
+  // 80N-to-equator segment reads 85 km where the truth is 111 km, so a 100 km
+  // tolerance would drop a point further away than that. Such a segment means
+  // two consecutive fixes a continent apart, but the tolerance is documented
+  // in metres, so the point is kept rather than measured wrongly.
+  it('refuses to measure across an implausible latitude span', () => {
+    const hemisphere = [at(80, 0), at(0, 1), at(0, 0)]
+
+    expect(simplify(hemisphere, 100_000)).toHaveLength(3)
+  })
+
+  // ...but a span a real passage could contain is still measured. Ten degrees
+  // is ~1,100 km, where the projection agrees with a spherical cross-track
+  // calculation to 0.1%.
+  it('still simplifies across a long but plausible leg', () => {
+    const longLeg = [at(60, 0), at(55, 1), at(50, 0)]
+
+    expect(simplify(longLeg, 100_000)).toHaveLength(2)
   })
 
   // The antimeridian is written 179.9 then -179.9: a tenth of a degree apart

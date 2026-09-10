@@ -13,6 +13,15 @@ const LNG = 1
 export const M_PER_DEG = 111_320
 
 /**
+ * Latitude span, in degrees, beyond which the flat projection is not trusted.
+ *
+ * Ten degrees is ~1,100 km, where the projection still agrees with a spherical
+ * cross-track calculation to 0.1%. No leg between two recorded positions comes
+ * close; a segment that does is a data artefact rather than a passage.
+ */
+const LATITUDE_SPAN_LIMIT = 10
+
+/**
  * Douglas-Peucker simplification of a recorded track.
  *
  * Distinct from `thin()`, and the difference is the whole point: thinning
@@ -66,11 +75,26 @@ export function simplify(points: TimedPosition[], epsilon: number): TimedPositio
  * Distance in metres from `p` to the segment `a`-`b`.
  *
  * Positions are projected to a local plane with longitude scaled by
- * cos(latitude): over a track segment the error is far below the metre-scale
- * tolerances this is used with, and it avoids a great-circle computation per
- * point per recursion level.
+ * cos(latitude) at the segment's midpoint. Measured against a spherical
+ * cross-track reference the error is 0.1% for segments spanning up to ten
+ * degrees of latitude — some 1,100 km, longer than any leg between two
+ * recorded fixes — which is far below the metre-scale tolerances this runs
+ * with, and it avoids trigonometry per point per recursion level (2.9 ms for
+ * 5,550 points, and `simplifyToBudget` calls this ~40 times).
+ *
+ * One flat scale cannot hold across a segment spanning most of a hemisphere:
+ * an 80N-to-equator segment reads 85 km where the truth is 111 km. Such a
+ * segment means two consecutive fixes an ocean and a continent apart, which
+ * recorded data does not contain — but the tolerance is documented in metres,
+ * so `LATITUDE_SPAN_LIMIT` refuses to answer rather than answer wrongly.
  */
 function perpendicularDistance(p: TimedPosition, a: TimedPosition, b: TimedPosition): number {
+  // Beyond this the flat projection stops being trustworthy, so the point is
+  // kept rather than measured: keeping a point that could have gone costs a
+  // little geometry, dropping one that should have stayed loses the shape.
+  if (Math.abs(a.position[LAT] - b.position[LAT]) > LATITUDE_SPAN_LIMIT) {
+    return Infinity
+  }
   // Scale longitudes at the latitude midway along the segment, so a track near
   // the poles is not simplified as though a degree of longitude were 111 km
   // wide. Taking the *midpoint* rather than the start matters once a segment
