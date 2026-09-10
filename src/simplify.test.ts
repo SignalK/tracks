@@ -157,13 +157,27 @@ describe('simplifyToBudget', () => {
   // Every segment spans more latitude than the projection is trusted across,
   // so no tolerance can drop a point. Reporting the ceiling the search stopped
   // at would claim a billion-metre tolerance had been applied.
-  it('reports a zero tolerance when the budget cannot be met', () => {
+  it('reports a tolerance that reproduces the result when the budget cannot be met', () => {
     const wide = [at(80, 0), at(60, 1), at(40, 0), at(20, 1), at(0, 0)]
 
     const { points, epsilon } = simplifyToBudget(wide, 3)
 
-    expect(points).toEqual(wide)
-    expect(epsilon).toBe(0)
+    expect(points.length).toBeGreaterThan(3)
+    // The reported tolerance must return the same track, or a client cannot
+    // re-query for what it was just given.
+    expect(simplify(wide, epsilon)).toEqual(points)
+  })
+
+  // A track that is partly simplifiable and partly span-protected: the budget
+  // is unreachable, but some points do go, so reporting zero would name a
+  // tolerance that returns the original.
+  it('reproduces a partial result too', () => {
+    const mixed = [at(80, 0), at(60, 1), at(40, 0), at(40, 0.00001), at(40, 0.00002)]
+
+    const { points, epsilon } = simplifyToBudget(mixed, 2)
+
+    expect(points.length).toBeLessThan(mixed.length)
+    expect(simplify(mixed, epsilon)).toEqual(points)
   })
 
   it('never returns fewer than the two endpoints', () => {

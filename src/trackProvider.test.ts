@@ -1036,6 +1036,25 @@ describe('simplify in v2', () => {
     expect(res.features[0]!.properties.epsilon).toBeGreaterThan(0)
   })
 
+  // boundsOf writes a crossing box as west > east, so a plain subtraction
+  // turns a short hop across the line into a ~360-degree extent -- and a
+  // tolerance derived from that would erase the track it was meant to shape.
+  it('derives the automatic tolerance from the short way across the antimeridian', async () => {
+    const h = createHarness()
+    const crossing: [number, number][] = Array.from(
+      { length: 60 },
+      (_, i) => [10 + (i % 2 ? 0.00002 : 0), 179.97 + i * 0.001] as [number, number],
+    ).map(([lat, lng]) => [lat, lng > 180 ? lng - 360 : lng] as [number, number])
+    seed(h, crossing)
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
+
+    // The track spans ~0.06 degrees of longitude, so a hundredth of a degree
+    // of tolerance at most -- not the thousands of metres a 360-degree extent
+    // would give.
+    expect(res.features[0]!.properties.epsilon).toBeLessThan(100)
+  })
+
   it('keeps the endpoints, so from and to still bound the track', async () => {
     const h = createHarness()
     const pts = zigzag(60)

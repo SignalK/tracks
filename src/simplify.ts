@@ -164,13 +164,14 @@ export function simplifyToBudget(
   }
   let best = simplify(points, hi)
   let bestEpsilon = hi
-  // A budget the tolerance cannot reach: every remaining segment spans more
-  // latitude than the projection is trusted across, so no epsilon drops
-  // another point. Report the smallest track achievable and the tolerance that
-  // achieved it, rather than the ceiling the search happened to stop at --
-  // which would be a billion-metre tolerance that explains nothing.
+  // A budget the tolerance cannot reach: some segment spans more latitude than
+  // the projection is trusted across, so no epsilon drops another point. Fall
+  // back to the smallest tolerance that produces this same result, so the
+  // reported epsilon still reproduces what was returned -- reporting the
+  // ceiling the search stopped at would claim a billion metres was applied,
+  // and reporting zero would name a tolerance that returns the original track.
   if (best.length > budget) {
-    return { points: best, epsilon: 0 }
+    return searchDown(points, best.length)
   }
   for (let i = 0; i < 40 && hi - lo > 0.01; i++) {
     const mid = (lo + hi) / 2
@@ -197,4 +198,33 @@ export function simplifyToBudget(
  */
 function nearestLongitude(lng: number, origin: number): number {
   return lng - 360 * Math.round((lng - origin) / 360)
+}
+
+/**
+ * The smallest tolerance that still yields exactly `size` points.
+ *
+ * Used when a budget cannot be met: the caller gets the shortest track
+ * available *and* a tolerance that reproduces it, which is what lets a client
+ * re-query and receive the same geometry.
+ */
+function searchDown(points: TimedPosition[], size: number): { points: TimedPosition[]; epsilon: number } {
+  let lo = 0
+  let hi = 1
+  while (simplify(points, hi).length > size && hi < 1e9) {
+    hi *= 4
+  }
+  let best = simplify(points, hi)
+  let bestEpsilon = hi
+  for (let i = 0; i < 40 && hi - lo > 0.01; i++) {
+    const mid = (lo + hi) / 2
+    const candidate = simplify(points, mid)
+    if (candidate.length > size) {
+      lo = mid
+    } else {
+      hi = mid
+      best = candidate
+      bestEpsilon = mid
+    }
+  }
+  return { points: best, epsilon: bestEpsilon }
 }
