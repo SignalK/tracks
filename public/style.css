@@ -1,0 +1,49 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 1rem;
+}
+
+h1 {
+  font-size: 1.25rem;
+  margin: 0 0 0.25rem;
+}
+
+#status {
+  color: GrayText;
+  margin: 0 0 1rem;
+}
+
+#status[data-state='error'] {
+  color: crimson;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  border-bottom: 1px solid ButtonBorder;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+
+/* Point counts are compared down the column, so they line up on the right. */
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+tbody tr:hover {
+  background: Canvas;
+}
+
+.self {
+  font-weight: 600;
+}
