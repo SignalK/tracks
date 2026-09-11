@@ -258,6 +258,15 @@ describe('the webapp renders what the API returns', () => {
     expect(tbody.children).toHaveLength(1)
   })
 
+  it('shows the empty state when every feature is malformed', async () => {
+    const { status, table } = await render({
+      body: { type: 'FeatureCollection', features: [null, { type: 'Feature' }] },
+    })
+
+    expect(table.hidden).toBe(true)
+    expect(status.textContent).toContain('No tracks')
+  })
+
   it('survives a response that is not a FeatureCollection', async () => {
     const { status, table } = await render({ body: { unexpected: true } })
 

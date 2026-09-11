@@ -116,17 +116,19 @@ async function load() {
   // Entries without properties are skipped rather than thrown on, for the same
   // reason: one malformed feature should not blank the whole list.
   const features = Array.isArray(body?.features) ? body.features : []
-  if (features.length === 0) {
-    show('No tracks in the last 30 days.')
-    return
-  }
-
   // Newest first: the track someone came to look at is almost always the one
   // that just finished.
   const sorted = features
     .map((feature) => feature?.properties)
     .filter((properties) => properties && typeof properties.context === 'string')
     .sort((a, b) => String(b.to ?? '').localeCompare(String(a.to ?? '')))
+
+  // Checked after filtering, not before: a response of nothing but malformed
+  // features would otherwise draw an empty table reading "0 tracks".
+  if (sorted.length === 0) {
+    show('No tracks in the last 30 days.')
+    return
+  }
 
   tbody.replaceChildren(...sorted.map(row))
   table.hidden = false
