@@ -784,3 +784,301 @@ describe('contextName in v2 properties', () => {
     expect(res.features[0]!.properties).not.toHaveProperty('contextName')
   })
 })
+
+// `simplify` and `epsilon` from the v2 contract: `epsilon` is a tolerance in
+// metres and implies `simplify`, the response reports the tolerance actually
+// applied, and `simplify` alone leaves the choice to the provider.
+describe('simplify in v2', () => {
+  // A zigzag: thinning by time keeps every other point, simplification by
+  // shape keeps the corners. The two are not interchangeable.
+  const zigzag = (n: number): [number, number][] =>
+    Array.from({ length: n }, (_, i) => [60 + (i % 2 ? 0.0003 : 0), 24 + i * 0.0002] as [number, number])
+
+  const seed = (h: ReturnType<typeof createHarness>, pts: [number, number][]) => {
+    h.seedTrack(
+      SELF_CONTEXT,
+      pts,
+      pts.map((_, i) => Date.now() - (pts.length - i) * 1000),
+    )
+  }
+
+  it('leaves the geometry alone when nothing asked for simplification', async () => {
+    const h = createHarness()
+    seed(h, zigzag(60))
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT] })
+
+    expect(res.features[0]!.properties.pointCount).toBe(60)
+    expect(res.features[0]!.properties).not.toHaveProperty('epsilon')
+  })
+
+  it('honours an explicit epsilon and reports it back', async () => {
+    const h = createHarness()
+    seed(h, zigzag(60))
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100 })
+
+    expect(res.features[0]!.properties.pointCount).toBeLessThan(60)
+    expect(res.features[0]!.properties.epsilon).toBe(100)
+  })
+
+  // "Simplification tolerance in metres. Implies simplify=true."
+  it('treats epsilon as implying simplify', async () => {
+    const h = createHarness()
+    seed(h, zigzag(60))
+
+    const withFlag = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100, simplify: true })
+    const without = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100 })
+
+    expect(without).toEqual(withFlag)
+  })
+
+  // The auto tolerance is one part in a thousand of the track's extent, so the
+  // track has to actually cover ground for it to bite -- which a real one
+  // does. A long leg with jitter on it stands in for a passage.
+  it('chooses a tolerance when simplify comes without one', async () => {
+    const h = createHarness()
+    const leg: [number, number][] = Array.from(
+      { length: 200 },
+      (_, i) => [60 + i * 0.001 + (i % 2 ? 0.000005 : 0), 24 + i * 0.002] as [number, number],
+    )
+    seed(h, leg)
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
+    const props = res.features[0]!.properties
+
+    // One part in a thousand of the diagonal of the track *as seeded*, which
+    // is what the tolerance is derived from -- it cannot come from the
+    // simplified extent, since that is what the tolerance produces. Computed
+    // from the fixture rather than from props.bbox so the assertion pins the
+    // policy instead of this fixture's endpoints happening to be its extremes.
+    const lats = leg.map(([lat]) => lat)
+    const lngs = leg.map(([, lng]) => lng)
+    const south = Math.min(...lats)
+    const north = Math.max(...lats)
+    const height = (north - south) * 111_320
+    const width = (Math.max(...lngs) - Math.min(...lngs)) * 111_320 * Math.cos((((south + north) / 2) * Math.PI) / 180)
+    expect(props.epsilon).toBeCloseTo(Math.hypot(width, height) / 1000, 6)
+    expect(props.pointCount).toBeLessThan(200)
+  })
+
+  // pointCount, from/to and bbox must describe what was returned, not what was
+  // read from the store — a client drawing the bbox of an unsimplified track
+  // around a simplified one would draw the wrong box.
+  it('describes the simplified track, not the stored one', async () => {
+    const h = createHarness()
+    seed(h, zigzag(60))
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100, times: true })
+    const props = res.features[0]!.properties
+    const coords = res.features[0]!.geometry!.coordinates.flat()
+
+    expect(props.pointCount).toBe(coords.length)
+    expect(props.coordTimes!.flat()).toHaveLength(coords.length)
+  })
+
+  // The bbox must bound what came back. A fixture with an interior extremum
+  // that simplification removes tells a bbox computed from the returned track
+  // from one computed from the stored one -- the latter would draw a box the
+  // track no longer reaches into.
+  it('bounds the simplified track, not the stored one', async () => {
+    const h = createHarness()
+    // A long straight leg with one small northward blip in the middle: well
+    // inside a 500 m tolerance, so it goes, taking the maximum latitude with it.
+    const leg: [number, number][] = Array.from(
+      { length: 40 },
+      (_, i) => [60 + (i === 20 ? 0.0005 : 0), 24 + i * 0.01] as [number, number],
+    )
+    seed(h, leg)
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 500 })
+    const coords = res.features[0]!.geometry!.coordinates.flat()
+    const north = Math.max(...coords.map(([, lat]) => lat))
+
+    expect(res.features[0]!.properties.bbox![3]).toBeCloseTo(north, 10)
+    // ...and the blip really was dropped, or the assertion above is vacuous.
+    expect(north).toBeLessThan(60.0005)
+  })
+
+  // The simplifier knows nothing about time gaps. Given the whole track it
+  // sees two collinear legs as one straight line and keeps only the global
+  // endpoints -- segmenting that afterwards yields one-point segments, which
+  // are not drawable geometry. Splitting first is what keeps each leg whole.
+  it('keeps each leg when a time gap splits the track', async () => {
+    const h = createHarness({ config: { segmentGapMinutes: 10 } })
+    const base = Date.now() - 5 * 60 * 60 * 1000
+    const hours = 3 * 60 * 60 * 1000
+    h.seedTrack(
+      SELF_CONTEXT,
+      [
+        [60, 24],
+        [60, 24.01],
+        [60, 24.02],
+        [60, 24.03],
+      ],
+      [base, base + 1000, base + hours, base + hours + 1000],
+    )
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100 })
+
+    expect(res.features[0]!.geometry!.coordinates.map((seg) => seg.length)).toEqual([2, 2])
+    expect(res.features[0]!.properties.pointCount).toBe(4)
+  })
+
+  // Order matters and is not commutative. Thinning first spends the shape
+  // budget only on points that survive; simplifying first would hand the
+  // thinner a track whose corners are already the only points left, and time
+  // decimation would then drop some of those corners.
+  it('thins before simplifying when a request asks for both', async () => {
+    const h = createHarness()
+    // Corners every 10th point, so time-thinning at 5 s keeps every other
+    // point and preserves them, while the reverse order would not.
+    const leg: [number, number][] = Array.from(
+      { length: 100 },
+      (_, i) => [60 + (i % 10 === 4 ? 0.02 : 0), 24 + i * 0.002] as [number, number],
+    )
+    const t0 = Date.now() - 100 * 5000
+    h.seedTrack(
+      SELF_CONTEXT,
+      leg,
+      leg.map((_, i) => t0 + i * 5000),
+    )
+
+    const both = await providerOf(h).getTracks({
+      contexts: [SELF_CONTEXT],
+      resolution: Temporal.Duration.from({ seconds: 10 }),
+      epsilon: 50,
+    })
+    const thinnedOnly = await providerOf(h).getTracks({
+      contexts: [SELF_CONTEXT],
+      resolution: Temporal.Duration.from({ seconds: 10 }),
+    })
+
+    // Simplification ran on the thinned track, so the result is a subset of
+    // it -- never larger, and never containing a point thinning removed.
+    const thinnedCoords = new Set(thinnedOnly.features[0]!.geometry!.coordinates.flat().map((c) => c.join(',')))
+    const bothCoords = both.features[0]!.geometry!.coordinates.flat().map((c) => c.join(','))
+    expect(bothCoords.length).toBeLessThanOrEqual(thinnedCoords.size)
+    for (const c of bothCoords) {
+      expect(thinnedCoords.has(c)).toBe(true)
+    }
+    expect(both.features[0]!.properties.resolution).toBe(thinnedOnly.features[0]!.properties.resolution)
+    // A corner sits on a kept sample, so it survives both steps -- without
+    // this the subset assertions above would hold for an empty-ish result.
+    expect(bothCoords).toContain('24.008,60.02')
+  })
+
+  // The schema declares exclusiveMinimum: 0, so the server rejects these
+  // before they reach a provider; handled defensively rather than left to
+  // simplify by zero and report a tolerance that did nothing.
+  it('ignores a non-positive epsilon', async () => {
+    const h = createHarness()
+    seed(h, zigzag(60))
+
+    for (const epsilon of [0, -1]) {
+      const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon })
+
+      expect(res.features[0]!.properties.pointCount).toBe(60)
+      expect(res.features[0]!.properties).not.toHaveProperty('epsilon')
+    }
+  })
+
+  // The unusable tolerance is ignored, not the request.
+  it('falls back to the automatic tolerance when a non-positive epsilon comes with simplify', async () => {
+    const h = createHarness()
+    const leg: [number, number][] = Array.from(
+      { length: 200 },
+      (_, i) => [60 + i * 0.001 + (i % 2 ? 0.000005 : 0), 24 + i * 0.002] as [number, number],
+    )
+    seed(h, leg)
+    const auto = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
+
+    for (const epsilon of [0, -1]) {
+      const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true, epsilon })
+
+      expect(res.features[0]!.properties.epsilon).toBe(auto.features[0]!.properties.epsilon)
+      expect(res.features[0]!.properties.pointCount).toBe(auto.features[0]!.properties.pointCount)
+      expect(res.features[0]!.properties.pointCount).toBeLessThan(200)
+    }
+  })
+
+  // A tolerance that changes nothing is still a tolerance that was applied:
+  // the field reports what simplification ran with, not that the geometry
+  // differs from what is stored.
+  it('reports the tolerance even when it removed nothing', async () => {
+    const h = createHarness()
+    // Three points making a sharp corner: nothing to drop at 1 m.
+    seed(h, [
+      [60, 24],
+      [60.01, 24.005],
+      [60, 24.01],
+    ])
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 1 })
+
+    expect(res.features[0]!.properties.pointCount).toBe(3)
+    expect(res.features[0]!.properties.epsilon).toBe(1)
+  })
+
+  // A vessel at anchor covers tens of metres, so the proportional tolerance
+  // works out at centimetres -- below the noise in the fixes themselves, so
+  // every jitter point survives. The floor is what drops them.
+  it('applies the floor tolerance to a track swinging at anchor', async () => {
+    const h = createHarness()
+    // A 20 m swing with sub-metre jitter along it, as a fix on a mooring makes.
+    seed(
+      h,
+      Array.from({ length: 50 }, (_, i) => [60 + i * 0.000004, 24 + (i % 2 ? 0.000005 : 0)] as [number, number]),
+    )
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
+
+    // The jitter is well under a metre, so the floor removes it; without the
+    // floor the 0.01 m proportional tolerance would keep all 50.
+    expect(res.features[0]!.properties.pointCount).toBeLessThan(10)
+    expect(res.features[0]!.properties.epsilon).toBe(1)
+  })
+
+  it('collapses a track that never moved at all', async () => {
+    const h = createHarness()
+    seed(
+      h,
+      Array.from({ length: 50 }, () => [60, 24] as [number, number]),
+    )
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
+
+    expect(res.features[0]!.properties.pointCount).toBe(2)
+  })
+
+  // boundsOf writes a crossing box as west > east, so a plain subtraction
+  // turns a short hop across the line into a ~360-degree extent -- and a
+  // tolerance derived from that would erase the track it was meant to shape.
+  it('derives the automatic tolerance from the short way across the antimeridian', async () => {
+    const h = createHarness()
+    const crossing: [number, number][] = Array.from(
+      { length: 60 },
+      (_, i) => [10 + (i % 2 ? 0.00002 : 0), 179.97 + i * 0.001] as [number, number],
+    ).map(([lat, lng]) => [lat, lng > 180 ? lng - 360 : lng] as [number, number])
+    seed(h, crossing)
+
+    const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true })
+
+    // The track spans ~0.06 degrees of longitude, so a hundredth of a degree
+    // of tolerance at most -- not the thousands of metres a 360-degree extent
+    // would give.
+    expect(res.features[0]!.properties.epsilon).toBeLessThan(100)
+  })
+
+  it('keeps the endpoints, so from and to still bound the track', async () => {
+    const h = createHarness()
+    const pts = zigzag(60)
+    seed(h, pts)
+
+    const full = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT] })
+    const cut = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], epsilon: 100 })
+
+    expect(cut.features[0]!.properties.from).toBe(full.features[0]!.properties.from)
+    expect(cut.features[0]!.properties.to).toBe(full.features[0]!.properties.to)
+  })
+})

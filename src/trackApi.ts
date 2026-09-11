@@ -18,18 +18,16 @@ export type TrackBoundingBox = [number, number, number, number]
 /**
  * A request as the server hands it to a provider.
  *
- * Not every field is honoured here. `simplify`, `epsilon` and `properties` are
- * accepted by the API and ignored by this provider: it serves positions, and
- * has no co-recorded values to attach or geometry simplifier to run. Geometry
- * comes back unsimplified, which is a superset of what such a request asked for
- * rather than a wrong answer.
+ * Not every field is honoured here. `properties` is accepted by the API and
+ * ignored by this provider: it serves positions, and has no co-recorded values
+ * to attach. Geometry comes back without them, which is a superset of what such
+ * a request asked for rather than a wrong answer.
  *
- * `resolution` and `maxPoints` are both applied, and the response reports the
- * spacing actually used — which is not always the one asked for, since a
- * budget widens it.
- *
- * Simplification and co-recorded properties are tracked separately; see
- * SignalK/tracks.
+ * `resolution`, `maxPoints`, `simplify` and `epsilon` are all applied, and the
+ * response reports the spacing and tolerance actually used — neither is always
+ * the one asked for, since a budget widens the spacing and `simplify` without
+ * an epsilon leaves the tolerance to the provider.
+
  */
 export interface TracksRequest {
   contexts?: string[]
