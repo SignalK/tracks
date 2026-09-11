@@ -285,6 +285,36 @@ describe('the webapp renders what the API returns', () => {
     expect(tbody.children).toHaveLength(1)
   })
 
+  // A feature with a context but no pointCount would render "undefined" in
+  // the Points column, which looks like a bug in the recorder rather than a
+  // bad response.
+  it('skips a feature with no point count', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          feature({
+            context: OTHER,
+            contextName: 'Ariadne',
+            isSelf: false,
+            from: '2026-09-02T00:00:00Z',
+            to: '2026-09-02T01:00:00Z',
+          }),
+          feature({
+            context: SELF,
+            isSelf: true,
+            from: '2026-09-01T00:00:00Z',
+            to: '2026-09-01T02:00:00Z',
+            pointCount: 3,
+          }),
+        ],
+      },
+    })
+
+    expect(tbody.children).toHaveLength(1)
+    expect(tbody.children[0]!.children[0]!.textContent).toBe('Own Ship')
+  })
+
   it('shows the empty state when every feature is malformed', async () => {
     const { status, table } = await render({
       body: { type: 'FeatureCollection', features: [null, { type: 'Feature' }] },

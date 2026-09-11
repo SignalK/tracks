@@ -27,7 +27,13 @@ export default tseslint.config(
     languageOptions: {
       // projectService would otherwise look for these in tsconfig and fail.
       parserOptions: { projectService: false, project: false },
-      globals: { document: 'readonly', fetch: 'readonly', URL: 'readonly', console: 'readonly' },
+      globals: {
+        AbortSignal: 'readonly',
+        console: 'readonly',
+        document: 'readonly',
+        fetch: 'readonly',
+        URL: 'readonly',
+      },
     },
   },
   prettier,

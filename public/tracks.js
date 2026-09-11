@@ -146,7 +146,9 @@ async function load() {
   // that just finished.
   const sorted = features
     .map((feature) => feature?.properties)
-    .filter((properties) => properties && typeof properties.context === 'string')
+    .filter(
+      (properties) => properties && typeof properties.context === 'string' && Number.isFinite(properties.pointCount),
+    )
     .sort((a, b) => String(b.to ?? '').localeCompare(String(a.to ?? '')))
 
   // Checked after filtering, not before: a response of nothing but malformed
