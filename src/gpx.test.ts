@@ -233,6 +233,54 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.context).toBeUndefined()
   })
 
+  // Any other writer may hang an attribute on a structural element. Refusing
+  // to match then loses the whole track -- the worst failure for a parser
+  // whose job is tolerance about structure.
+  it.each([
+    ['trk', '<gpx><trk version="1"><name>A</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>'],
+    ['trkseg', '<gpx><trk><name>A</name><trkseg id="s1"><trkpt lat="1" lon="2"/></trkseg></trk></gpx>'],
+  ])('reads a track with a vendor attribute on <%s>', (_element, xml) => {
+    expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [1, 2], timestamp: 0 }])
+  })
+
+  it('reads a name element carrying an attribute', () => {
+    const xml = `<gpx><trk><name xml:lang="en">Ariadne</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe('Ariadne')
+  })
+
+  it('reads a time element carrying an attribute', () => {
+    const xml =
+      `<gpx><trk><name>A</name><trkseg>` +
+      `<trkpt lat="1" lon="2"><time foo="bar">2020-01-01T00:00:00Z</time></trkpt>` +
+      `</trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]?.[0]?.timestamp).toBe(Date.parse('2020-01-01T00:00:00Z'))
+  })
+
+  // GPX lets a trackpoint carry its own <extensions>. One there belongs to
+  // that point, not to the track, so a context inside it must not claim every
+  // point in the file.
+  it('ignores a context inside a trackpoint extension', () => {
+    const xml =
+      `<gpx><trk><name>A</name><trkseg>` +
+      `<trkpt lat="1" lon="2"><extensions>` +
+      `<signalk:context xmlns:signalk="https://signalk.org/specification/1.7.0/">vessels.urn:mrn:imo:mmsi:666</signalk:context>` +
+      `</extensions></trkpt>` +
+      `</trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.context).toBeUndefined()
+  })
+
+  it('still reads a context from the track-level extensions', () => {
+    const xml =
+      `<gpx><trk><name>A</name><extensions>` +
+      `<signalk:context xmlns:signalk="https://signalk.org/specification/1.7.0/">vessels.urn:mrn:imo:mmsi:1</signalk:context>` +
+      `</extensions><trkseg><trkpt lat="1" lon="2"><extensions><vendor>x</vendor></extensions></trkpt></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.context).toBe('vessels.urn:mrn:imo:mmsi:1')
+  })
+
   it('reads a self-closing trkpt and attributes in either order', () => {
     const xml = `<gpx><trk><name>A</name><trkseg><trkpt lat="1" lon="2"/><trkpt lon="4" lat="3"/></trkseg></trk></gpx>`
 

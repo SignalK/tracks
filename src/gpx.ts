@@ -100,12 +100,12 @@ const NAMESPACE = 'https://signalk.org/specification/1.7.0/'
  */
 export function fromGpx(xml: string): GpxTrack[] {
   const tracks: GpxTrack[] = []
-  for (const match of matchAll(xml, /<trk\s*>([\s\S]*?)<\/trk\s*>/g)) {
+  for (const match of matchAll(xml, /<trk(?=[\s>])[^>]*>([\s\S]*?)<\/trk\s*>/g)) {
     const body = match[1] ?? ''
-    const name = decodeXml(/<name\s*>([\s\S]*?)<\/name\s*>/.exec(body)?.[1] ?? '') || 'Track'
+    const name = decodeXml(/<name(?=[\s>])[^>]*>([\s\S]*?)<\/name\s*>/.exec(body)?.[1] ?? '') || 'Track'
     const context = signalKContext(extensionsOf(body))
     const segments: TimedPosition[][] = []
-    for (const segmentMatch of matchAll(body, /<trkseg\s*>([\s\S]*?)<\/trkseg\s*>/g)) {
+    for (const segmentMatch of matchAll(body, /<trkseg(?=[\s>])[^>]*>([\s\S]*?)<\/trkseg\s*>/g)) {
       const points = parsePoints(segmentMatch[1] ?? '')
       if (points.length > 0) {
         segments.push(points)
@@ -127,8 +127,12 @@ export function fromGpx(xml: string): GpxTrack[] {
  * `<context>` in the document assign the track to a vessel.
  */
 function extensionsOf(body: string): string {
+  // Trackpoints carry their own <extensions>, which GPX permits and which
+  // belong to that point rather than the track. Stripping them first stops a
+  // context inside one from claiming every point in the file.
+  const trackLevel = body.replace(/<trkpt(?=[\s/>])[\s\S]*?(?:\/>|<\/trkpt\s*>)/g, '')
   let found = ''
-  for (const match of matchAll(body, /<extensions(?=[\s/>])[^>]*>([\s\S]*?)<\/extensions\s*>/g)) {
+  for (const match of matchAll(trackLevel, /<extensions(?=[\s/>])[^>]*>([\s\S]*?)<\/extensions\s*>/g)) {
     found += match[1] ?? ''
   }
   return found
@@ -183,7 +187,7 @@ function parsePoints(segmentBody: string): TimedPosition[] {
     if (!inRange(latitude, longitude)) {
       continue
     }
-    const raw = /<time\s*>([\s\S]*?)<\/time\s*>/.exec(body)?.[1]
+    const raw = /<time(?=[\s>])[^>]*>([\s\S]*?)<\/time\s*>/.exec(body)?.[1]
     const timestamp = raw === undefined ? Number.NaN : Date.parse(raw.trim())
     points.push({
       position: [latitude, longitude],
