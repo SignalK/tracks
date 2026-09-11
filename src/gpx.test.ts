@@ -250,6 +250,32 @@ describe('fromGpx', () => {
     expect(fromGpx(foreign)).toEqual([])
   })
 
+  // GPX fixes the hierarchy: a <trkseg> is a child of <trk>, a <trkpt> a child
+  // of <trkseg>. Scanning descendants instead lets an <extensions> payload
+  // contribute track data -- and a payload declaring no namespace of its own
+  // inherits GPX's, so a namespace check alone cannot catch it.
+  it.each([
+    ['inheriting the GPX namespace', 'http://www.topografix.com/GPX/1/1'],
+    ['with no namespace at all', ''],
+  ])('ignores a trkseg inside extensions %s', (_kind, ns) => {
+    const declaration = ns === '' ? '' : ` xmlns="${ns}"`
+    const xml =
+      `<gpx${declaration}><trk><name>A</name>` +
+      `<extensions><vendor><trkseg><trkpt lat="9" lon="9"/></trkseg></vendor></extensions>` +
+      `<trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments).toEqual([[{ position: [1, 2], timestamp: 0 }]])
+  })
+
+  it('ignores a trkpt inside a trackpoint own extensions', () => {
+    const xml =
+      `<gpx><trk><name>A</name><trkseg>` +
+      `<trkpt lat="1" lon="2"><extensions><trkpt lat="7" lon="7"/></extensions></trkpt>` +
+      `</trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments).toEqual([[{ position: [1, 2], timestamp: 0 }]])
+  })
+
   it('ignores a foreign trkseg nested inside extensions', () => {
     const xml =
       `<gpx><trk><name>A</name>` +

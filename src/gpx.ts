@@ -144,7 +144,7 @@ export function fromGpx(xml: string): GpxTrack[] {
   const tracks: GpxTrack[] = []
   for (const trk of gpxElements(document, 'trk')) {
     const segments: TimedPosition[][] = []
-    for (const trkseg of gpxElements(trk, 'trkseg')) {
+    for (const trkseg of gpxChildren(trk, 'trkseg')) {
       const points = readPoints(trkseg)
       if (points.length > 0) {
         segments.push(points)
@@ -201,7 +201,7 @@ function signalKContext(trk: Element): string | undefined {
 /** The points of one `<trkseg>`, oldest first. */
 function readPoints(trkseg: Element): TimedPosition[] {
   const points: TimedPosition[] = []
-  for (const trkpt of gpxElements(trkseg, 'trkpt')) {
+  for (const trkpt of gpxChildren(trkseg, 'trkpt')) {
     const latitude = decimal(trkpt.getAttribute('lat') ?? undefined)
     const longitude = decimal(trkpt.getAttribute('lon') ?? undefined)
     if (!inRange(latitude, longitude)) {
@@ -220,6 +220,21 @@ function readPoints(trkseg: Element): TimedPosition[] {
   // Stable by construction: equal timestamps keep their file order, so a block
   // seam does not reshuffle points that were already correct.
   return points.sort((a, b) => a.timestamp - b.timestamp)
+}
+
+/**
+ * Direct GPX children of `root` with this local name.
+ *
+ * Direct, because GPX fixes the hierarchy: a `<trkseg>` is a child of `<trk>`
+ * and a `<trkpt>` a child of `<trkseg>`. Scanning descendants instead lets an
+ * `<extensions>` payload contribute track data — and a payload that declares
+ * no namespace of its own inherits GPX's, so a namespace check cannot catch
+ * it. A vendor's `<trkseg>` inside `<extensions>` became a phantom segment.
+ */
+function gpxChildren(root: Element, local: string): Element[] {
+  return Array.from(root.childNodes).filter(
+    (node): node is Element => isElement(node) && node.localName === local && isGpxNamespace(node),
+  )
 }
 
 /**
