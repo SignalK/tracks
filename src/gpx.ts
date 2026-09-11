@@ -91,17 +91,27 @@ const NAMESPACE = 'https://signalk.org/specification/1.7.0/'
  * rejected, but a coordinate that is not a finite number is dropped — one NaN
  * reaching the store stretches every bounding box that track appears in.
  *
- * **Points are sorted by time.** TimeZero paginates its export in blocks of
- * 150 and the block seams overlap: the last point of a block can be a few
- * milliseconds newer than the first point of the next. Out of 5,550 points in
- * a real export, 16 pairs are out of order, every one on a 150-point boundary.
- * Anything downstream that assumes ordering — time-window queries, the history
- * reconciliation — would quietly misbehave on such a file.
+ * **Points are sorted by time within each segment.** TimeZero paginates its
+ * export in blocks of 150 and the block seams overlap: the last point of a
+ * block can be a few milliseconds newer than the first point of the next. Out
+ * of 5,550 points in a real export, 16 pairs are out of order, every one on a
+ * 150-point boundary. Anything downstream that assumes ordering — time-window
+ * queries, the history reconciliation — would quietly misbehave on such a file.
+ *
+ * Sorting stops at the segment boundary, deliberately: a segment is a stretch
+ * of continuous recording, and reordering points across a gap would merge two
+ * passages into one line. So `segments.flat()` is not globally sorted for a
+ * file whose segments interleave in time, and a caller that needs that must
+ * sort for itself.
  */
 export function fromGpx(xml: string): GpxTrack[] {
   const tracks: GpxTrack[] = []
   for (const match of matchAll(xml, /<trk(?=[\s>])[^>]*>([\s\S]*?)<\/trk\s*>/g)) {
     const body = match[1] ?? ''
+    // `decodeXml` trims, so surrounding whitespace in a <name> is dropped: it
+    // is layout from the writer rather than part of the vessel's name. A name
+    // that is empty or only whitespace falls back to `Track`, because a track
+    // list with a blank row in it is worse than one with a generic label.
     const name = decodeXml(/<name(?=[\s>])[^>]*>([\s\S]*?)<\/name\s*>/.exec(body)?.[1] ?? '') || 'Track'
     const context = signalKContext(extensionsOf(body))
     const segments: TimedPosition[][] = []
@@ -177,11 +187,10 @@ function parsePoints(segmentBody: string): TimedPosition[] {
   for (const match of matchAll(segmentBody, /<trkpt(?=[\s/>])([^>]*?)(?:\/>|>([\s\S]*?)<\/trkpt\s*>)/g)) {
     const attributes = match[1] ?? ''
     const body = match[2] ?? ''
-    // `attribute` returns undefined for a blank value, and Number(undefined)
-    // is NaN -- so the finiteness check below covers blanks too. Reading the
-    // attribute raw and calling Number('') would instead yield 0 and land the
-    // point at null island, which is why the helper trims and rejects rather
-    // than the caller.
+    // `decimal` yields NaN for anything that is not an xsd:decimal, blanks
+    // included, so `inRange` below rejects them all. Calling `Number('')`
+    // directly would instead yield 0 and land the point at null island --
+    // which is why the parsing lives in the helper rather than here.
     const latitude = decimal(attribute(attributes, 'lat'))
     const longitude = decimal(attribute(attributes, 'lon'))
     if (!inRange(latitude, longitude)) {
@@ -246,14 +255,6 @@ function coordinate(value: number): string {
 }
 
 /**
- * ISO-8601 UTC, because a track outlives the timezone it was recorded in.
- *
- * A timestamp outside the Date range throws out of `toISOString`, and one bad
- * point would abort the export of every track in the file. It is dated to the
- * start of time instead, which is what `fromGpx` does with a time it cannot
- * read -- losing one point's time beats losing the document.
- */
-/**
  * A GPX `<time>` as epoch milliseconds, or NaN when it is not one.
  *
  * GPX types the element as `xsd:dateTime`, and `Date.parse` is far looser: it
@@ -282,6 +283,14 @@ function dateTime(value: string): number {
     : Number.NaN
 }
 
+/**
+ * ISO-8601 UTC, because a track outlives the timezone it was recorded in.
+ *
+ * A timestamp outside the Date range throws out of `toISOString`, and one bad
+ * point would abort the export of every track in the file. It is dated to the
+ * start of time instead, which is what `fromGpx` does with a time it cannot
+ * read -- losing one point's time beats losing the document.
+ */
 function iso(timestamp: number): string {
   const at = new Date(timestamp)
   return Number.isNaN(at.getTime()) ? new Date(0).toISOString() : at.toISOString()

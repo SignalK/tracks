@@ -316,6 +316,27 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.segments[0]?.[0]?.timestamp).toBe(Date.parse(time))
   })
 
+  // Sorting stops at the segment boundary on purpose: a segment is a stretch
+  // of continuous recording, and reordering across a gap would merge two
+  // passages into one line. So a file whose segments interleave in time comes
+  // back with its boundaries intact and flat() not globally sorted -- pinned
+  // here because it is a promise the docstring makes to callers.
+  it('sorts within a segment but does not reorder across segments', () => {
+    const xml =
+      `<gpx><trk><name>A</name>` +
+      `<trkseg><trkpt lat="1" lon="1"><time>2024-01-01T00:00:05Z</time></trkpt></trkseg>` +
+      `<trkseg><trkpt lat="2" lon="2"><time>2024-01-01T00:00:01Z</time></trkpt></trkseg>` +
+      `</trk></gpx>`
+
+    const segments = fromGpx(xml)[0]!.segments
+
+    expect(segments).toHaveLength(2)
+    expect(segments.flat().map((p) => p.timestamp)).toEqual([
+      Date.parse('2024-01-01T00:00:05Z'),
+      Date.parse('2024-01-01T00:00:01Z'),
+    ])
+  })
+
   it('reads a self-closing trkpt and attributes in either order', () => {
     const xml = `<gpx><trk><name>A</name><trkseg><trkpt lat="1" lon="2"/><trkpt lon="4" lat="3"/></trkseg></trk></gpx>`
 
@@ -453,6 +474,26 @@ describe('fromGpx', () => {
 
   it('ignores a track with no points at all', () => {
     expect(fromGpx(`<gpx><trk><name>A</name></trk></gpx>`)).toEqual([])
+  })
+
+  // Surrounding whitespace is the writer's layout, not part of the name.
+  it.each([
+    ['surrounding spaces', '  Ariadne  ', 'Ariadne'],
+    ['tabs', '\tAriadne\t', 'Ariadne'],
+  ])('trims %s from a name', (_kind, written, expected) => {
+    const xml = `<gpx><trk><name>${written}</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe(expected)
+  })
+
+  // A blank row in a track list is worse than a generic label.
+  it.each([
+    ['empty', ''],
+    ['only whitespace', '   '],
+  ])('falls back to Track for a %s name', (_kind, written) => {
+    const xml = `<gpx><trk><name>${written}</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe('Track')
   })
 
   it('names an unnamed track rather than leaving it blank', () => {
