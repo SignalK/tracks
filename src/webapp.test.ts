@@ -49,3 +49,184 @@ describe('the webapp labels tracks as the server does', () => {
     })
   }
 })
+
+/**
+ * The render path, driven end to end against a stub DOM.
+ *
+ * `label()` being right does not mean a row reaches the table: parsing the
+ * FeatureCollection, mapping properties, sorting and appending are all
+ * untested by the agreement suite above, and a regression in any of them
+ * leaves the page blank while every other test passes.
+ */
+interface StubElement {
+  tagName: string
+  textContent: string
+  className: string
+  hidden: boolean
+  dataset: Record<string, string>
+  children: StubElement[]
+}
+
+const element = (tagName: string): StubElement => {
+  const el: StubElement = {
+    tagName,
+    textContent: '',
+    className: '',
+    hidden: false,
+    dataset: {},
+    children: [],
+  }
+  return Object.assign(el, {
+    append: (...kids: StubElement[]) => el.children.push(...kids),
+    replaceChildren: (...kids: StubElement[]) => {
+      el.children.length = 0
+      el.children.push(...kids)
+    },
+  })
+}
+
+/** Loads public/tracks.js against a stub document and a scripted fetch. */
+async function render(response: { status?: number; ok?: boolean; body?: unknown } | Error) {
+  const status = element('p')
+  const tbody = element('tbody')
+  const table = element('table')
+  table.hidden = true
+
+  const document = {
+    getElementById: (id: string) => (id === 'status' ? status : table),
+    createElement: element,
+  }
+  Object.assign(table, { querySelector: () => tbody })
+
+  const source = readFileSync(new URL('../public/tracks.js', import.meta.url), 'utf8')
+  const run = new Function(
+    'document',
+    'fetch',
+    `return (async () => { ${source.replace(/^void load\(\)$/m, 'await load()')} })()`,
+  ) as (d: unknown, f: unknown) => Promise<void>
+
+  await run(document, () => {
+    if (response instanceof Error) {
+      return Promise.reject(response)
+    }
+    return Promise.resolve({
+      status: response.status ?? 200,
+      ok: response.ok ?? true,
+      json: () => Promise.resolve(response.body),
+    })
+  })
+
+  return { status, tbody, table }
+}
+
+const feature = (properties: Record<string, unknown>) => ({ type: 'Feature', geometry: null, properties })
+
+describe('the webapp renders what the API returns', () => {
+  it('puts a row in the table for each track', async () => {
+    const { tbody, table, status } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          feature({
+            context: SELF,
+            isSelf: true,
+            from: '2026-09-01T00:00:00Z',
+            to: '2026-09-01T02:00:00Z',
+            pointCount: 12,
+          }),
+          feature({
+            context: OTHER,
+            contextName: 'Ariadne',
+            isSelf: false,
+            from: '2026-09-02T00:00:00Z',
+            to: '2026-09-02T01:00:00Z',
+            pointCount: 7,
+          }),
+        ],
+      },
+    })
+
+    expect(table.hidden).toBe(false)
+    expect(tbody.children).toHaveLength(2)
+    expect(status.textContent).toContain('2 tracks')
+  })
+
+  // Newest first: the track someone came to look at is the one that just
+  // finished, and a list ordered by whatever the store returned buries it.
+  it('sorts newest first', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          feature({
+            context: SELF,
+            isSelf: true,
+            from: '2026-09-01T00:00:00Z',
+            to: '2026-09-01T02:00:00Z',
+            pointCount: 1,
+          }),
+          feature({
+            context: OTHER,
+            contextName: 'Ariadne',
+            isSelf: false,
+            from: '2026-09-05T00:00:00Z',
+            to: '2026-09-05T01:00:00Z',
+            pointCount: 1,
+          }),
+        ],
+      },
+    })
+
+    expect(tbody.children[0]!.children[0]!.textContent).toBe('AIS Ariadne')
+    expect(tbody.children[1]!.children[0]!.textContent).toBe('Own Ship')
+  })
+
+  it('renders the point count', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          feature({
+            context: SELF,
+            isSelf: true,
+            from: '2026-09-01T00:00:00Z',
+            to: '2026-09-01T02:00:00Z',
+            pointCount: 4321,
+          }),
+        ],
+      },
+    })
+
+    expect(tbody.children[0]!.children[3]!.textContent).toBe('4321')
+  })
+
+  it('says so when there is nothing recorded', async () => {
+    const { status, table } = await render({ body: { type: 'FeatureCollection', features: [] } })
+
+    expect(table.hidden).toBe(true)
+    expect(status.textContent).toContain('No tracks')
+  })
+
+  // 501 is the server saying no provider is registered, which is a different
+  // thing from a failure and worth saying plainly.
+  it('distinguishes a missing provider from an error', async () => {
+    const { status } = await render({ status: 501, ok: false })
+
+    expect(status.textContent).toContain('No track provider')
+    expect(status.dataset.state).toBe('error')
+  })
+
+  it('reports an unreachable server', async () => {
+    const { status, table } = await render(new Error('offline'))
+
+    expect(table.hidden).toBe(true)
+    expect(status.dataset.state).toBe('error')
+  })
+
+  it('survives a response that is not a FeatureCollection', async () => {
+    const { status, table } = await render({ body: { unexpected: true } })
+
+    expect(table.hidden).toBe(true)
+    expect(status.textContent).toContain('No tracks')
+  })
+})
