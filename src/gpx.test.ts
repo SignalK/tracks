@@ -393,58 +393,64 @@ describe('a plotter-written export', () => {
 // The real exports, when this machine has them: 704 KB of vendor data does not
 // belong in the repository for a unit test, and a path that exists on one
 // workstation must not fail the suite everywhere else.
-const TZ_EXPORT_DIR = process.env.TZ_EXPORT_DIR ?? '/home/dirk/dev/tmp/TZ'
+// Opt-in by environment, with no default: a path baked in here would be one
+// developer's machine, and the plugin CI rejects a hardcoded home directory
+// outright -- it fails the whole build before a single test runs.
+const TZ_EXPORT_DIR = process.env.TZ_EXPORT_DIR
 const OWN_SHIP = 'gpx_export_own_ship/own_ship.gpx'
 
-describe.skipIf(!existsSync(`${TZ_EXPORT_DIR}/${OWN_SHIP}`))('real TimeZero exports', () => {
-  const read = (file: string) => readFileSync(`${TZ_EXPORT_DIR}/${file}`, 'utf8')
+describe.skipIf(TZ_EXPORT_DIR === undefined || !existsSync(`${TZ_EXPORT_DIR}/${OWN_SHIP}`))(
+  'real TimeZero exports',
+  () => {
+    const read = (file: string) => readFileSync(`${TZ_EXPORT_DIR}/${file}`, 'utf8')
 
-  // Gated per file rather than per suite: the own-ship export existing does
-  // not mean the AIS ones do, and a missing one would fail rather than skip.
-  for (const [file, name, points] of [
-    [OWN_SHIP, 'Own Ship', 5550],
-    ['gpx_export_ais/ais_mia.gpx', 'AIS MIA', 109],
-    ['gpx_export_ais/ais_ile.gpx', "AIS L'ILE DU PAPILLON", 42],
-  ] as const) {
-    it.skipIf(!existsSync(`${TZ_EXPORT_DIR}/${file}`))(`reads every point of ${file}`, () => {
-      const [parsed] = fromGpx(read(file))
+    // Gated per file rather than per suite: the own-ship export existing does
+    // not mean the AIS ones do, and a missing one would fail rather than skip.
+    for (const [file, name, points] of [
+      [OWN_SHIP, 'Own Ship', 5550],
+      ['gpx_export_ais/ais_mia.gpx', 'AIS MIA', 109],
+      ['gpx_export_ais/ais_ile.gpx', "AIS L'ILE DU PAPILLON", 42],
+    ] as const) {
+      it.skipIf(!existsSync(`${TZ_EXPORT_DIR}/${file}`))(`reads every point of ${file}`, () => {
+        const [parsed] = fromGpx(read(file))
 
-      expect(parsed?.name).toBe(name)
-      expect(parsed?.segments.flat()).toHaveLength(points)
+        expect(parsed?.name).toBe(name)
+        expect(parsed?.segments.flat()).toHaveLength(points)
+      })
+    }
+
+    it('orders the 150-point block seams that the export leaves crossed', () => {
+      const xml = read(OWN_SHIP)
+      const raw = [...xml.matchAll(/<time>([^<]*)</g)].map((m) => Date.parse(m[1]!))
+
+      expect(raw.filter((t, i) => i > 0 && raw[i - 1]! > t).length).toBeGreaterThan(0)
+
+      const points = fromGpx(xml)[0]!.segments.flat()
+
+      expect(points.every((p, i) => i === 0 || points[i - 1]!.timestamp <= p.timestamp)).toBe(true)
     })
-  }
 
-  it('orders the 150-point block seams that the export leaves crossed', () => {
-    const xml = read(OWN_SHIP)
-    const raw = [...xml.matchAll(/<time>([^<]*)</g)].map((m) => Date.parse(m[1]!))
+    // Not byte-identical: TimeZero writes thirteen decimal places, which is a
+    // float artefact rather than information -- the seventh is already 11 mm,
+    // finer than any GPS fix. What must survive is every point, every time, and
+    // a position that has not actually moved.
+    it('survives a re-export with every point and time intact', () => {
+      const parsed = fromGpx(read(OWN_SHIP))
+      const before = parsed[0]!.segments.flat()
 
-    expect(raw.filter((t, i) => i > 0 && raw[i - 1]! > t).length).toBeGreaterThan(0)
+      const after = fromGpx(toGpx(parsed))[0]!.segments.flat()
 
-    const points = fromGpx(xml)[0]!.segments.flat()
-
-    expect(points.every((p, i) => i === 0 || points[i - 1]!.timestamp <= p.timestamp)).toBe(true)
-  })
-
-  // Not byte-identical: TimeZero writes thirteen decimal places, which is a
-  // float artefact rather than information -- the seventh is already 11 mm,
-  // finer than any GPS fix. What must survive is every point, every time, and
-  // a position that has not actually moved.
-  it('survives a re-export with every point and time intact', () => {
-    const parsed = fromGpx(read(OWN_SHIP))
-    const before = parsed[0]!.segments.flat()
-
-    const after = fromGpx(toGpx(parsed))[0]!.segments.flat()
-
-    expect(after).toHaveLength(before.length)
-    expect(after.map((p) => p.timestamp)).toEqual(before.map((p) => p.timestamp))
-    const worst = Math.max(
-      ...after.map((p, i) =>
-        Math.max(Math.abs(p.position[0] - before[i]!.position[0]), Math.abs(p.position[1] - before[i]!.position[1])),
-      ),
-    )
-    // Rounding to seven decimal places moves a coordinate by at most half a
-    // unit in the last place -- 5e-8 degrees, about 6 mm. Anything larger
-    // would mean the re-export had actually moved the track.
-    expect(worst).toBeLessThanOrEqual(5e-8)
-  })
-})
+      expect(after).toHaveLength(before.length)
+      expect(after.map((p) => p.timestamp)).toEqual(before.map((p) => p.timestamp))
+      const worst = Math.max(
+        ...after.map((p, i) =>
+          Math.max(Math.abs(p.position[0] - before[i]!.position[0]), Math.abs(p.position[1] - before[i]!.position[1])),
+        ),
+      )
+      // Rounding to seven decimal places moves a coordinate by at most half a
+      // unit in the last place -- 5e-8 degrees, about 6 mm. Anything larger
+      // would mean the re-export had actually moved the track.
+      expect(worst).toBeLessThanOrEqual(5e-8)
+    })
+  },
+)
