@@ -21,6 +21,15 @@
  */
 const WINDOW = 'P30D'
 
+/**
+ * Ceiling on the list request.
+ *
+ * Generous, because a month of tracks on a busy receiver is a real query, not
+ * a hung one — this exists to end a request that will never answer, not to
+ * hurry a slow store.
+ */
+const REQUEST_TIMEOUT_MS = 30_000
+
 /** Relative, because the server mounts this under /@signalk/tracks-plugin. */
 const TRACKS_URL = `../../signalk/v2/api/tracks?geometry=false&duration=${WINDOW}`
 
@@ -86,10 +95,16 @@ function show(message, state) {
 
 async function load() {
   let response
+  // Bounded, because an unsettled fetch is the one failure the page cannot
+  // recover from: every other path ends in an error message, while a stalled
+  // server or proxy leaves it on "Loading…" indefinitely, which reads as a
+  // hang rather than a failure. The signal stays armed through json() below,
+  // so a response that stops mid-body is caught too.
+  const deadline = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
   try {
-    response = await fetch(TRACKS_URL, { credentials: 'include' })
+    response = await fetch(TRACKS_URL, { credentials: 'include', signal: deadline })
   } catch {
-    show('Could not reach the server.', 'error')
+    show(deadline.aborted ? 'The server did not answer in time.' : 'Could not reach the server.', 'error')
     return
   }
   // 501 is the server saying no provider is registered, which is a different
@@ -108,9 +123,13 @@ async function load() {
     body = await response.json()
   } catch {
     // A 200 carrying something that is not JSON: a proxy's error page, or a
-    // truncated response. Without this the rejection escapes `void load()` and
+    // body that stops mid-stream, which the deadline above aborts here rather
+    // than at the fetch. Without this the rejection escapes `void load()` and
     // the page sits on "Loading…" forever, which looks like a hang.
-    show('The server sent a response this page could not read.', 'error')
+    show(
+      deadline.aborted ? 'The server did not answer in time.' : 'The server sent a response this page could not read.',
+      'error',
+    )
     return
   }
   // A 200 carrying something else entirely -- an error object, a login page --

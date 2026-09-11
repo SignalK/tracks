@@ -89,7 +89,10 @@ const element = (tagName: string): StubElement => {
 }
 
 /** Loads public/tracks.js against a stub document and a scripted fetch. */
-async function render(response: { status?: number; ok?: boolean; body?: unknown } | Error) {
+async function render(
+  response: { status?: number; ok?: boolean; body?: unknown } | Error | 'stall',
+  options: { timeoutMs?: number } = {},
+) {
   const status = element('p')
   const tbody = element('tbody')
   const table = element('table')
@@ -102,13 +105,24 @@ async function render(response: { status?: number; ok?: boolean; body?: unknown 
   Object.assign(table, { querySelector: () => tbody })
 
   const source = readFileSync(new URL('../public/tracks.js', import.meta.url), 'utf8')
+  const script =
+    options.timeoutMs === undefined
+      ? source
+      : source.replace(/const REQUEST_TIMEOUT_MS = [\d_]+/, `const REQUEST_TIMEOUT_MS = ${options.timeoutMs}`)
   const run = new Function(
     'document',
     'fetch',
-    `return (async () => { ${source.replace(/^void load\(\)$/m, 'await load()')} })()`,
+    `return (async () => { ${script.replace(/^void load\(\)$/m, 'await load()')} })()`,
   ) as (d: unknown, f: unknown) => Promise<void>
 
-  await run(document, () => {
+  await run(document, (_url: string, init: { signal?: AbortSignal }) => {
+    if (response === 'stall') {
+      // Never settles on its own: only the page's own deadline ends it, which
+      // is the thing under test.
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+    }
     if (response instanceof Error) {
       return Promise.reject(response)
     }
@@ -217,6 +231,19 @@ describe('the webapp renders what the API returns', () => {
 
     expect(status.textContent).toContain('No track provider')
     expect(status.dataset.state).toBe('error')
+  })
+
+  // Every other failure ends in a message; a request that never settles is
+  // the one that leaves the page on "Loading…" indefinitely, which reads as a
+  // hang rather than a failure.
+  it('gives up on a request that never answers', async () => {
+    // AbortSignal.timeout runs on a real timer that fake timers do not drive,
+    // so the page's own constant is overridden rather than waited out.
+    const { status, table } = await render('stall', { timeoutMs: 20 })
+
+    expect(table.hidden).toBe(true)
+    expect(status.dataset.state).toBe('error')
+    expect(status.textContent).toContain('in time')
   })
 
   it('reports an unreachable server', async () => {
