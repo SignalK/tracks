@@ -31,8 +31,6 @@ describe('the webapp labels tracks as the server does', () => {
           ? properties.contextName
           : undefined
 
-      // Read off a rendered row rather than out of the source, so a refactor
-      // of how the label is produced does not fail a test about what it says.
       const { tbody } = await render({
         body: {
           type: 'FeatureCollection',
@@ -88,9 +86,8 @@ const element = (tagName: string): StubElement => {
   })
 }
 
-/** Loads public/tracks.js against a stub document and a scripted fetch. */
 async function render(
-  response: { status?: number; ok?: boolean; body?: unknown } | Error | 'stall',
+  response: { status?: number; ok?: boolean; body?: unknown } | Error | 'stall' | 'stall-body',
   options: { timeoutMs?: number } = {},
 ) {
   const status = element('p')
@@ -116,6 +113,16 @@ async function render(
   ) as (d: unknown, f: unknown) => Promise<void>
 
   await run(document, (_url: string, init: { signal?: AbortSignal }) => {
+    if (response === 'stall-body') {
+      return Promise.resolve({
+        status: 200,
+        ok: true,
+        json: () =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+          }),
+      })
+    }
     if (response === 'stall') {
       // Never settles on its own: only the page's own deadline ends it, which
       // is the thing under test.
@@ -240,6 +247,17 @@ describe('the webapp renders what the API returns', () => {
     // AbortSignal.timeout runs on a real timer that fake timers do not drive,
     // so the page's own constant is overridden rather than waited out.
     const { status, table } = await render('stall', { timeoutMs: 20 })
+
+    expect(table.hidden).toBe(true)
+    expect(status.dataset.state).toBe('error')
+    expect(status.textContent).toContain('in time')
+  })
+
+  // The deadline stays armed through json(), so a response whose headers
+  // arrive and whose body then stops mid-stream is caught too -- stalling only
+  // the fetch would leave that path uncovered.
+  it('gives up on a response whose body never finishes', async () => {
+    const { status, table } = await render('stall-body', { timeoutMs: 20 })
 
     expect(table.hidden).toBe(true)
     expect(status.dataset.state).toBe('error')
