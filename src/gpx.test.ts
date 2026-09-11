@@ -28,6 +28,17 @@ describe('toGpx', () => {
     expect(xml).toContain('<time>1970-01-01T00:00:00.000Z</time>')
   })
 
+  // Seven decimals is ~11 mm, finer than any GPS fix. Pinned on a value that
+  // actually needs rounding: the other tests use coordinates that do not, so
+  // they would pass at any precision.
+  it('writes coordinates at seven decimal places', () => {
+    const xml = toGpx([track({ segments: [[at(60.123456789, -0.000000049, 0)]] })])
+
+    expect(xml).toContain('lat="60.1234568"')
+    // Rounds to zero, and writes it as zero rather than "-0".
+    expect(xml).toContain('lon="0"')
+  })
+
   // Several tracks in one file is what makes "select three trips, export"
   // produce one file. TimeZero writes one file per vessel; GPX allows either.
   it('puts several tracks in one document', () => {
@@ -110,6 +121,28 @@ describe('fromGpx', () => {
     const context = 'vessels.urn:mrn:imo:mmsi:244813000'
 
     expect(fromGpx(toGpx([track({ context })]))[0]?.context).toBe(context)
+  })
+
+  // GPX extensions are an open field any vendor may write into. A foreign
+  // <context> read as ours would attribute an imported track to a vessel it
+  // does not belong to.
+  it.each([
+    ['a foreign prefix', '<evil:context xmlns:evil="http://evil.example/">vessels.urn:mrn:imo:mmsi:999</evil:context>'],
+    ['no namespace at all', '<context>vessels.urn:mrn:imo:mmsi:888</context>'],
+  ])('ignores a context element with %s', (_kind, extension) => {
+    const xml = `<gpx><trk><name>A</name><extensions>${extension}</extensions><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.context).toBeUndefined()
+  })
+
+  // Matched on the namespace, not the prefix: the prefix is arbitrary.
+  it('reads a context under any prefix bound to the Signal K namespace', () => {
+    const xml =
+      `<gpx><trk><name>A</name><extensions>` +
+      `<sk:context xmlns:sk="https://signalk.org/specification/1.7.0/">vessels.urn:mrn:imo:mmsi:7</sk:context>` +
+      `</extensions><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.context).toBe('vessels.urn:mrn:imo:mmsi:7')
   })
 
   it('reads a self-closing trkpt and attributes in either order', () => {

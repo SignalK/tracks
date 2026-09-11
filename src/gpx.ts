@@ -103,10 +103,7 @@ export function fromGpx(xml: string): GpxTrack[] {
   for (const match of matchAll(xml, /<trk>([\s\S]*?)<\/trk>/g)) {
     const body = match[1] ?? ''
     const name = decodeXml(/<name>([\s\S]*?)<\/name>/.exec(body)?.[1] ?? '') || 'Track'
-    // `\b[^>]*` rather than a bare `>`: the element carries its namespace
-    // declaration as an attribute, so requiring the tag to end straight after
-    // the name silently fails to match the very files this plugin writes.
-    const context = decodeXml(/<(?:\w+:)?context\b[^>]*>([\s\S]*?)<\/(?:\w+:)?context>/.exec(body)?.[1] ?? '')
+    const context = signalKContext(body)
     const segments: TimedPosition[][] = []
     for (const segmentMatch of matchAll(body, /<trkseg>([\s\S]*?)<\/trkseg>/g)) {
       const points = parsePoints(segmentMatch[1] ?? '')
@@ -119,6 +116,31 @@ export function fromGpx(xml: string): GpxTrack[] {
     }
   }
   return tracks
+}
+
+/**
+ * The Signal K context from a track's extensions, or '' when there is none.
+ *
+ * Matched on its namespace rather than its local name. GPX extensions are an
+ * open field that any vendor may write into, and a foreign `<context>` -- or
+ * one under somebody else's prefix -- would otherwise be read as this
+ * plugin's, attributing an imported track to a vessel it does not belong to.
+ * The element carries its namespace declaration as an attribute, so the tag
+ * cannot be required to end straight after the name.
+ */
+function signalKContext(body: string): string {
+  for (const match of matchAll(body, /<(\w+:)?context\b([^>]*)>([\s\S]*?)<\/(?:\w+:)?context>/g)) {
+    const prefix = match[1]?.slice(0, -1)
+    const attributes = match[2] ?? ''
+    // Declared on the element itself, as this plugin writes it; an inherited
+    // declaration would need a real XML parser to resolve, and a file whose
+    // context is not self-describing is not one to trust with an identity.
+    const declared = prefix === undefined ? attribute(attributes, 'xmlns') : attribute(attributes, `xmlns:${prefix}`)
+    if (declared === NAMESPACE) {
+      return decodeXml(match[3] ?? '')
+    }
+  }
+  return ''
 }
 
 function parsePoints(segmentBody: string): TimedPosition[] {
@@ -188,7 +210,10 @@ function* matchAll(text: string, pattern: RegExp): Generator<RegExpExecArray> {
  * short enough that a long track does not carry pointless digits.
  */
 function coordinate(value: number): string {
-  return value.toFixed(7).replace(/\.?0+$/, '')
+  const fixed = value.toFixed(7).replace(/\.?0+$/, '')
+  // A tiny negative rounds to "-0.0000000" and strips to "-0", which is a
+  // number no position ever is. Zero is zero.
+  return fixed === '-0' ? '0' : fixed
 }
 
 /**
