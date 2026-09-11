@@ -66,6 +66,19 @@ describe('toGpx', () => {
     expect(xml).not.toContain('<trk>')
   })
 
+  // One unreadable timestamp must not cost the whole document: toISOString
+  // throws outside the Date range, which would abort every track in the file.
+  it.each([
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['out of range', 1e20],
+  ])('writes a track whose point has a %s timestamp', (_kind, timestamp) => {
+    const xml = toGpx([track({ segments: [[{ position: [60, 24], timestamp }]] })])
+
+    expect(xml).toContain('<trkpt lat="60" lon="24">')
+    expect(xml).toContain('<time>1970-01-01T00:00:00.000Z</time>')
+  })
+
   it('omits a segment with no points rather than writing an empty trkseg', () => {
     const xml = toGpx([track({ segments: [[at(60, 24)], []] })])
 
@@ -198,6 +211,28 @@ describe('fromGpx', () => {
     const xml = `<gpx><trk><name>A</name><trkseg>${trkpt}<trkpt lat="60" lon="24"/></trkseg></trk></gpx>`
 
     expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [60, 24], timestamp: 0 }])
+  })
+
+  // XML 1.0's character range has holes -- NUL, most C0 controls and the
+  // surrogate block. Decoding one puts a character into a name that cannot be
+  // written back out as well-formed XML.
+  it.each([
+    ['NUL', '&#0;'],
+    ['a C0 control', '&#11;'],
+    ['a surrogate', '&#xD800;'],
+  ])('keeps %s as a reference rather than decoding it', (_kind, reference) => {
+    const xml = `<gpx><trk><name>X${reference}Y</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe(`X${reference}Y`)
+  })
+
+  it.each([
+    ['tab', '&#9;', '\t'],
+    ['newline', '&#10;', '\n'],
+  ])('still decodes %s, which XML permits', (_kind, reference, character) => {
+    const xml = `<gpx><trk><name>X${reference}Y</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe(`X${character}Y`)
   })
 
   it('ignores a track with no points at all', () => {

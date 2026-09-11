@@ -191,9 +191,17 @@ function coordinate(value: number): string {
   return value.toFixed(7).replace(/\.?0+$/, '')
 }
 
-/** ISO-8601 UTC, because a track outlives the timezone it was recorded in. */
+/**
+ * ISO-8601 UTC, because a track outlives the timezone it was recorded in.
+ *
+ * A timestamp outside the Date range throws out of `toISOString`, and one bad
+ * point would abort the export of every track in the file. It is dated to the
+ * start of time instead, which is what `fromGpx` does with a time it cannot
+ * read -- losing one point's time beats losing the document.
+ */
 function iso(timestamp: number): string {
-  return new Date(timestamp).toISOString()
+  const at = new Date(timestamp)
+  return Number.isNaN(at.getTime()) ? new Date(0).toISOString() : at.toISOString()
 }
 
 function escapeXml(value: string): string {
@@ -231,7 +239,30 @@ function decodeXml(value: string): string {
  * every other track in the file.
  */
 function codePoint(value: number, original: string): string {
-  return Number.isInteger(value) && value >= 0 && value <= 0x10ffff ? String.fromCodePoint(value) : original
+  return isXmlChar(value) ? String.fromCodePoint(value) : original
+}
+
+/**
+ * Whether a code point is one XML 1.0 permits in content.
+ *
+ * The range has holes: NUL, most C0 controls and the surrogate block are all
+ * excluded. Decoding `&#0;` or `&#xD800;` puts a character into a track name
+ * that cannot be written back out as well-formed XML, so the reference is
+ * kept verbatim instead -- the same treatment as one that names no character
+ * at all.
+ */
+function isXmlChar(value: number): boolean {
+  if (!Number.isInteger(value)) {
+    return false
+  }
+  return (
+    value === 0x9 ||
+    value === 0xa ||
+    value === 0xd ||
+    (value >= 0x20 && value <= 0xd7ff) ||
+    (value >= 0xe000 && value <= 0xfffd) ||
+    (value >= 0x10000 && value <= 0x10ffff)
+  )
 }
 
 /**
