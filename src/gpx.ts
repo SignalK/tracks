@@ -82,6 +82,9 @@ export function toGpx(tracks: GpxTrack[], now: Date = new Date()): string {
   return lines.join('\n') + '\n'
 }
 
+/** GPX's own namespace, which structural elements must be in. */
+const GPX_NAMESPACE = 'http://www.topografix.com/GPX/1/1'
+
 /** Namespace for the one extension element this plugin writes. */
 const NAMESPACE = 'https://signalk.org/specification/1.7.0/'
 
@@ -123,15 +126,25 @@ export function fromGpx(xml: string): GpxTrack[] {
   try {
     // onError swallows the warnings xmldom would otherwise print; a fatal
     // error still throws, which the catch below turns into an empty result.
-    document = new DOMParser({ onError: () => undefined }).parseFromString(xml, 'text/xml')
+    document = new DOMParser({
+      onError: (level) => {
+        // A "warning" is xmldom telling us about something it handled; an
+        // "error" is a syntax fault it recovered from by guessing. The
+        // contract is that a document which is not well-formed yields no
+        // tracks, so a guess is refused rather than imported.
+        if (level !== 'warning') {
+          throw new Error('malformed XML')
+        }
+      },
+    }).parseFromString(xml, 'text/xml')
   } catch {
     return []
   }
 
   const tracks: GpxTrack[] = []
-  for (const trk of Array.from(document.getElementsByTagName('trk'))) {
+  for (const trk of gpxElements(document, 'trk')) {
     const segments: TimedPosition[][] = []
-    for (const trkseg of Array.from(trk.getElementsByTagName('trkseg'))) {
+    for (const trkseg of gpxElements(trk, 'trkseg')) {
       const points = readPoints(trkseg)
       if (points.length > 0) {
         segments.push(points)
@@ -153,7 +166,7 @@ export function fromGpx(xml: string): GpxTrack[] {
 /** The text of a track's direct `<name>` child, or '' when it has none. */
 function childText(trk: Element, local: string): string {
   for (const child of Array.from(trk.childNodes)) {
-    if (isElement(child) && child.localName === local) {
+    if (isElement(child) && child.localName === local && isGpxNamespace(child)) {
       return child.textContent ?? ''
     }
   }
@@ -172,7 +185,7 @@ function childText(trk: Element, local: string): string {
  */
 function signalKContext(trk: Element): string | undefined {
   for (const child of Array.from(trk.childNodes)) {
-    if (!isElement(child) || child.localName !== 'extensions') {
+    if (!isElement(child) || child.localName !== 'extensions' || !isGpxNamespace(child)) {
       continue
     }
     for (const candidate of Array.from(child.getElementsByTagNameNS(NAMESPACE, 'context'))) {
@@ -188,7 +201,7 @@ function signalKContext(trk: Element): string | undefined {
 /** The points of one `<trkseg>`, oldest first. */
 function readPoints(trkseg: Element): TimedPosition[] {
   const points: TimedPosition[] = []
-  for (const trkpt of Array.from(trkseg.getElementsByTagName('trkpt'))) {
+  for (const trkpt of gpxElements(trkseg, 'trkpt')) {
     const latitude = decimal(trkpt.getAttribute('lat') ?? undefined)
     const longitude = decimal(trkpt.getAttribute('lon') ?? undefined)
     if (!inRange(latitude, longitude)) {
@@ -207,6 +220,29 @@ function readPoints(trkseg: Element): TimedPosition[] {
   // Stable by construction: equal timestamps keep their file order, so a block
   // seam does not reshuffle points that were already correct.
   return points.sort((a, b) => a.timestamp - b.timestamp)
+}
+
+/**
+ * Descendant elements of `root` with this GPX local name.
+ *
+ * Namespace-checked, because `getElementsByTagName` is not: a document rooted
+ * at `<gpx xmlns="urn:vendor">` would otherwise have every `<trkpt>` in it
+ * read as a real position, and a vendor's own `<trkseg>` nested inside
+ * `<extensions>` would contribute a whole extra segment.
+ */
+function gpxElements(root: Document | Element, local: string): Element[] {
+  return Array.from(root.getElementsByTagName(local)).filter(isGpxNamespace)
+}
+
+/**
+ * Whether an element is GPX's own.
+ *
+ * A null namespace counts: a great many files in the wild omit the xmlns
+ * declaration entirely, and refusing those would reject most of what users
+ * actually have.
+ */
+function isGpxNamespace(element: Element): boolean {
+  return element.namespaceURI === null || element.namespaceURI === GPX_NAMESPACE
 }
 
 /** Narrow a DOM node to an element without relying on a global Node. */

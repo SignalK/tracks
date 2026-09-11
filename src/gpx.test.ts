@@ -219,6 +219,42 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.name).toBe('A&AMP;B')
   })
 
+  // getElementsByTagName ignores namespaces, so a document rooted in somebody
+  // else's would otherwise have every <trkpt> in it read as a real position.
+  it('ignores a document in a foreign default namespace', () => {
+    const foreign = `<gpx xmlns="urn:vendor"><trk><name>Foreign</name><trkseg><trkpt lat="9" lon="9"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(foreign)).toEqual([])
+  })
+
+  it('ignores a foreign trkseg nested inside extensions', () => {
+    const xml =
+      `<gpx><trk><name>A</name>` +
+      `<extensions><v xmlns="urn:vendor"><trkseg><trkpt lat="9" lon="9"/></trkseg></v></extensions>` +
+      `<trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments).toEqual([[{ position: [1, 2], timestamp: 0 }]])
+  })
+
+  // Most files in the wild omit the declaration entirely; refusing those would
+  // reject most of what users actually have.
+  it.each([
+    ['the GPX namespace', ' xmlns="http://www.topografix.com/GPX/1/1"'],
+    ['no namespace at all', ''],
+  ])('reads a document in %s', (_kind, declaration) => {
+    const xml = `<gpx${declaration}><trk><name>Real</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe('Real')
+  })
+
+  // xmldom recovers from some syntax faults by guessing. A guess is not a
+  // well-formed document, so it is refused rather than imported.
+  it('refuses a document with a recoverable syntax error', () => {
+    const strayLessThan = `<gpx><trk><name>A < B</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(strayLessThan)).toEqual([])
+  })
+
   it('refuses a document that is not well-formed', () => {
     const undeclaredPrefix = `<gpx><trk><name>A</name><trkseg><ns:trkpt lat="9" lon="9"/></trkseg></trk></gpx>`
 
