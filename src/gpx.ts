@@ -123,8 +123,13 @@ function parsePoints(segmentBody: string): TimedPosition[] {
   for (const match of matchAll(segmentBody, /<trkpt\b([^>]*?)(?:\/>|>([\s\S]*?)<\/trkpt>)/g)) {
     const attributes = match[1] ?? ''
     const body = match[2] ?? ''
-    const latitude = Number(/\blat="([^"]*)"/.exec(attributes)?.[1])
-    const longitude = Number(/\blon="([^"]*)"/.exec(attributes)?.[1])
+    // `attribute` returns undefined for a blank value, and Number(undefined)
+    // is NaN -- so the finiteness check below covers blanks too. Reading the
+    // attribute raw and calling Number('') would instead yield 0 and land the
+    // point at null island, which is why the helper trims and rejects rather
+    // than the caller.
+    const latitude = Number(attribute(attributes, 'lat'))
+    const longitude = Number(attribute(attributes, 'lon'))
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
       continue
     }
@@ -141,6 +146,19 @@ function parsePoints(segmentBody: string): TimedPosition[] {
   // Stable by construction: equal timestamps keep their file order, so a block
   // seam does not reshuffle points that were already correct.
   return points.sort((a, b) => a.timestamp - b.timestamp)
+}
+
+/**
+ * An attribute's value, in either quote style, or undefined when it is absent
+ * or blank.
+ *
+ * XML permits single quotes and plotters do use them; matching only double
+ * quotes drops every point of such a file without a word.
+ */
+function attribute(attributes: string, name: string): string | undefined {
+  const match = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(attributes)
+  const value = (match?.[1] ?? match?.[2])?.trim()
+  return value === undefined || value === '' ? undefined : value
 }
 
 function* matchAll(text: string, pattern: RegExp): Generator<RegExpExecArray> {
@@ -186,9 +204,23 @@ function decodeXml(value: string): string {
       .replace(/&gt;/g, '>')
       .replace(/&quot;/g, '"')
       .replace(/&apos;/g, "'")
-      .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
+      .replace(/&#x([0-9a-f]+);/gi, (whole, code: string) => codePoint(Number.parseInt(code, 16), whole))
+      .replace(/&#(\d+);/g, (whole, code: string) => codePoint(Number(code), whole))
       // Ampersand last, so an escaped entity is not decoded twice: &amp;lt;
       // means the literal "&lt;", not "<".
       .replace(/&amp;/g, '&')
   )
+}
+
+/**
+ * A character reference's character, or the reference itself when it names no
+ * character.
+ *
+ * `String.fromCodePoint` throws on anything outside the Unicode range, and a
+ * file is not ours to trust: one `&#999999999;` in a vessel name would
+ * otherwise abort the whole import with a RangeError rather than importing
+ * every other track in the file.
+ */
+function codePoint(value: number, original: string): string {
+  return Number.isInteger(value) && value >= 0 && value <= 0x10ffff ? String.fromCodePoint(value) : original
 }

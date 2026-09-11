@@ -112,6 +112,49 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.segments[0]?.[0]?.timestamp).toBe(0)
   })
 
+  // Number('') and Number(' ') are 0, not NaN, so a blank attribute would land
+  // a point at null island and stretch every bounding box the track appears in.
+  it.each([
+    ['empty', '<trkpt lat="" lon=""/>'],
+    ['whitespace', '<trkpt lat=" " lon=" "/>'],
+    ['missing', '<trkpt/>'],
+  ])('drops a point whose coordinates are %s', (_kind, trkpt) => {
+    const xml = `<gpx><trk><name>A</name><trkseg>${trkpt}<trkpt lat="60" lon="24"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [60, 24], timestamp: 0 }])
+  })
+
+  // XML permits either quote style and plotters use both. Matching only double
+  // quotes drops every point of such a file without a word.
+  it.each([
+    ['single', "<trkpt lat='1' lon='2'/>"],
+    ['mixed', `<trkpt lat='1' lon="2"/>`],
+    ['spaced', '<trkpt lat = "1" lon = "2"/>'],
+  ])('reads %s-quoted coordinate attributes', (_style, trkpt) => {
+    const xml = `<gpx><trk><name>A</name><trkseg>${trkpt}</trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]?.[0]?.position).toEqual([1, 2])
+  })
+
+  it('decodes hexadecimal character references as well as decimal', () => {
+    const xml = (name: string) => `<gpx><trk><name>${name}</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml('A&#x26;B'))[0]?.name).toBe('A&B')
+    expect(fromGpx(xml('A&#38;B'))[0]?.name).toBe('A&B')
+  })
+
+  // String.fromCodePoint throws outside the Unicode range, and a file is not
+  // ours to trust: one bad reference in a name would abort the whole import
+  // rather than losing one track.
+  it.each([
+    ['decimal', '&#999999999;'],
+    ['hexadecimal', '&#xFFFFFFFF;'],
+  ])('keeps an out-of-range %s reference instead of throwing', (_kind, reference) => {
+    const xml = `<gpx><trk><name>X${reference}Y</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe(`X${reference}Y`)
+  })
+
   it('ignores a track with no points at all', () => {
     expect(fromGpx(`<gpx><trk><name>A</name></trk></gpx>`)).toEqual([])
   })
