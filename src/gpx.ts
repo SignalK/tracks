@@ -1,3 +1,5 @@
+import { DOMParser } from '@xmldom/xmldom'
+import type { Document, Element } from '@xmldom/xmldom'
 import type { TimedPosition } from './types.js'
 
 /**
@@ -86,10 +88,18 @@ const NAMESPACE = 'https://signalk.org/specification/1.7.0/'
 /**
  * Parse a GPX document into tracks.
  *
- * Deliberately forgiving about structure and strict about values: a file may
- * come from any plotter, so anything unrecognised is ignored rather than
- * rejected, but a coordinate that is not a finite number is dropped — one NaN
- * reaching the store stretches every bounding box that track appears in.
+ * Built on a real XML parser rather than regular expressions. The hand-rolled
+ * version this replaced could not tell markup from text: a commented-out
+ * `<trk>` became a real track, a `<trkseg>` inside CDATA injected points the
+ * file never declared, and `&AMP;` decoded as though XML entity names were
+ * case-insensitive. Those are not edge cases a pattern can be extended to
+ * cover — telling markup from text *is* parsing.
+ *
+ * Deliberately forgiving about structure and strict about values: elements it
+ * does not recognise are ignored rather than rejected, but a coordinate that is
+ * not an `xsd:decimal` in range, or a time that is not an `xsd:dateTime`, is
+ * refused. One NaN reaching the store stretches every bounding box that track
+ * appears in.
  *
  * **Points are sorted by time within each segment.** TimeZero paginates its
  * export in blocks of 150 and the block seams overlap: the last point of a
@@ -103,101 +113,89 @@ const NAMESPACE = 'https://signalk.org/specification/1.7.0/'
  * passages into one line. So `segments.flat()` is not globally sorted for a
  * file whose segments interleave in time, and a caller that needs that must
  * sort for itself.
+ *
+ * A document the parser rejects yields no tracks rather than throwing: this
+ * reads files the plugin did not write, and an import that fails should say so
+ * by returning nothing rather than by taking the caller down.
  */
 export function fromGpx(xml: string): GpxTrack[] {
+  let document: Document
+  try {
+    // onError swallows the warnings xmldom would otherwise print; a fatal
+    // error still throws, which the catch below turns into an empty result.
+    document = new DOMParser({ onError: () => undefined }).parseFromString(xml, 'text/xml')
+  } catch {
+    return []
+  }
+
   const tracks: GpxTrack[] = []
-  for (const match of matchAll(xml, /<trk(?=[\s>])[^>]*>([\s\S]*?)<\/trk\s*>/g)) {
-    const body = match[1] ?? ''
-    // `decodeXml` trims, so surrounding whitespace in a <name> is dropped: it
-    // is layout from the writer rather than part of the vessel's name. A name
-    // that is empty or only whitespace falls back to `Track`, because a track
-    // list with a blank row in it is worse than one with a generic label.
-    const name = decodeXml(/<name(?=[\s>])[^>]*>([\s\S]*?)<\/name\s*>/.exec(body)?.[1] ?? '') || 'Track'
-    const context = signalKContext(extensionsOf(body))
+  for (const trk of Array.from(document.getElementsByTagName('trk'))) {
     const segments: TimedPosition[][] = []
-    for (const segmentMatch of matchAll(body, /<trkseg(?=[\s>])[^>]*>([\s\S]*?)<\/trkseg\s*>/g)) {
-      const points = parsePoints(segmentMatch[1] ?? '')
+    for (const trkseg of Array.from(trk.getElementsByTagName('trkseg'))) {
+      const points = readPoints(trkseg)
       if (points.length > 0) {
         segments.push(points)
       }
     }
-    if (segments.length > 0) {
-      tracks.push({ name, segments, ...(context === '' ? {} : { context }) })
+    if (segments.length === 0) {
+      continue
     }
+    // Trimmed because surrounding whitespace is the writer's layout rather
+    // than part of the name, and defaulted because a track list with a blank
+    // row in it is worse than one with a generic label.
+    const name = childText(trk, 'name').trim() || 'Track'
+    const context = signalKContext(trk)
+    tracks.push({ name, segments, ...(context === undefined ? {} : { context }) })
   }
   return tracks
 }
 
-/**
- * The `<extensions>` blocks of a track, concatenated.
- *
- * The context is only meaningful inside one: GPX puts vendor data there, and
- * an element elsewhere in the track body -- however correctly namespaced --
- * is not this plugin's identity declaration. Reading one would let any
- * `<context>` in the document assign the track to a vessel.
- */
-function extensionsOf(body: string): string {
-  // Trackpoints carry their own <extensions>, which GPX permits and which
-  // belong to that point rather than the track. Stripping them first stops a
-  // context inside one from claiming every point in the file.
-  const trackLevel = body.replace(/<trkpt(?=[\s/>])[\s\S]*?(?:\/>|<\/trkpt\s*>)/g, '')
-  let found = ''
-  for (const match of matchAll(trackLevel, /<extensions(?=[\s/>])[^>]*>([\s\S]*?)<\/extensions\s*>/g)) {
-    found += match[1] ?? ''
-  }
-  return found
-}
-
-/**
- * The Signal K context from a track's extensions, or '' when there is none.
- *
- * Matched on its namespace rather than its local name. GPX extensions are an
- * open field that any vendor may write into, and a foreign `<context>` -- or
- * one under somebody else's prefix -- would otherwise be read as this
- * plugin's, attributing an imported track to a vessel it does not belong to.
- * The element carries its namespace declaration as an attribute, so the tag
- * cannot be required to end straight after the name.
- */
-function signalKContext(body: string): string {
-  // An XML prefix is an NCName: hyphens and dots are legal in it, so `\w+`
-  // would drop the identity from a file that used one.
-  for (const match of matchAll(body, /<([\w.-]+:)?context(?=[\s/>])([^>]*)>([\s\S]*?)<\/(?:[\w.-]+:)?context\s*>/g)) {
-    const prefix = match[1]?.slice(0, -1)
-    const attributes = match[2] ?? ''
-    // Declared on the element itself, as this plugin writes it; an inherited
-    // declaration would need a real XML parser to resolve, and a file whose
-    // context is not self-describing is not one to trust with an identity.
-    const declared = prefix === undefined ? attribute(attributes, 'xmlns') : attribute(attributes, `xmlns:${prefix}`)
-    if (declared === NAMESPACE) {
-      return decodeXml(match[3] ?? '')
+/** The text of a track's direct `<name>` child, or '' when it has none. */
+function childText(trk: Element, local: string): string {
+  for (const child of Array.from(trk.childNodes)) {
+    if (isElement(child) && child.localName === local) {
+      return child.textContent ?? ''
     }
   }
   return ''
 }
 
-function parsePoints(segmentBody: string): TimedPosition[] {
+/**
+ * The Signal K context declared in a track's own `<extensions>`.
+ *
+ * Matched on namespace URI, which is what the prefix actually means: GPX
+ * extensions are an open field any vendor may write into, so a foreign
+ * `<context>` — or one under a different prefix bound elsewhere — must not
+ * claim the track's identity. Read only from the track's direct
+ * `<extensions>` children, because a trackpoint carries its own and those
+ * belong to that point.
+ */
+function signalKContext(trk: Element): string | undefined {
+  for (const child of Array.from(trk.childNodes)) {
+    if (!isElement(child) || child.localName !== 'extensions') {
+      continue
+    }
+    for (const candidate of Array.from(child.getElementsByTagNameNS(NAMESPACE, 'context'))) {
+      const value = (candidate.textContent ?? '').trim()
+      if (value !== '') {
+        return value
+      }
+    }
+  }
+  return undefined
+}
+
+/** The points of one `<trkseg>`, oldest first. */
+function readPoints(trkseg: Element): TimedPosition[] {
   const points: TimedPosition[] = []
-  // One pattern for the whole element, self-closing or not, so a `<trkpt/>`
-  // with no time is read rather than silently skipped. The attributes are
-  // pulled out separately because their order is not fixed and a single
-  // alternation would put the coordinates in different groups per branch.
-  // `(?=[\s/>])` rather than `\b`: a word boundary also sits before a hyphen,
-  // so `<trkpt-extra lat="9" lon="9"/>` -- a legal element this parser knows
-  // nothing about -- was read as a position the file never declared.
-  for (const match of matchAll(segmentBody, /<trkpt(?=[\s/>])([^>]*?)(?:\/>|>([\s\S]*?)<\/trkpt\s*>)/g)) {
-    const attributes = match[1] ?? ''
-    const body = match[2] ?? ''
-    // `decimal` yields NaN for anything that is not an xsd:decimal, blanks
-    // included, so `inRange` below rejects them all. Calling `Number('')`
-    // directly would instead yield 0 and land the point at null island --
-    // which is why the parsing lives in the helper rather than here.
-    const latitude = decimal(attribute(attributes, 'lat'))
-    const longitude = decimal(attribute(attributes, 'lon'))
+  for (const trkpt of Array.from(trkseg.getElementsByTagName('trkpt'))) {
+    const latitude = decimal(trkpt.getAttribute('lat') ?? undefined)
+    const longitude = decimal(trkpt.getAttribute('lon') ?? undefined)
     if (!inRange(latitude, longitude)) {
       continue
     }
-    const raw = /<time(?=[\s>])[^>]*>([\s\S]*?)<\/time\s*>/.exec(body)?.[1]
-    const timestamp = raw === undefined ? Number.NaN : dateTime(raw.trim())
+    const raw = childText(trkpt, 'time').trim()
+    const timestamp = raw === '' ? Number.NaN : dateTime(raw)
     points.push({
       position: [latitude, longitude],
       // A point with no usable time is dated to the start of time rather than
@@ -211,36 +209,9 @@ function parsePoints(segmentBody: string): TimedPosition[] {
   return points.sort((a, b) => a.timestamp - b.timestamp)
 }
 
-/**
- * An attribute's value, in either quote style, or undefined when it is absent
- * or blank.
- *
- * XML permits single quotes and plotters do use them; matching only double
- * quotes drops every point of such a file without a word.
- */
-function attribute(attributes: string, name: string): string | undefined {
-  // `(^|\\s)` rather than `\\b`: a word boundary also matches after a hyphen,
-  // so `data-lat="5"` would be read as this element's latitude.
-  // The name is escaped because it is not always a literal: a namespace prefix
-  // may contain a dot, and an unescaped `xmlns:sig.k` would also match
-  // `xmlns:sigXk` -- letting a near-miss declaration claim another namespace.
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const match = new RegExp(`(?:^|\\s)${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(attributes)
-  const value = (match?.[1] ?? match?.[2])?.trim()
-  return value === undefined || value === '' ? undefined : value
-}
-
-function* matchAll(text: string, pattern: RegExp): Generator<RegExpExecArray> {
-  const regex = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`)
-  let match: RegExpExecArray | null
-  while ((match = regex.exec(text)) !== null) {
-    // A zero-length match would loop forever on the same index.
-    if (match[0] === '') {
-      regex.lastIndex += 1
-      continue
-    }
-    yield match
-  }
+/** Narrow a DOM node to an element without relying on a global Node. */
+function isElement(node: { nodeType: number }): node is Element {
+  return node.nodeType === 1
 }
 
 /**
@@ -310,51 +281,6 @@ function escapeXml(value: string): string {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&apos;')
   )
-}
-
-function decodeXml(value: string): string {
-  // One pass over the input, so nothing this produces is decoded again.
-  // Replacing entities in sequence turns `&#38;amp;` into `&` -- the numeric
-  // reference yields an ampersand, and a later pass reads the `amp;` after it
-  // as part of a second entity. XML says that input is the literal `&amp;`.
-  return value
-    .trim()
-    .replace(
-      /&(?:#x([0-9a-f]+)|#(\d+)|(amp|lt|gt|quot|apos));/gi,
-      (whole, hex: string | undefined, decimal: string | undefined, named: string | undefined) => {
-        if (hex !== undefined) {
-          return codePoint(Number.parseInt(hex, 16), whole)
-        }
-        if (decimal !== undefined) {
-          return codePoint(Number(decimal), whole)
-        }
-        switch (named?.toLowerCase()) {
-          case 'amp':
-            return '&'
-          case 'lt':
-            return '<'
-          case 'gt':
-            return '>'
-          case 'quot':
-            return '"'
-          default:
-            return "'"
-        }
-      },
-    )
-}
-
-/**
- * A character reference's character, or the reference itself when it names no
- * character.
- *
- * `String.fromCodePoint` throws on anything outside the Unicode range, and a
- * file is not ours to trust: one `&#999999999;` in a vessel name would
- * otherwise abort the whole import with a RangeError rather than importing
- * every other track in the file.
- */
-function codePoint(value: number, original: string): string {
-  return isXmlChar(value) ? String.fromCodePoint(value) : original
 }
 
 /**

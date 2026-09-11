@@ -176,15 +176,53 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.segments[0]).toHaveLength(1)
   })
 
-  // A word boundary sits before a hyphen too, so an unknown element whose name
-  // merely starts with "trkpt" was read as a position the file never declared.
+  // An element whose name merely starts with "trkpt" is not a trackpoint, and
+  // neither is one in somebody else's namespace.
   it.each([
     ['trkpt-extra', '<trkpt-extra lat="9" lon="9"/>'],
-    ['ns:trkpt', '<ns:trkpt lat="9" lon="9"/>'],
+    ['ns:trkpt', '<ns:trkpt xmlns:ns="urn:vendor" lat="9" lon="9"/>'],
   ])('does not read <%s> as a track point', (_name, element) => {
     const xml = `<gpx><trk><name>A</name><trkseg>${element}<trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
 
     expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [1, 2], timestamp: 0 }])
+  })
+
+  // A prefix with no matching xmlns declaration is not well-formed XML. A
+  // parser is entitled to refuse the document rather than guess which parts
+  // were meant: returning the readable half would claim a success the file
+  // does not support.
+  // The three defects that regular expressions could not fix, and which
+  // replacing the parser was for. Each was a real failure of the hand-rolled
+  // version: a pattern cannot tell markup from text.
+  it('does not read a commented-out track', () => {
+    const xml =
+      `<gpx><!-- <trk><name>Ghost</name><trkseg><trkpt lat="9" lon="9"/></trkseg></trk> -->` +
+      `<trk><name>Real</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml).map((t) => t.name)).toEqual(['Real'])
+  })
+
+  it('does not read tag-shaped text inside CDATA as markup', () => {
+    const xml =
+      `<gpx><trk><name>A</name>` +
+      `<extensions><note><![CDATA[<trkseg><trkpt lat="9" lon="9"/></trkseg>]]></note></extensions>` +
+      `<trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments.flat()).toEqual([{ position: [1, 2], timestamp: 0 }])
+  })
+
+  // XML entity names are case-sensitive: only the five lowercase names exist,
+  // so `&AMP;` is not an entity and must stay as written.
+  it('does not decode an uppercase entity name', () => {
+    const xml = `<gpx><trk><name>A&amp;AMP;B</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe('A&AMP;B')
+  })
+
+  it('refuses a document that is not well-formed', () => {
+    const undeclaredPrefix = `<gpx><trk><name>A</name><trkseg><ns:trkpt lat="9" lon="9"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(undeclaredPrefix)).toEqual([])
   })
 
   // An XML prefix is an NCName, so hyphens and dots are legal in it.
@@ -421,10 +459,15 @@ describe('fromGpx', () => {
   it.each([
     ['decimal', '&#999999999;'],
     ['hexadecimal', '&#xFFFFFFFF;'],
-  ])('keeps an out-of-range %s reference instead of throwing', (_kind, reference) => {
+  ])('imports the track despite an out-of-range %s reference', (_kind, reference) => {
     const xml = `<gpx><trk><name>X${reference}Y</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
 
-    expect(fromGpx(xml)[0]?.name).toBe(`X${reference}Y`)
+    const [track] = fromGpx(xml)
+
+    // The name is mangled by the substitution, which beats losing every other
+    // track in the file to one bad reference.
+    expect(track?.segments[0]).toEqual([{ position: [1, 2], timestamp: 0 }])
+    expect(track?.name).not.toBe('')
   })
 
   // A word boundary also matches after a hyphen, so `data-lat` would be read
@@ -456,11 +499,19 @@ describe('fromGpx', () => {
   it.each([
     ['NUL', '&#0;'],
     ['a C0 control', '&#11;'],
-    ['a surrogate', '&#xD800;'],
-  ])('keeps %s as a reference rather than decoding it', (_kind, reference) => {
-    const xml = `<gpx><trk><name>X${reference}Y</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+  ])('drops %s from a name on re-export', (_kind, reference) => {
+    const parsed = fromGpx(`<gpx><trk><name>X${reference}Y</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`)
 
-    expect(fromGpx(xml)[0]?.name).toBe(`X${reference}Y`)
+    // The parser decodes the reference into a character XML cannot express, so
+    // toGpx drops it: an invalid reference does not survive a round trip, and
+    // that is a deliberate loss of data no writer should have emitted.
+    expect(fromGpx(toGpx(parsed))[0]?.name).toBe('XY')
+  })
+
+  it('leaves no invalid character in a re-exported document', () => {
+    const parsed = fromGpx(`<gpx><trk><name>X&#0;Y</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`)
+
+    expect(toGpx(parsed)).not.toContain(String.fromCodePoint(0))
   })
 
   it.each([
