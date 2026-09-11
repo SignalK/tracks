@@ -44,6 +44,28 @@ describe('toGpx', () => {
     expect(xml.match(/<trkseg>/g)).toHaveLength(2)
   })
 
+  it('refuses to write a position GPX cannot express', () => {
+    const xml = toGpx([track({ segments: [[at(91, 181, 0), at(60, 24, 1000)]] })])
+
+    expect(xml).not.toContain('lat="91"')
+    expect(xml).toContain('<trkpt lat="60" lon="24">')
+  })
+
+  // A <trk> with no <trkseg> is a name and nothing else, and fromGpx ignores
+  // it -- so writing one loses the track and its identity on a round-trip.
+  it('omits a track whose segments are all empty', () => {
+    const xml = toGpx([track({ name: 'Empty', context: 'vessels.urn:mrn:imo:mmsi:1', segments: [[], []] })])
+
+    expect(xml).not.toContain('<trk>')
+    expect(fromGpx(xml)).toEqual([])
+  })
+
+  it('omits a track left empty by out-of-range points', () => {
+    const xml = toGpx([track({ segments: [[at(91, 181, 0)]] })])
+
+    expect(xml).not.toContain('<trk>')
+  })
+
   it('omits a segment with no points rather than writing an empty trkseg', () => {
     const xml = toGpx([track({ segments: [[at(60, 24)], []] })])
 
@@ -155,6 +177,29 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.name).toBe(`X${reference}Y`)
   })
 
+  // A word boundary also matches after a hyphen, so `data-lat` would be read
+  // as this element's latitude -- interpreting structure it should ignore.
+  it.each([
+    ['data-lat/data-lon', '<trkpt data-lat="5" data-lon="6"/>'],
+    ['xlat/xlon', '<trkpt xlat="5" xlon="6"/>'],
+  ])('does not mistake %s for a coordinate', (_kind, trkpt) => {
+    const xml = `<gpx><trk><name>A</name><trkseg>${trkpt}<trkpt lat="60" lon="24"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [60, 24], timestamp: 0 }])
+  })
+
+  // Beyond ±90 / ±180 is not a place. Such a value reaching the store
+  // stretches every bounding box the track appears in.
+  it.each([
+    ['latitude', '<trkpt lat="91" lon="24"/>'],
+    ['longitude', '<trkpt lat="60" lon="181"/>'],
+    ['both', '<trkpt lat="-91" lon="-181"/>'],
+  ])('drops a point whose %s is outside GPX bounds', (_which, trkpt) => {
+    const xml = `<gpx><trk><name>A</name><trkseg>${trkpt}<trkpt lat="60" lon="24"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [60, 24], timestamp: 0 }])
+  })
+
   it('ignores a track with no points at all', () => {
     expect(fromGpx(`<gpx><trk><name>A</name></trk></gpx>`)).toEqual([])
   })
@@ -222,16 +267,20 @@ const OWN_SHIP = 'gpx_export_own_ship/own_ship.gpx'
 describe.skipIf(!existsSync(`${TZ_EXPORT_DIR}/${OWN_SHIP}`))('real TimeZero exports', () => {
   const read = (file: string) => readFileSync(`${TZ_EXPORT_DIR}/${file}`, 'utf8')
 
-  it.each([
+  // Gated per file rather than per suite: the own-ship export existing does
+  // not mean the AIS ones do, and a missing one would fail rather than skip.
+  for (const [file, name, points] of [
     [OWN_SHIP, 'Own Ship', 5550],
     ['gpx_export_ais/ais_mia.gpx', 'AIS MIA', 109],
     ['gpx_export_ais/ais_ile.gpx', "AIS L'ILE DU PAPILLON", 42],
-  ])('reads every point of %s', (file, name, points) => {
-    const [parsed] = fromGpx(read(file))
+  ] as const) {
+    it.skipIf(!existsSync(`${TZ_EXPORT_DIR}/${file}`))(`reads every point of ${file}`, () => {
+      const [parsed] = fromGpx(read(file))
 
-    expect(parsed?.name).toBe(name)
-    expect(parsed?.segments.flat()).toHaveLength(points)
-  })
+      expect(parsed?.name).toBe(name)
+      expect(parsed?.segments.flat()).toHaveLength(points)
+    })
+  }
 
   it('orders the 150-point block seams that the export leaves crossed', () => {
     const xml = read(OWN_SHIP)

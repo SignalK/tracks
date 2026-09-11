@@ -3,9 +3,10 @@ import type { TimedPosition } from './types.js'
 /**
  * GPX 1.1 serialisation and parsing for recorded tracks.
  *
- * Hand-written rather than through a library: the vocabulary is `gpx`, `trk`,
- * `name`, `extensions`, `trkseg`, `trkpt` and `time` — seven element types —
- * and a dependency for that would be more surface than the code it replaces.
+ * Hand-written rather than through a library: the vocabulary is `gpx`,
+ * `metadata`, `trk`, `name`, `extensions`, `signalk:context`, `trkseg`,
+ * `trkpt` and `time` — nine element types — and a dependency for that would be
+ * more surface than the code it replaces.
  * What matters is getting the details right, and those are documented below.
  */
 
@@ -47,6 +48,14 @@ export function toGpx(tracks: GpxTrack[], now: Date = new Date()): string {
     '  </metadata>',
   ]
   for (const track of tracks) {
+    const segments = track.segments
+      .map((points) => points.filter((p) => inRange(p.position[LAT], p.position[LNG])))
+      .filter((points) => points.length > 0)
+    // A <trk> with no <trkseg> is a name and nothing else: fromGpx ignores it,
+    // so writing one loses the track and its identity on a round-trip.
+    if (segments.length === 0) {
+      continue
+    }
     lines.push('  <trk>')
     lines.push(`    <name>${escapeXml(track.name)}</name>`)
     if (track.context !== undefined) {
@@ -54,9 +63,7 @@ export function toGpx(tracks: GpxTrack[], now: Date = new Date()): string {
       lines.push(`      <signalk:context xmlns:signalk="${NAMESPACE}">${escapeXml(track.context)}</signalk:context>`)
       lines.push('    </extensions>')
     }
-    // A segment with no points would produce an empty <trkseg>, which is legal
-    // but describes nothing; skipped so a file never carries one.
-    for (const points of track.segments.filter((s) => s.length > 0)) {
+    for (const points of segments) {
       lines.push('    <trkseg>')
       for (const { position, timestamp } of points) {
         lines.push(`      <trkpt lat="${coordinate(position[LAT])}" lon="${coordinate(position[LNG])}">`)
@@ -130,7 +137,7 @@ function parsePoints(segmentBody: string): TimedPosition[] {
     // than the caller.
     const latitude = Number(attribute(attributes, 'lat'))
     const longitude = Number(attribute(attributes, 'lon'))
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    if (!inRange(latitude, longitude)) {
       continue
     }
     const raw = /<time>([\s\S]*?)<\/time>/.exec(body)?.[1]
@@ -156,7 +163,9 @@ function parsePoints(segmentBody: string): TimedPosition[] {
  * quotes drops every point of such a file without a word.
  */
 function attribute(attributes: string, name: string): string | undefined {
-  const match = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(attributes)
+  // `(^|\\s)` rather than `\\b`: a word boundary also matches after a hyphen,
+  // so `data-lat="5"` would be read as this element's latitude.
+  const match = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(attributes)
   const value = (match?.[1] ?? match?.[2])?.trim()
   return value === undefined || value === '' ? undefined : value
 }
@@ -223,4 +232,23 @@ function decodeXml(value: string): string {
  */
 function codePoint(value: number, original: string): string {
   return Number.isInteger(value) && value >= 0 && value <= 0x10ffff ? String.fromCodePoint(value) : original
+}
+
+/**
+ * Whether a position is one GPX can express.
+ *
+ * Latitude beyond ±90 or longitude beyond ±180 is not a place. Such a value
+ * reaching the store stretches every bounding box the track appears in, and
+ * writing one produces a document a validating reader rejects — so it is
+ * refused in both directions rather than trusted from a file or passed on.
+ */
+function inRange(latitude: number, longitude: number): boolean {
+  return (
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180
+  )
 }
