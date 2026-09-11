@@ -96,6 +96,19 @@ describe('toGpx', () => {
     expect(xml.match(/<trkseg>/g)).toHaveLength(1)
   })
 
+  // A NUL or a lone surrogate has no entity form, so writing one produces a
+  // document no conformant reader will load.
+  it.each([
+    ['NUL', 0],
+    ['a C0 control', 0x0b],
+    ['a lone surrogate', 0xd800],
+  ])('drops %s from a name rather than emitting invalid XML', (_kind, code) => {
+    const xml = toGpx([track({ name: `X${String.fromCodePoint(code)}Y` })])
+
+    expect(xml).toContain('<name>XY</name>')
+    expect(xml).not.toContain(String.fromCodePoint(code))
+  })
+
   it('escapes markup in a vessel name', () => {
     const xml = toGpx([track({ name: 'Fish & Chips <2>' })])
 
@@ -140,6 +153,45 @@ describe('fromGpx', () => {
     const xml =
       `<gpx><trk><name>A</name><extensions>` +
       `<sk:context xmlns:sk="https://signalk.org/specification/1.7.0/">vessels.urn:mrn:imo:mmsi:7</sk:context>` +
+      `</extensions><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.context).toBe('vessels.urn:mrn:imo:mmsi:7')
+  })
+
+  // XML permits whitespace before the closing angle bracket of any tag. A file
+  // written that way lost every track, which is the worst possible failure for
+  // a parser whose job is to be forgiving about structure.
+  it('reads structural tags written with whitespace', () => {
+    const xml = `<gpx><trk ><name >A</name ><trkseg ><trkpt lat="1" lon="2"/></trkseg ></trk ></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [1, 2], timestamp: 0 }])
+  })
+
+  it('reads a trkpt whose closing tag carries whitespace', () => {
+    const xml =
+      `<gpx><trk><name>A</name><trkseg>` +
+      `<trkpt lat="1" lon="2"><time>2020-01-01T00:00:00Z</time></trkpt >` +
+      `</trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]).toHaveLength(1)
+  })
+
+  // A word boundary sits before a hyphen too, so an unknown element whose name
+  // merely starts with "trkpt" was read as a position the file never declared.
+  it.each([
+    ['trkpt-extra', '<trkpt-extra lat="9" lon="9"/>'],
+    ['ns:trkpt', '<ns:trkpt lat="9" lon="9"/>'],
+  ])('does not read <%s> as a track point', (_name, element) => {
+    const xml = `<gpx><trk><name>A</name><trkseg>${element}<trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [1, 2], timestamp: 0 }])
+  })
+
+  // An XML prefix is an NCName, so hyphens and dots are legal in it.
+  it.each([['sig-k'], ['sig.k']])('reads a context under the %s prefix', (prefix) => {
+    const xml =
+      `<gpx><trk><name>A</name><extensions>` +
+      `<${prefix}:context xmlns:${prefix}="https://signalk.org/specification/1.7.0/">vessels.urn:mrn:imo:mmsi:7</${prefix}:context>` +
       `</extensions><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
 
     expect(fromGpx(xml)[0]?.context).toBe('vessels.urn:mrn:imo:mmsi:7')

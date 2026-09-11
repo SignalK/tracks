@@ -100,12 +100,12 @@ const NAMESPACE = 'https://signalk.org/specification/1.7.0/'
  */
 export function fromGpx(xml: string): GpxTrack[] {
   const tracks: GpxTrack[] = []
-  for (const match of matchAll(xml, /<trk>([\s\S]*?)<\/trk>/g)) {
+  for (const match of matchAll(xml, /<trk\s*>([\s\S]*?)<\/trk\s*>/g)) {
     const body = match[1] ?? ''
-    const name = decodeXml(/<name>([\s\S]*?)<\/name>/.exec(body)?.[1] ?? '') || 'Track'
+    const name = decodeXml(/<name\s*>([\s\S]*?)<\/name\s*>/.exec(body)?.[1] ?? '') || 'Track'
     const context = signalKContext(body)
     const segments: TimedPosition[][] = []
-    for (const segmentMatch of matchAll(body, /<trkseg>([\s\S]*?)<\/trkseg>/g)) {
+    for (const segmentMatch of matchAll(body, /<trkseg\s*>([\s\S]*?)<\/trkseg\s*>/g)) {
       const points = parsePoints(segmentMatch[1] ?? '')
       if (points.length > 0) {
         segments.push(points)
@@ -129,7 +129,9 @@ export function fromGpx(xml: string): GpxTrack[] {
  * cannot be required to end straight after the name.
  */
 function signalKContext(body: string): string {
-  for (const match of matchAll(body, /<(\w+:)?context\b([^>]*)>([\s\S]*?)<\/(?:\w+:)?context>/g)) {
+  // An XML prefix is an NCName: hyphens and dots are legal in it, so `\w+`
+  // would drop the identity from a file that used one.
+  for (const match of matchAll(body, /<([\w.-]+:)?context(?=[\s/>])([^>]*)>([\s\S]*?)<\/(?:[\w.-]+:)?context\s*>/g)) {
     const prefix = match[1]?.slice(0, -1)
     const attributes = match[2] ?? ''
     // Declared on the element itself, as this plugin writes it; an inherited
@@ -149,7 +151,10 @@ function parsePoints(segmentBody: string): TimedPosition[] {
   // with no time is read rather than silently skipped. The attributes are
   // pulled out separately because their order is not fixed and a single
   // alternation would put the coordinates in different groups per branch.
-  for (const match of matchAll(segmentBody, /<trkpt\b([^>]*?)(?:\/>|>([\s\S]*?)<\/trkpt>)/g)) {
+  // `(?=[\s/>])` rather than `\b`: a word boundary also sits before a hyphen,
+  // so `<trkpt-extra lat="9" lon="9"/>` -- a legal element this parser knows
+  // nothing about -- was read as a position the file never declared.
+  for (const match of matchAll(segmentBody, /<trkpt(?=[\s/>])([^>]*?)(?:\/>|>([\s\S]*?)<\/trkpt\s*>)/g)) {
     const attributes = match[1] ?? ''
     const body = match[2] ?? ''
     // `attribute` returns undefined for a blank value, and Number(undefined)
@@ -162,7 +167,7 @@ function parsePoints(segmentBody: string): TimedPosition[] {
     if (!inRange(latitude, longitude)) {
       continue
     }
-    const raw = /<time>([\s\S]*?)<\/time>/.exec(body)?.[1]
+    const raw = /<time\s*>([\s\S]*?)<\/time\s*>/.exec(body)?.[1]
     const timestamp = raw === undefined ? Number.NaN : Date.parse(raw.trim())
     points.push({
       position: [latitude, longitude],
@@ -230,12 +235,19 @@ function iso(timestamp: number): string {
 }
 
 function escapeXml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;')
+  return (
+    [...value]
+      // Dropped rather than escaped: a NUL or a lone surrogate has no entity
+      // form, so emitting one produces a document no conformant reader will
+      // load -- losing the character beats losing the file.
+      .filter((character) => isXmlChar(character.codePointAt(0) ?? -1))
+      .join('')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;')
+  )
 }
 
 function decodeXml(value: string): string {
