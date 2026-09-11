@@ -27,8 +27,7 @@ export type TrackBoundingBox = [number, number, number, number]
  * response reports the spacing and tolerance actually used — neither is always
  * the one asked for, since a budget widens the spacing and `simplify` without
  * an epsilon leaves the tolerance to the provider.
- *
- * Co-recorded properties are not implemented yet.
+
  */
 export interface TracksRequest {
   contexts?: string[]

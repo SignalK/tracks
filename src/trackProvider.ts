@@ -368,13 +368,13 @@ function chooseEpsilon(points: TimedPosition[], query: TracksRequest): number | 
 const AUTO_EPSILON_DIVISOR = 1000
 
 /**
- * Tolerance, in metres, for a track with no extent at all.
+ * Floor, in metres, under the automatic tolerance.
  *
  * Below the noise of any GPS fix, so it collapses the thousands of near
  * identical points a vessel records at anchor without altering a track that
  * actually moved.
  */
-const STATIONARY_EPSILON = 1
+const MIN_AUTO_EPSILON = 1
 
 /**
  * A tolerance scaled to how much ground a track covers.
@@ -403,7 +403,7 @@ function autoEpsilon(points: TimedPosition[]): number | undefined {
   // centimetres and drops nothing -- leaving the track most worth collapsing
   // untouched. One metre is below any GPS's own noise, so applying it as a
   // minimum cannot alter a track that actually went somewhere.
-  return Math.max(diagonal / AUTO_EPSILON_DIVISOR, STATIONARY_EPSILON)
+  return Math.max(diagonal / AUTO_EPSILON_DIVISOR, MIN_AUTO_EPSILON)
 }
 
 /** v2 accepts the `self` alias; the store keys on the qualified context. */

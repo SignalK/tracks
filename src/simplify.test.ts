@@ -105,6 +105,16 @@ describe('simplify', () => {
     expect(simplify(hemisphere, 100_000)).toHaveLength(3)
   })
 
+  // The same guard, in the other axis. Near the equator cos(latitude) is ~1,
+  // so a huge longitude span survives the scaling and would otherwise be
+  // measured flat -- understating the distance, which drops a point carrying
+  // the shape.
+  it('refuses to measure across an implausible longitude span', () => {
+    const quarterGlobe = [at(0, 0), at(1, 45), at(0, 90)]
+
+    expect(simplify(quarterGlobe, 1_000_000)).toHaveLength(3)
+  })
+
   // ...but a span a real passage could contain is still measured. Ten degrees
   // is ~1,100 km, where the projection agrees with a spherical cross-track
   // calculation to 0.1%.

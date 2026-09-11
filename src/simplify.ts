@@ -13,13 +13,13 @@ const LNG = 1
 export const M_PER_DEG = 111_320
 
 /**
- * Latitude span, in degrees, beyond which the flat projection is not trusted.
+ * Span, in scaled degrees, beyond which the flat projection is not trusted.
  *
  * Ten degrees is ~1,100 km, where the projection still agrees with a spherical
  * cross-track calculation to 0.1%. No leg between two recorded positions comes
  * close; a segment that does is a data artefact rather than a passage.
  */
-const LATITUDE_SPAN_LIMIT = 10
+const SPAN_LIMIT = 10
 
 /**
  * Douglas-Peucker simplification of a recorded track.
@@ -89,12 +89,6 @@ export function simplify(points: TimedPosition[], epsilon: number): TimedPositio
  * so `LATITUDE_SPAN_LIMIT` refuses to answer rather than answer wrongly.
  */
 function perpendicularDistance(p: TimedPosition, a: TimedPosition, b: TimedPosition): number {
-  // Beyond this the flat projection stops being trustworthy, so the point is
-  // kept rather than measured: keeping a point that could have gone costs a
-  // little geometry, dropping one that should have stayed loses the shape.
-  if (Math.abs(a.position[LAT] - b.position[LAT]) > LATITUDE_SPAN_LIMIT) {
-    return Infinity
-  }
   // Scale longitudes at the latitude midway along the segment, so a track near
   // the poles is not simplified as though a degree of longitude were 111 km
   // wide. Taking the *midpoint* rather than the start matters once a segment
@@ -102,6 +96,20 @@ function perpendicularDistance(p: TimedPosition, a: TimedPosition, b: TimedPosit
   // longitude by cos(80) and reports a point 111 km off the line as 19 km.
   const cos = Math.cos((((a.position[LAT] + b.position[LAT]) / 2) * Math.PI) / 180)
   const originLng = a.position[LNG]
+  // Beyond this the flat projection stops being trustworthy, so the point is
+  // kept rather than measured: keeping a point that could have gone costs a
+  // little geometry, dropping one that should have stayed loses the shape.
+  //
+  // Both spans are checked, longitude after scaling, so the limit means the
+  // same ground distance either way. Near the equator that scale is ~1, and
+  // two fixes a quarter of the globe apart would otherwise be measured on the
+  // flat plane and read as far closer than they are.
+  if (
+    Math.abs(a.position[LAT] - b.position[LAT]) > SPAN_LIMIT ||
+    Math.abs(nearestLongitude(b.position[LNG], originLng) - originLng) * cos > SPAN_LIMIT
+  ) {
+    return Infinity
+  }
   const ax = originLng * cos
   const ay = a.position[LAT]
   const bx = nearestLongitude(b.position[LNG], originLng) * cos
@@ -133,10 +141,6 @@ function perpendicularDistance(p: TimedPosition, a: TimedPosition, b: TimedPosit
  * number in advance. A point budget is predictable; the tolerance that
  * achieved it is what gets reported back.
  *
- * Binary search over tolerance rather than an exact solve: Douglas-Peucker is
- * monotonic in epsilon — a larger tolerance never keeps more points — so this
- * converges, and the search is bounded by iteration count rather than by
- * reaching an exact hit that may not exist.
  *
  * Not reachable through the v2 API, which takes a tolerance rather than a
  * budget. It is here for the track-management webapp's "convert to route",
@@ -154,29 +158,43 @@ export function simplifyToBudget(
   if (points.length <= budget) {
     return { points, epsilon: 0 }
   }
+  const found = searchTolerance(points, budget)
+  // A budget the tolerance cannot reach: some segment spans more than the
+  // projection is trusted across, so no epsilon drops another point. Search
+  // again for the smallest tolerance yielding what was actually achievable,
+  // so the reported epsilon still reproduces the returned track -- the
+  // ceiling the first search stopped at would claim a billion metres was
+  // applied, and zero would name a tolerance returning the original.
+  return found.points.length > budget ? searchTolerance(points, found.points.length) : found
+}
+
+/**
+ * The smallest tolerance whose result is within `bound` points.
+ *
+ * Shared by both callers so the invariant that makes a reported epsilon
+ * reproducible -- the tolerance returned is one that yields exactly the points
+ * returned -- lives in one place.
+ *
+ * Binary search rather than an exact solve: Douglas-Peucker is monotonic in
+ * epsilon, so this converges, and it is bounded by iteration count rather than
+ * by reaching an exact hit that may not exist.
+ */
+function searchTolerance(points: TimedPosition[], bound: number): { points: TimedPosition[]; epsilon: number } {
   let lo = 0
   let hi = 1
-  // Grow the upper bound until it is loose enough to meet the budget. A track
-  // can span an ocean, so a fixed ceiling would either fail on large tracks or
-  // waste iterations on small ones.
-  while (simplify(points, hi).length > budget && hi < 1e9) {
-    hi *= 4
-  }
+  // Grow the upper bound until it is loose enough. A track can span an ocean,
+  // so a fixed ceiling would either fail on large tracks or waste iterations
+  // on small ones.
   let best = simplify(points, hi)
-  let bestEpsilon = hi
-  // A budget the tolerance cannot reach: some segment spans more latitude than
-  // the projection is trusted across, so no epsilon drops another point. Fall
-  // back to the smallest tolerance that produces this same result, so the
-  // reported epsilon still reproduces what was returned -- reporting the
-  // ceiling the search stopped at would claim a billion metres was applied,
-  // and reporting zero would name a tolerance that returns the original track.
-  if (best.length > budget) {
-    return searchDown(points, best.length)
+  while (best.length > bound && hi < 1e9) {
+    hi *= 4
+    best = simplify(points, hi)
   }
+  let bestEpsilon = hi
   for (let i = 0; i < 40 && hi - lo > 0.01; i++) {
     const mid = (lo + hi) / 2
     const candidate = simplify(points, mid)
-    if (candidate.length > budget) {
+    if (candidate.length > bound) {
       lo = mid
     } else {
       hi = mid
@@ -198,33 +216,4 @@ export function simplifyToBudget(
  */
 function nearestLongitude(lng: number, origin: number): number {
   return lng - 360 * Math.round((lng - origin) / 360)
-}
-
-/**
- * The smallest tolerance that still yields exactly `size` points.
- *
- * Used when a budget cannot be met: the caller gets the shortest track
- * available *and* a tolerance that reproduces it, which is what lets a client
- * re-query and receive the same geometry.
- */
-function searchDown(points: TimedPosition[], size: number): { points: TimedPosition[]; epsilon: number } {
-  let lo = 0
-  let hi = 1
-  while (simplify(points, hi).length > size && hi < 1e9) {
-    hi *= 4
-  }
-  let best = simplify(points, hi)
-  let bestEpsilon = hi
-  for (let i = 0; i < 40 && hi - lo > 0.01; i++) {
-    const mid = (lo + hi) / 2
-    const candidate = simplify(points, mid)
-    if (candidate.length > size) {
-      lo = mid
-    } else {
-      hi = mid
-      best = candidate
-      bestEpsilon = mid
-    }
-  }
-  return { points: best, epsilon: bestEpsilon }
 }
