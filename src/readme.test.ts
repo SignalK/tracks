@@ -6,6 +6,18 @@ import { parseTrackQuery } from './timeWindow.js'
 
 // Every example printed in the README, executed. Documentation that has not
 // been run is a claim, not a fact.
+// The GPX API is only useful if a consumer can reach it: the module is built
+// into the package through src/index.ts, and without a re-export toGpx and
+// fromGpx are dead code outside this repository.
+describe('the package entry point', () => {
+  it('exports the GPX API', async () => {
+    const entry = (await import('./index.js')) as Record<string, unknown>
+
+    expect(typeof entry.toGpx).toBe('function')
+    expect(typeof entry.fromGpx).toBe('function')
+  })
+})
+
 describe('README examples', () => {
   it('?bbox=130,-35,139,-33 selects South Australia', () => {
     const { bbox } = validateParameters({ bbox: '130,-35,139,-33' }, undefined)

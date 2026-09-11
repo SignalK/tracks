@@ -797,6 +797,8 @@ export default function ThePlugin(app: App): Plugin {
   }
 }
 
+export { fromGpx, toGpx } from './gpx.js'
+export type { GpxTrack, GpxTrackIdentity } from './gpx.js'
 export { Tracks, TrackAccumulator } from './tracks.js'
 export type { TracksConfig } from './tracks.js'
 export type { TrackStore } from './store.js'
