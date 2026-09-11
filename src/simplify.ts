@@ -86,7 +86,8 @@ export function simplify(points: TimedPosition[], epsilon: number): TimedPositio
  * an 80N-to-equator segment reads 85 km where the truth is 111 km. Such a
  * segment means two consecutive fixes an ocean and a continent apart, which
  * recorded data does not contain — but the tolerance is documented in metres,
- * so `LATITUDE_SPAN_LIMIT` refuses to answer rather than answer wrongly.
+ * so `SPAN_LIMIT` refuses to answer rather than answer wrongly, in either
+ * axis.
  */
 function perpendicularDistance(p: TimedPosition, a: TimedPosition, b: TimedPosition): number {
   // Scale longitudes at the latitude midway along the segment, so a track near
