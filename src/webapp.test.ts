@@ -152,6 +152,48 @@ async function render(
 
 const feature = (properties: Record<string, unknown>) => ({ type: 'Feature', geometry: null, properties })
 
+// The request the page makes is a contract with the v2 API, and the e2e tier
+// that proves it end to end is opt-in -- so it is pinned here too, where CI
+// actually runs it. The duration is load-bearing: without it the API rejects
+// an unbounded multi-context query and the page shows an error.
+describe('the webapp asks the API for the right thing', () => {
+  const requestedUrl = async () => {
+    const { requested } = await render({ body: { type: 'FeatureCollection', features: [] } })
+    expect(requested).toHaveLength(1)
+    // Resolved against where the server mounts the page, which is what makes
+    // the relative path meaningful.
+    return new URL(requested[0]!, 'http://localhost/@signalk/tracks-plugin/index.html')
+  }
+
+  it('climbs out of the scoped mount to the v2 endpoint', async () => {
+    expect((await requestedUrl()).pathname).toBe('/signalk/v2/api/tracks')
+  })
+
+  it('asks for metadata only, over a bounded window', async () => {
+    const { searchParams } = await requestedUrl()
+
+    expect(searchParams.get('geometry')).toBe('false')
+    expect(searchParams.get('duration')).toBe('P30D')
+  })
+})
+
+// The page is served from a scoped path, so an absolute or wrongly-relative
+// asset reference resolves outside the mount and silently loads nothing.
+describe('the page references its assets relatively', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8')
+  const mount = 'http://localhost/@signalk/tracks-plugin/index.html'
+
+  it.each([
+    ['stylesheet', /<link[^>]+href="([^"]+)"/],
+    ['script', /<script[^>]+src="([^"]+)"/],
+  ])('resolves the %s inside the mount', (_what, pattern) => {
+    const href = pattern.exec(html)?.[1]
+    expect(href).toBeDefined()
+
+    expect(new URL(href!, mount).pathname).toMatch(/^\/@signalk\/tracks-plugin\//)
+  })
+})
+
 describe('the webapp renders what the API returns', () => {
   it('puts a row in the table for each track', async () => {
     const { tbody, table, status } = await render({
