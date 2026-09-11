@@ -43,18 +43,52 @@ describe('the webapp is served by a real server', () => {
   // a page that loads and then shows "Could not reach the server".
   it('resolves its API url to the real track endpoint', async () => {
     const page = new URL(`${server.url}/@signalk/tracks-plugin/index.html`)
-    const script = await (await fetchApp('tracks.js')).text()
-    // The constants are evaluated rather than pattern-matched: the URL is
-    // built from a template with the window in it, so a regex over the source
-    // would pin how it happens to be written rather than where it points.
-    // Only the declarations run — the rest of the module touches `document`.
-    const declarations = script.slice(0, script.indexOf('const status'))
-    const relative = new Function(`${declarations}\nreturn TRACKS_URL`)() as string
+    // The URL the page actually asks for, observed by running it against a
+    // stub document and a fetch that records its argument -- rather than read
+    // out of the source, which would pin how the request happens to be
+    // written rather than where it goes.
+    const { requested } = await renderShippedPage(await (await fetchApp('tracks.js')).text())
+    expect(requested).toHaveLength(1)
 
-    const resolved = new URL(relative, page)
+    const resolved = new URL(requested[0]!, page)
     const res = await fetch(resolved)
 
     expect(res.status).toBe(200)
     expect(await res.json()).toHaveProperty('features')
   })
 })
+
+/**
+ * Run the shipped script against a stub document, recording what it fetches.
+ *
+ * The unit suite has a richer version of this; here it only needs to reach the
+ * fetch, so the response is a minimal empty collection.
+ */
+async function renderShippedPage(source: string): Promise<{ requested: string[] }> {
+  const stub = () => {
+    const el: Record<string, unknown> = { dataset: {}, hidden: false, textContent: '', className: '' }
+    Object.assign(el, {
+      append: () => undefined,
+      replaceChildren: () => undefined,
+      querySelector: () => el,
+    })
+    return el
+  }
+  const shared = stub()
+  const requested: string[] = []
+  const run = new Function(
+    'document',
+    'fetch',
+    `return (async () => { ${source.replace(/^void load\(\)$/m, '')} await load() })()`,
+  ) as (d: unknown, f: unknown) => Promise<void>
+
+  await run({ getElementById: () => shared, createElement: stub }, (url: string) => {
+    requested.push(url)
+    return Promise.resolve({
+      status: 200,
+      ok: true,
+      json: () => Promise.resolve({ type: 'FeatureCollection', features: [] }),
+    })
+  })
+  return { requested }
+}

@@ -102,45 +102,52 @@ async function render(
   Object.assign(table, { querySelector: () => tbody })
 
   const source = readFileSync(new URL('../public/tracks.js', import.meta.url), 'utf8')
-  const script =
-    options.timeoutMs === undefined
-      ? source
-      : source.replace(/const REQUEST_TIMEOUT_MS = [\d_]+/, `const REQUEST_TIMEOUT_MS = ${options.timeoutMs}`)
+  // The page's own deadline is left alone; only the clock behind it is
+  // substituted, so nothing here depends on how the constant is spelled.
+  const abortSignal =
+    options.timeoutMs === undefined ? AbortSignal : { timeout: () => AbortSignal.timeout(options.timeoutMs!) }
   const run = new Function(
     'document',
     'fetch',
-    `return (async () => { ${script.replace(/^void load\(\)$/m, 'await load()')} })()`,
-  ) as (d: unknown, f: unknown) => Promise<void>
+    'AbortSignal',
+    `return (async () => { ${source.replace(/^void load\(\)$/m, '')} await load() })()`,
+  ) as (d: unknown, f: unknown, a: unknown) => Promise<void>
 
-  await run(document, (_url: string, init: { signal?: AbortSignal }) => {
-    if (response === 'stall-body') {
+  const requested: string[] = []
+  await run(
+    document,
+    (url: string, init: { signal?: AbortSignal }) => {
+      requested.push(url)
+      if (response === 'stall-body') {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          json: () =>
+            new Promise((_resolve, reject) => {
+              init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+            }),
+        })
+      }
+      if (response === 'stall') {
+        // Never settles on its own: only the page's own deadline ends it, which
+        // is the thing under test.
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+        })
+      }
+      if (response instanceof Error) {
+        return Promise.reject(response)
+      }
       return Promise.resolve({
-        status: 200,
-        ok: true,
-        json: () =>
-          new Promise((_resolve, reject) => {
-            init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
-          }),
+        status: response.status ?? 200,
+        ok: response.ok ?? true,
+        json: () => (response.body instanceof Error ? Promise.reject(response.body) : Promise.resolve(response.body)),
       })
-    }
-    if (response === 'stall') {
-      // Never settles on its own: only the page's own deadline ends it, which
-      // is the thing under test.
-      return new Promise((_resolve, reject) => {
-        init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
-      })
-    }
-    if (response instanceof Error) {
-      return Promise.reject(response)
-    }
-    return Promise.resolve({
-      status: response.status ?? 200,
-      ok: response.ok ?? true,
-      json: () => (response.body instanceof Error ? Promise.reject(response.body) : Promise.resolve(response.body)),
-    })
-  })
+    },
+    abortSignal,
+  )
 
-  return { status, tbody, table }
+  return { status, tbody, table, requested }
 }
 
 const feature = (properties: Record<string, unknown>) => ({ type: 'Feature', geometry: null, properties })
