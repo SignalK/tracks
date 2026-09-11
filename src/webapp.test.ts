@@ -9,22 +9,10 @@ import { trackLabel } from './utils.js'
  * screen and `987654321` on another is the kind of thing nobody reports as a
  * bug but everybody notices.
  *
- * The script is loaded as text and evaluated rather than imported, because it
- * touches `document` at module scope.
+ * Driven through `render()` below, which evaluates the script against a stub
+ * document -- reading a rendered row rather than the source, so a refactor of
+ * how the label is produced does not fail a test about what it says.
  */
-const source = readFileSync(new URL('../public/tracks.js', import.meta.url), 'utf8')
-
-const labelFromWebapp = (properties: { context: string; contextName?: string; isSelf: boolean }): string => {
-  const body = /function label\(\{[^}]*\}\) \{([\s\S]*?)\n\}/.exec(source)
-  if (!body) {
-    throw new Error('could not find label() in public/tracks.js')
-  }
-  const fn = new Function('properties', `const { context, contextName, isSelf } = properties;${body[1]}`) as (
-    p: unknown,
-  ) => string
-  return fn(properties)
-}
-
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
 const OTHER = 'vessels.urn:mrn:imo:mmsi:987654321'
 
@@ -37,13 +25,28 @@ describe('the webapp labels tracks as the server does', () => {
   ]
 
   for (const properties of cases) {
-    it(`agrees for ${JSON.stringify(properties)}`, () => {
+    it(`agrees for ${JSON.stringify(properties)}`, async () => {
       const lookup = (path: string) =>
         properties.contextName !== undefined && path === `${properties.context}.name`
           ? properties.contextName
           : undefined
 
-      expect(labelFromWebapp(properties)).toBe(
+      // Read off a rendered row rather than out of the source, so a refactor
+      // of how the label is produced does not fail a test about what it says.
+      const { tbody } = await render({
+        body: {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              geometry: null,
+              properties: { ...properties, from: '2026-09-01T00:00:00Z', to: '2026-09-01T01:00:00Z', pointCount: 2 },
+            },
+          ],
+        },
+      })
+
+      expect(tbody.children[0]!.children[0]!.textContent).toBe(
         trackLabel(properties.context, properties.isSelf ? properties.context : SELF, lookup),
       )
     })
@@ -112,7 +115,7 @@ async function render(response: { status?: number; ok?: boolean; body?: unknown 
     return Promise.resolve({
       status: response.status ?? 200,
       ok: response.ok ?? true,
-      json: () => Promise.resolve(response.body),
+      json: () => (response.body instanceof Error ? Promise.reject(response.body) : Promise.resolve(response.body)),
     })
   })
 
@@ -221,6 +224,38 @@ describe('the webapp renders what the API returns', () => {
 
     expect(table.hidden).toBe(true)
     expect(status.dataset.state).toBe('error')
+  })
+
+  // `void load()` means nothing catches a rejection, so an unhandled one
+  // leaves the page on "Loading…" -- indistinguishable from a hang.
+  it('reports a 200 whose body is not JSON', async () => {
+    const { status, table } = await render({ body: new Error('Unexpected token <') })
+
+    expect(table.hidden).toBe(true)
+    expect(status.dataset.state).toBe('error')
+    expect(status.textContent).not.toContain('Loading')
+  })
+
+  it('skips a malformed feature rather than blanking the list', async () => {
+    const { tbody, table } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          null,
+          { type: 'Feature', geometry: null },
+          feature({
+            context: SELF,
+            isSelf: true,
+            from: '2026-09-01T00:00:00Z',
+            to: '2026-09-01T02:00:00Z',
+            pointCount: 3,
+          }),
+        ],
+      },
+    })
+
+    expect(table.hidden).toBe(false)
+    expect(tbody.children).toHaveLength(1)
   })
 
   it('survives a response that is not a FeatureCollection', async () => {

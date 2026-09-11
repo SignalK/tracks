@@ -10,7 +10,7 @@ The repo publishes a single package, `@signalk/tracks-plugin`: the position accu
 
 It was formerly two — a `module/` workspace publishing `@signalk/tracks` plus a four-line root wrapper — which is why the tag list carries historical `m<version>` tags alongside `v<version>`. Only `v*` tags are cut now.
 
-The package is **ESM only** (`"type": "module"`) and ships only `dist/`.
+The package is **ESM only** (`"type": "module"`) and ships `dist/` plus the webapp's `public/`.
 
 ## Build and test
 
@@ -93,6 +93,6 @@ Vite transpiles without type checking, so **`npm run build` passing does not mea
 - **`engines.node` is `>=22.5.0`, and two separate things pin it.** ESM-only needs 20.19, the release where `require()` learned to load ES modules; below it the server's loader path cannot reach this plugin. `node:sqlite` needs 22.5.0, and the higher of the two wins. The server's own floor is `>=22`, so this excludes nothing that could have run the plugin. The reusable CI workflow checks the declared floor against the built-ins actually imported and **fails the build** on a mismatch — so adding a newer built-in means raising `engines.node` in the same PR.
 - **The plugin must keep a default export.** The server's `import()` fallback returns `module.default` with no `?? mod`, so a named-only export loads as `undefined`.
 - **The Signal K server runs express 4.** Route patterns use express 4 syntax — a bare `*` wildcard, not express 5's `*splat`. Pin `@types/express` to v4 so the types match the runtime.
-- **Publish only `dist/`.** `files` in `package.json` is an allowlist; the package once shipped at 174 MB unpacked because a denylist `.npmignore` failed to exclude `node_modules`. Verify with `npm pack --dry-run` — expect a handful of files and tens of KB.
+- **`files` is an allowlist, and it is short.** `dist/`, `public/` and the icon — nothing else. The package once shipped at 174 MB unpacked because a denylist `.npmignore` failed to exclude `node_modules`. Dropping `public/` is the opposite failure and just as quiet: the plugin still works and the webapp is simply absent. Verify with `npm pack --dry-run` — expect a few dozen files and tens of KB, `public/` among them.
 - **`connectable()` resets by default.** rxjs 7 replaced `publishReplay` + `ConnectableObservable`; its `connectable()` defaults to `resetOnDisconnect: true`, which would drop the accumulated buffer when the last subscriber leaves. The explicit `resetOnDisconnect: false` preserves the old behaviour and a test pins it.
 - **The README used to document the wrong path for a single vessel** ([#12](https://github.com/SignalK/tracks/issues/12)) — the route is `/signalk/v1/api/vessels/<vesselId>/track`, not `/signalk/v1/api/tracks/<vesselId>`.

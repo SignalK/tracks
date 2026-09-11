@@ -103,7 +103,18 @@ async function load() {
     return
   }
 
-  const body = await response.json()
+  let body
+  try {
+    body = await response.json()
+  } catch {
+    // A 200 carrying something that is not JSON: a proxy's error page, or a
+    // truncated response. Without this the rejection escapes `void load()` and
+    // the page sits on "Loading…" forever, which looks like a hang.
+    show('The server sent a response this page could not read.', 'error')
+    return
+  }
+  // Entries without properties are skipped rather than thrown on, for the same
+  // reason: one malformed feature should not blank the whole list.
   const features = Array.isArray(body?.features) ? body.features : []
   if (features.length === 0) {
     show('No tracks in the last 30 days.')
@@ -113,8 +124,8 @@ async function load() {
   // Newest first: the track someone came to look at is almost always the one
   // that just finished.
   const sorted = features
-    .map((feature) => feature.properties)
-    .filter(Boolean)
+    .map((feature) => feature?.properties)
+    .filter((properties) => properties && typeof properties.context === 'string')
     .sort((a, b) => String(b.to ?? '').localeCompare(String(a.to ?? '')))
 
   tbody.replaceChildren(...sorted.map(row))
