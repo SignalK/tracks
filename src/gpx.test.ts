@@ -281,6 +281,41 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.context).toBe('vessels.urn:mrn:imo:mmsi:1')
   })
 
+  // A prefix may contain a dot, which is a regex metacharacter. Unescaped,
+  // the lookup for `xmlns:sig.k` also matches `xmlns:sigXk` -- letting a
+  // near-miss declaration claim the Signal K namespace.
+  it('does not accept a near-miss namespace declaration', () => {
+    const xml =
+      `<gpx><trk><name>A</name><extensions>` +
+      `<sig.k:context xmlns:sigXk="https://signalk.org/specification/1.7.0/">vessels.urn:mrn:imo:mmsi:666</sig.k:context>` +
+      `</extensions><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.context).toBeUndefined()
+  })
+
+  // GPX types <time> as xsd:dateTime. Date.parse is far looser: it reads a
+  // bare year, rolls an impossible day forward, and accepts prose dates.
+  it.each([
+    ['date-only', '2024-01-01'],
+    ['an impossible day', '2024-02-30T00:00:00Z'],
+    ['a bare year', '2024'],
+    ['a prose date', 'Jan 1 2024'],
+  ])('falls back to the start of time for %s', (_kind, time) => {
+    const xml = `<gpx><trk><name>A</name><trkseg><trkpt lat="1" lon="2"><time>${time}</time></trkpt></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]?.[0]?.timestamp).toBe(0)
+  })
+
+  it.each([
+    ['UTC', '2024-01-01T00:00:00Z'],
+    ['fractional seconds', '2024-01-01T00:00:00.500Z'],
+    ['a zone offset', '2024-01-01T00:00:00+02:00'],
+  ])('still reads a dateTime with %s', (_kind, time) => {
+    const xml = `<gpx><trk><name>A</name><trkseg><trkpt lat="1" lon="2"><time>${time}</time></trkpt></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]?.[0]?.timestamp).toBe(Date.parse(time))
+  })
+
   it('reads a self-closing trkpt and attributes in either order', () => {
     const xml = `<gpx><trk><name>A</name><trkseg><trkpt lat="1" lon="2"/><trkpt lon="4" lat="3"/></trkseg></trk></gpx>`
 

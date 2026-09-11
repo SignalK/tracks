@@ -188,7 +188,7 @@ function parsePoints(segmentBody: string): TimedPosition[] {
       continue
     }
     const raw = /<time(?=[\s>])[^>]*>([\s\S]*?)<\/time\s*>/.exec(body)?.[1]
-    const timestamp = raw === undefined ? Number.NaN : Date.parse(raw.trim())
+    const timestamp = raw === undefined ? Number.NaN : dateTime(raw.trim())
     points.push({
       position: [latitude, longitude],
       // A point with no usable time is dated to the start of time rather than
@@ -212,7 +212,11 @@ function parsePoints(segmentBody: string): TimedPosition[] {
 function attribute(attributes: string, name: string): string | undefined {
   // `(^|\\s)` rather than `\\b`: a word boundary also matches after a hyphen,
   // so `data-lat="5"` would be read as this element's latitude.
-  const match = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(attributes)
+  // The name is escaped because it is not always a literal: a namespace prefix
+  // may contain a dot, and an unescaped `xmlns:sig.k` would also match
+  // `xmlns:sigXk` -- letting a near-miss declaration claim another namespace.
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = new RegExp(`(?:^|\\s)${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(attributes)
   const value = (match?.[1] ?? match?.[2])?.trim()
   return value === undefined || value === '' ? undefined : value
 }
@@ -249,6 +253,35 @@ function coordinate(value: number): string {
  * start of time instead, which is what `fromGpx` does with a time it cannot
  * read -- losing one point's time beats losing the document.
  */
+/**
+ * A GPX `<time>` as epoch milliseconds, or NaN when it is not one.
+ *
+ * GPX types the element as `xsd:dateTime`, and `Date.parse` is far looser: it
+ * reads a bare `2024` and `Jan 1 2024` as instants, and silently rolls
+ * `2024-02-30` forward to March. A date that never existed should reach the
+ * caller's fallback rather than arrive as a real -- and wrong -- position in
+ * time.
+ */
+function dateTime(value: string): number {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(value)
+  if (!match) {
+    return Number.NaN
+  }
+  const parsed = Date.parse(value)
+  if (Number.isNaN(parsed)) {
+    return Number.NaN
+  }
+  // Date.parse normalises an impossible day rather than rejecting it, so the
+  // calendar fields are compared against what they round-tripped to.
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const utc = new Date(Date.UTC(year, month - 1, day))
+  return utc.getUTCFullYear() === year && utc.getUTCMonth() === month - 1 && utc.getUTCDate() === day
+    ? parsed
+    : Number.NaN
+}
+
 function iso(timestamp: number): string {
   const at = new Date(timestamp)
   return Number.isNaN(at.getTime()) ? new Date(0).toISOString() : at.toISOString()
