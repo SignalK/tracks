@@ -197,6 +197,42 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.context).toBe('vessels.urn:mrn:imo:mmsi:7')
   })
 
+  // GPX types lat and lon as xsd:decimal. Number() is far more generous --
+  // 0x10 is 16 and 1e1 is 10 -- so a file using either syntax imported a
+  // position it never expressed.
+  it.each([
+    ['hexadecimal', '<trkpt lat="0x10" lon="0x10"/>'],
+    ['exponent', '<trkpt lat="1e1" lon="1e1"/>'],
+  ])('drops a point written in %s notation', (_kind, trkpt) => {
+    const xml = `<gpx><trk><name>A</name><trkseg>${trkpt}<trkpt lat="60" lon="24"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [60, 24], timestamp: 0 }])
+  })
+
+  it.each([
+    ['a leading plus', '<trkpt lat="+60" lon="+24"/>', [60, 24]],
+    ['a decimal point', '<trkpt lat="60.5" lon="-24.25"/>', [60.5, -24.25]],
+    ['no integer part', '<trkpt lat=".5" lon="-.25"/>', [0.5, -0.25]],
+  ])('still reads a coordinate with %s', (_kind, trkpt, position) => {
+    const xml = `<gpx><trk><name>A</name><trkseg>${trkpt}</trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]?.[0]?.position).toEqual(position)
+  })
+
+  // The context is only meaningful inside <extensions>. One elsewhere in the
+  // track body -- however correctly namespaced -- is not this plugin's
+  // identity declaration, and reading it would let any <context> in the
+  // document claim the track.
+  it.each([
+    ['directly under trk', (c: string) => c],
+    ['nested in a vendor element', (c: string) => `<vendor>${c}</vendor>`],
+  ])('ignores a context %s rather than inside extensions', (_where, place) => {
+    const context = `<signalk:context xmlns:signalk="https://signalk.org/specification/1.7.0/">vessels.urn:mrn:imo:mmsi:666</signalk:context>`
+    const xml = `<gpx><trk><name>A</name>${place(context)}<trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.context).toBeUndefined()
+  })
+
   it('reads a self-closing trkpt and attributes in either order', () => {
     const xml = `<gpx><trk><name>A</name><trkseg><trkpt lat="1" lon="2"/><trkpt lon="4" lat="3"/></trkseg></trk></gpx>`
 

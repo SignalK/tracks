@@ -103,7 +103,7 @@ export function fromGpx(xml: string): GpxTrack[] {
   for (const match of matchAll(xml, /<trk\s*>([\s\S]*?)<\/trk\s*>/g)) {
     const body = match[1] ?? ''
     const name = decodeXml(/<name\s*>([\s\S]*?)<\/name\s*>/.exec(body)?.[1] ?? '') || 'Track'
-    const context = signalKContext(body)
+    const context = signalKContext(extensionsOf(body))
     const segments: TimedPosition[][] = []
     for (const segmentMatch of matchAll(body, /<trkseg\s*>([\s\S]*?)<\/trkseg\s*>/g)) {
       const points = parsePoints(segmentMatch[1] ?? '')
@@ -116,6 +116,22 @@ export function fromGpx(xml: string): GpxTrack[] {
     }
   }
   return tracks
+}
+
+/**
+ * The `<extensions>` blocks of a track, concatenated.
+ *
+ * The context is only meaningful inside one: GPX puts vendor data there, and
+ * an element elsewhere in the track body -- however correctly namespaced --
+ * is not this plugin's identity declaration. Reading one would let any
+ * `<context>` in the document assign the track to a vessel.
+ */
+function extensionsOf(body: string): string {
+  let found = ''
+  for (const match of matchAll(body, /<extensions(?=[\s/>])[^>]*>([\s\S]*?)<\/extensions\s*>/g)) {
+    found += match[1] ?? ''
+  }
+  return found
 }
 
 /**
@@ -162,8 +178,8 @@ function parsePoints(segmentBody: string): TimedPosition[] {
     // attribute raw and calling Number('') would instead yield 0 and land the
     // point at null island, which is why the helper trims and rejects rather
     // than the caller.
-    const latitude = Number(attribute(attributes, 'lat'))
-    const longitude = Number(attribute(attributes, 'lon'))
+    const latitude = decimal(attribute(attributes, 'lat'))
+    const longitude = decimal(attribute(attributes, 'lon'))
     if (!inRange(latitude, longitude)) {
       continue
     }
@@ -316,6 +332,18 @@ function isXmlChar(value: number): boolean {
     (value >= 0xe000 && value <= 0xfffd) ||
     (value >= 0x10000 && value <= 0x10ffff)
   )
+}
+
+/**
+ * An attribute value as an XSD decimal, or NaN when it is not one.
+ *
+ * GPX types lat and lon as `xsd:decimal`, which is digits with an optional
+ * sign and point -- no exponent, no hexadecimal. `Number()` is far more
+ * generous: it reads `0x10` as 16 and `1e1` as 10, so a file using either
+ * imported a position it never expressed.
+ */
+function decimal(value: string | undefined): number {
+  return value !== undefined && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value) ? Number(value) : Number.NaN
 }
 
 /**
