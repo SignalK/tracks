@@ -212,6 +212,18 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.name).toBe('Fish & Chips <2>')
   })
 
+  // A numeric reference's output must not be decoded again either: XML expands
+  // `&#38;amp;` to the literal `&amp;`, not to `&`.
+  it.each([
+    ['&#38;amp;', '&amp;'],
+    ['&#38;lt;', '&lt;'],
+    ['&#x26;amp;', '&amp;'],
+  ])('decodes %s exactly once', (reference, expected) => {
+    const xml = `<gpx><trk><name>${reference}</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe(expected)
+  })
+
   // An escaped entity must not decode twice: "&amp;lt;" is the literal "&lt;".
   it('does not double-decode an escaped ampersand', () => {
     const xml = `<gpx><trk><name>&amp;lt;</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`

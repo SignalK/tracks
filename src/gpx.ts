@@ -251,19 +251,35 @@ function escapeXml(value: string): string {
 }
 
 function decodeXml(value: string): string {
-  return (
-    value
-      .trim()
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&apos;/g, "'")
-      .replace(/&#x([0-9a-f]+);/gi, (whole, code: string) => codePoint(Number.parseInt(code, 16), whole))
-      .replace(/&#(\d+);/g, (whole, code: string) => codePoint(Number(code), whole))
-      // Ampersand last, so an escaped entity is not decoded twice: &amp;lt;
-      // means the literal "&lt;", not "<".
-      .replace(/&amp;/g, '&')
-  )
+  // One pass over the input, so nothing this produces is decoded again.
+  // Replacing entities in sequence turns `&#38;amp;` into `&` -- the numeric
+  // reference yields an ampersand, and a later pass reads the `amp;` after it
+  // as part of a second entity. XML says that input is the literal `&amp;`.
+  return value
+    .trim()
+    .replace(
+      /&(?:#x([0-9a-f]+)|#(\d+)|(amp|lt|gt|quot|apos));/gi,
+      (whole, hex: string | undefined, decimal: string | undefined, named: string | undefined) => {
+        if (hex !== undefined) {
+          return codePoint(Number.parseInt(hex, 16), whole)
+        }
+        if (decimal !== undefined) {
+          return codePoint(Number(decimal), whole)
+        }
+        switch (named?.toLowerCase()) {
+          case 'amp':
+            return '&'
+          case 'lt':
+            return '<'
+          case 'gt':
+            return '>'
+          case 'quot':
+            return '"'
+          default:
+            return "'"
+        }
+      },
+    )
 }
 
 /**
