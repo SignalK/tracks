@@ -91,12 +91,11 @@ const NAMESPACE = 'https://signalk.org/specification/1.7.0/'
 /**
  * Parse a GPX document into tracks.
  *
- * Built on a real XML parser rather than regular expressions. The hand-rolled
- * version this replaced could not tell markup from text: a commented-out
- * `<trk>` became a real track, a `<trkseg>` inside CDATA injected points the
- * file never declared, and `&AMP;` decoded as though XML entity names were
- * case-insensitive. Those are not edge cases a pattern can be extended to
- * cover — telling markup from text *is* parsing.
+ * Structure follows GPX's own hierarchy: the root is `<gpx>`, tracks are its
+ * children, segments are a track's, points are a segment's. Anything else —
+ * a `<trkseg>` inside an `<extensions>` payload, a `<trk>` below the root — is
+ * not track data, and a namespace check alone cannot tell the difference,
+ * since a payload declaring no namespace inherits GPX's own.
  *
  * Deliberately forgiving about structure and strict about values: elements it
  * does not recognise are ignored rather than rejected, but a coordinate that is
@@ -141,8 +140,16 @@ export function fromGpx(xml: string): GpxTrack[] {
     return []
   }
 
+  // The root must be GPX's own: a <trk> nested in an <extensions> payload
+  // inherits the namespace and would otherwise import as a real track, and a
+  // document rooted at something else entirely is not GPX at all.
+  const root = document.documentElement
+  if (root === null || root.localName !== 'gpx' || !isGpxNamespace(root)) {
+    return []
+  }
+
   const tracks: GpxTrack[] = []
-  for (const trk of gpxElements(document, 'trk')) {
+  for (const trk of gpxChildren(root, 'trk')) {
     const segments: TimedPosition[][] = []
     for (const trkseg of gpxChildren(trk, 'trkseg')) {
       const points = readPoints(trkseg)
@@ -238,25 +245,6 @@ function gpxChildren(root: Element, local: string): Element[] {
 }
 
 /**
- * Descendant elements of `root` with this GPX local name.
- *
- * Namespace-checked, because `getElementsByTagName` is not: a document rooted
- * at `<gpx xmlns="urn:vendor">` would otherwise have every `<trkpt>` in it
- * read as a real position, and a vendor's own `<trkseg>` nested inside
- * `<extensions>` would contribute a whole extra segment.
- */
-function gpxElements(root: Document | Element, local: string): Element[] {
-  // Matched on local name, not qualified name: `getElementsByTagName('trk')`
-  // misses `<g:trk>` in a document that binds GPX to a prefix rather than as
-  // the default namespace, which is valid GPX and would otherwise import as
-  // nothing at all. Scanning every descendant costs ~20% more on a
-  // 5,550-point export, which is not a reason to get it wrong.
-  return Array.from(root.getElementsByTagName('*')).filter(
-    (element) => element.localName === local && isGpxNamespace(element),
-  )
-}
-
-/**
  * Whether an element is GPX's own.
  *
  * A null namespace counts: a great many files in the wild omit the xmlns
@@ -325,6 +313,13 @@ function iso(timestamp: number): string {
   return Number.isNaN(at.getTime()) ? new Date(0).toISOString() : at.toISOString()
 }
 
+/**
+ * XML-escape a value for element content.
+ *
+ * Characters XML cannot express are dropped rather than escaped, because they
+ * have no entity form: emitting one produces a document no conformant reader
+ * will load, and losing the character beats losing the file.
+ */
 function escapeXml(value: string): string {
   return (
     [...value]

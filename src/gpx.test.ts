@@ -187,13 +187,9 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [1, 2], timestamp: 0 }])
   })
 
-  // A prefix with no matching xmlns declaration is not well-formed XML. A
-  // parser is entitled to refuse the document rather than guess which parts
-  // were meant: returning the readable half would claim a success the file
-  // does not support.
-  // The three defects that regular expressions could not fix, and which
-  // replacing the parser was for. Each was a real failure of the hand-rolled
-  // version: a pattern cannot tell markup from text.
+  // Three things a pattern cannot do, and a parser does for free: tell a
+  // comment from markup, tell CDATA text from markup, and treat entity names
+  // as case-sensitive.
   it('does not read a commented-out track', () => {
     const xml =
       `<gpx><!-- <trk><name>Ghost</name><trkseg><trkpt lat="9" lon="9"/></trkseg></trk> -->` +
@@ -250,6 +246,26 @@ describe('fromGpx', () => {
     expect(fromGpx(foreign)).toEqual([])
   })
 
+  // A <trk> nested in an <extensions> payload inherits GPX's namespace, so
+  // only the hierarchy tells it from a real track.
+  it('ignores a trk nested below the root', () => {
+    const xml =
+      `<gpx xmlns="http://www.topografix.com/GPX/1/1">` +
+      `<extensions><vendor><trk><name>Phantom</name><trkseg><trkpt lat="9" lon="9"/></trkseg></trk></vendor></extensions>` +
+      `<trk><name>Real</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml).map((t) => t.name)).toEqual(['Real'])
+  })
+
+  // A document rooted at something else is not GPX, whatever it contains.
+  it('ignores a document whose root is not gpx', () => {
+    const xml =
+      `<vendor xmlns="urn:v"><trk xmlns="http://www.topografix.com/GPX/1/1"><name>X</name>` +
+      `<trkseg><trkpt lat="1" lon="2"/></trkseg></trk></vendor>`
+
+    expect(fromGpx(xml)).toEqual([])
+  })
+
   // GPX fixes the hierarchy: a <trkseg> is a child of <trk>, a <trkpt> a child
   // of <trkseg>. Scanning descendants instead lets an <extensions> payload
   // contribute track data -- and a payload declaring no namespace of its own
@@ -304,6 +320,10 @@ describe('fromGpx', () => {
     expect(fromGpx(strayLessThan)).toEqual([])
   })
 
+  // A prefix with no matching xmlns declaration is not well-formed XML. A
+  // parser is entitled to refuse the document rather than guess which parts
+  // were meant: returning the readable half would claim a success the file
+  // does not support.
   it('refuses a document that is not well-formed', () => {
     const undeclaredPrefix = `<gpx><trk><name>A</name><trkseg><ns:trkpt lat="9" lon="9"/></trkseg></trk></gpx>`
 
