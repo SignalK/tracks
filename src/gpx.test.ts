@@ -219,6 +219,29 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.name).toBe('A&AMP;B')
   })
 
+  // GPX may bind its namespace to a prefix rather than declare it as the
+  // default. `getElementsByTagName('trk')` matches the qualified name, so it
+  // misses `<g:trk>` entirely -- a valid document importing as nothing.
+  it('reads a document that binds GPX to a prefix', () => {
+    const xml =
+      `<g:gpx xmlns:g="http://www.topografix.com/GPX/1/1"><g:trk><g:name>Prefixed</g:name>` +
+      `<g:trkseg><g:trkpt lat="1" lon="2"><g:time>2024-01-01T00:00:00Z</g:time></g:trkpt></g:trkseg>` +
+      `</g:trk></g:gpx>`
+
+    const [track] = fromGpx(xml)
+
+    expect(track?.name).toBe('Prefixed')
+    expect(track?.segments[0]).toEqual([{ position: [1, 2], timestamp: Date.parse('2024-01-01T00:00:00Z') }])
+  })
+
+  it('reads a document mixing the default and a prefix for GPX', () => {
+    const xml =
+      `<gpx xmlns="http://www.topografix.com/GPX/1/1" xmlns:g="http://www.topografix.com/GPX/1/1">` +
+      `<trk><name>Mixed</name><g:trkseg><trkpt lat="3" lon="4"/></g:trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [3, 4], timestamp: 0 }])
+  })
+
   // getElementsByTagName ignores namespaces, so a document rooted in somebody
   // else's would otherwise have every <trkpt> in it read as a real position.
   it('ignores a document in a foreign default namespace', () => {
