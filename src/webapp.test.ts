@@ -267,10 +267,13 @@ describe('the webapp renders what the API returns', () => {
     expect(status.textContent).toContain('No tracks')
   })
 
-  it('survives a response that is not a FeatureCollection', async () => {
-    const { status, table } = await render({ body: { unexpected: true } })
+  // An error object or a login page is a failure, not an empty list; saying
+  // "no tracks" for it tells the user the opposite of what happened.
+  it('reports a response that is not a FeatureCollection', async () => {
+    const { status, table } = await render({ body: { error: 'failed' } })
 
     expect(table.hidden).toBe(true)
-    expect(status.textContent).toContain('No tracks')
+    expect(status.dataset.state).toBe('error')
+    expect(status.textContent).not.toContain('No tracks')
   })
 })

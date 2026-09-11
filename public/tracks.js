@@ -113,9 +113,16 @@ async function load() {
     show('The server sent a response this page could not read.', 'error')
     return
   }
-  // Entries without properties are skipped rather than thrown on, for the same
-  // reason: one malformed feature should not blank the whole list.
-  const features = Array.isArray(body?.features) ? body.features : []
+  // A 200 carrying something else entirely -- an error object, a login page --
+  // is a failure, not an empty list. Reporting "no tracks" for it would tell
+  // the user the opposite of what happened.
+  if (body?.type !== 'FeatureCollection' || !Array.isArray(body.features)) {
+    show('The server sent a response this page could not read.', 'error')
+    return
+  }
+  // Individual entries are still skipped rather than thrown on: one malformed
+  // feature should not blank a list that is otherwise fine.
+  const features = body.features
   // Newest first: the track someone came to look at is almost always the one
   // that just finished.
   const sorted = features
