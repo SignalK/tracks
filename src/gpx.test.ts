@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { fromGpx, toGpx } from './gpx.js'
 import type { GpxTrack } from './gpx.js'
@@ -182,10 +182,45 @@ describe('fromGpx', () => {
   })
 })
 
-// The files a real plotter produces, rather than the ones this module writes.
-describe('real TimeZero exports', () => {
-  const read = (file: string) => readFileSync(`/home/dirk/dev/tmp/TZ/${file}`, 'utf8')
-  const OWN_SHIP = 'gpx_export_own_ship/own_ship.gpx'
+// A file as a real plotter writes it, rather than as this module does.
+//
+// The fixture is synthetic but reproduces what matters: TimeZero paginates in
+// blocks of 150 and the seams overlap, so a point can be milliseconds older
+// than the one before it.
+describe('a plotter-written export', () => {
+  const seamFixture = readFileSync(new URL('./__fixtures__/timezero-seams.gpx', import.meta.url), 'utf8')
+
+  it('reads the track, its name and every point', () => {
+    const [parsed] = fromGpx(seamFixture)
+
+    expect(parsed?.name).toBe('AIS SEAM TEST')
+    expect(parsed?.segments.flat()).toHaveLength(450)
+  })
+
+  it('orders the block seams the export leaves crossed', () => {
+    const raw = [...seamFixture.matchAll(/<time>([^<]*)</g)].map((m) => Date.parse(m[1]!))
+    const inverted = raw.filter((t, i) => i > 0 && raw[i - 1]! > t)
+    // The fixture has to still exhibit the problem, or this proves nothing.
+    expect(inverted.length).toBeGreaterThan(0)
+
+    const points = fromGpx(seamFixture)[0]!.segments.flat()
+
+    expect(points.every((p, i) => i === 0 || points[i - 1]!.timestamp <= p.timestamp)).toBe(true)
+  })
+
+  it('ignores the vendor extensions it does not understand', () => {
+    expect(fromGpx(seamFixture)[0]?.context).toBeUndefined()
+  })
+})
+
+// The real exports, when this machine has them: 704 KB of vendor data does not
+// belong in the repository for a unit test, and a path that exists on one
+// workstation must not fail the suite everywhere else.
+const TZ_EXPORT_DIR = process.env.TZ_EXPORT_DIR ?? '/home/dirk/dev/tmp/TZ'
+const OWN_SHIP = 'gpx_export_own_ship/own_ship.gpx'
+
+describe.skipIf(!existsSync(`${TZ_EXPORT_DIR}/${OWN_SHIP}`))('real TimeZero exports', () => {
+  const read = (file: string) => readFileSync(`${TZ_EXPORT_DIR}/${file}`, 'utf8')
 
   it.each([
     [OWN_SHIP, 'Own Ship', 5550],
@@ -201,9 +236,8 @@ describe('real TimeZero exports', () => {
   it('orders the 150-point block seams that the export leaves crossed', () => {
     const xml = read(OWN_SHIP)
     const raw = [...xml.matchAll(/<time>([^<]*)</g)].map((m) => Date.parse(m[1]!))
-    const inversions = raw.filter((t, i) => i > 0 && raw[i - 1]! > t)
-    // The fixture has to still exhibit the problem, or this proves nothing.
-    expect(inversions.length).toBeGreaterThan(0)
+
+    expect(raw.filter((t, i) => i > 0 && raw[i - 1]! > t).length).toBeGreaterThan(0)
 
     const points = fromGpx(xml)[0]!.segments.flat()
 
