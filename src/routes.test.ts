@@ -660,6 +660,23 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track?timespan=1h`).expect(503)
   })
 
+  // The server rejects `getHistoryApi` outright when no provider is
+  // registered, which is the default install. A service that is not installed
+  // cannot be having an outage, so this must stay an ordinary empty track --
+  // the plugin has to work with no history provider at all.
+  it('serves an empty track when no history provider is registered', async () => {
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: { noProvider: true },
+    }))
+    // Known to the store, but nothing inside the window the request asks for.
+    h.seedTrack(OTHER_CONTEXT, [[60.2, 24.8]], [Date.now() - 90 * 24 * 60 * 60 * 1000])
+
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track?timespan=1h`).expect(200)
+
+    expect(res.body.coordinates).toEqual([])
+  })
+
   // The store remains the fallback: a provider is an enrichment, not a
   // dependency, so an outage must not fail a query the store can answer.
   it('still serves the stored track when the provider fails', async () => {

@@ -471,15 +471,28 @@ async function historyPositions(
     // answer counts as one.
     return { points: [], resolutionMs: applied, failed: false }
   }
+  // Resolved in its own step, because failing to reach a provider and failing
+  // to read one are different answers. The server rejects this call outright
+  // when no provider is registered — the default install — and a service that
+  // is not installed cannot be having an outage. Only a read that fails after
+  // a provider was obtained is one.
+  let historyApi: HistoryApi
   try {
     // Bounded because both awaits reach third-party code. Without this a
     // provider that never settles holds the request open, and the store
     // fallback below is never reached — which would make the "best-effort"
     // this function promises untrue.
-    const historyApi = await withTimeout(
+    historyApi = await withTimeout(
       getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
       HISTORY_QUERY_TIMEOUT_MS,
     )
+  } catch (err) {
+    if (debug.enabled) {
+      debug(`No history provider for ${context}: ${errorDetail(err)}`)
+    }
+    return { points: [], resolutionMs: applied, failed: false }
+  }
+  try {
     const response = await withTimeout(
       historyApi.getValues({
         context,
