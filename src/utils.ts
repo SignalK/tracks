@@ -270,3 +270,58 @@ function mmsiFromContext(context: string): string | undefined {
   const match = /urn:mrn:imo:mmsi:(\d+)$/.exec(context)
   return match?.[1]
 }
+
+/**
+ * A track label as a filename a browser can save.
+ *
+ * A vessel name arrives from an AIS transmission and is not ours to trust in a
+ * path, so the characters that could break out of one — separators, quotes,
+ * controls — are replaced. Everything else is kept, including non-ASCII: a
+ * boat called `Ärger` keeps its name.
+ */
+export function gpxFilename(label: string): string {
+  // Only the characters a path or a header could be broken by are replaced,
+  // rather than everything outside ASCII: stripping those turns `Ärger` into
+  // `rger` and `日本` into nothing at all, quietly renaming somebody's vessel.
+  const safe = label
+    .replace(/[\p{Cc}\p{Cf}"'\\/:*?<>|]+/gu, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+  return `${safe === '' ? 'track' : safe}.gpx`
+}
+
+/**
+ * The ASCII-only form of a filename, for the quoted `Content-Disposition`
+ * parameter.
+ *
+ * An HTTP header carries bytes: anything outside Latin-1 makes `setHeader`
+ * throw, and anything outside ASCII is reinterpreted byte-wise by the client,
+ * so `Ärger.gpx` arrives as mojibake. The real name travels in the `filename*`
+ * parameter; this is the fallback for readers that do not implement it.
+ */
+export function asciiFilename(filename: string): string {
+  // A rough fallback on purpose. Every current browser reads `filename*`, which
+  // carries the real name; this form exists for readers that do not, and no
+  // transliteration of `日本` into ASCII would be more use to them than a dash.
+  // Two vessels whose names differ only outside ASCII therefore collide here,
+  // which is a worse outcome than a leading dash on every such download.
+  const ascii = [...filename].map((character) => (character < '\u0080' ? character : '-')).join('')
+  const trimmed = ascii.replace(/-{2,}/g, '-').replace(/^-+/, '')
+  return trimmed === '.gpx' || trimmed === '' ? 'track.gpx' : trimmed
+}
+
+/**
+ * A filename as an RFC 8187 extended value, for `filename*`.
+ *
+ * `encodeURIComponent` is close but not exact: it leaves `!'()*` unescaped,
+ * and RFC 8187's `attr-char` set excludes them. A vessel called
+ * `Boat (Test)` would otherwise put raw parentheses into the header, which is
+ * not a valid extended value.
+ */
+export function rfc8187(filename: string): string {
+  return encodeURIComponent(filename).replace(
+    /[!'()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  )
+}

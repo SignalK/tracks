@@ -24,6 +24,7 @@ import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
 import { reconcile } from './reconcile.js'
 import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
+import { toGpx } from './gpx.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type {
@@ -37,7 +38,17 @@ import type {
   TimedTrackCollection,
   TrackCollection,
 } from './types.js'
-import { historyRowPosition, resolveContext, toIsoTimes, validateParameters, trackLabel, contextName } from './utils.js'
+import {
+  historyRowPosition,
+  resolveContext,
+  toIsoTimes,
+  validateParameters,
+  trackLabel,
+  contextName,
+  gpxFilename,
+  asciiFilename,
+  rfc8187,
+} from './utils.js'
 
 export interface ContextPosition {
   context: Context
@@ -592,6 +603,44 @@ export default function ThePlugin(app: App): Plugin {
       // MMSI early on picks up the real name as soon as the server has it.
       const nameOf = (context: string) => trackLabel(context, app.selfContext, (path: string) => app.getPath?.(path))
 
+      /**
+       * The points of one context, reconciled with history and segmented.
+       *
+       * Shared by the JSON and GPX routes so the two cannot answer the same
+       * question differently: the history reconciliation, the windowless
+       * fallback and the 404-only-for-an-unknown-vessel rule are subtle enough
+       * that a second copy would drift.
+       *
+       * Rejects with `undefined` when neither source knows the vessel at all.
+       */
+      const readSegments = async (context: string, query: TrackQuery): Promise<TimedPosition[][] | undefined> => {
+        const effectiveResolution = query.resolution ?? storeResolution
+        const { points: stored, known } = await tracks!
+          // Resolving instead of rejecting for an unknown context: a vessel
+          // the store has never seen may still be in a history provider —
+          // recorded before this plugin was installed, say — and 404ing
+          // before asking would hide data that exists.
+          .getTimed(context, query.window)
+          .then((points) => ({ points, known: true }))
+          .catch(() => ({ points: [] as TimedPosition[], known: false }))
+        // A history provider is the finer source for as long as its retention
+        // reaches; the store is what remains of everything older, and of any
+        // period the provider missed. A query with no window still gets
+        // history: `/self/track` with no parameters is the common case, and
+        // skipping the provider there would quietly serve store-only data.
+        const window = query.window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
+        const history = await historyPositions(app, context, window, effectiveResolution, app.debug)
+        const points = history.points.length
+          ? reconcile(history.points, stored, history.resolutionMs).positions
+          : stored
+        // 404 only for a vessel neither source knows at all. A known vessel
+        // with nothing inside the window is an empty track, not a missing one.
+        if (points.length === 0 && !known) {
+          return undefined
+        }
+        return segment(thin(points, query.resolution), segmentGap)
+      }
+
       const singleTrackHandler =
         (contextOf: (req: Request) => string): RequestHandler =>
         (req: Request, res: Response) => {
@@ -608,39 +657,13 @@ export default function ThePlugin(app: App): Plugin {
             res.json({ message: err instanceof TimeWindowError ? err.message : 'Invalid query parameters' })
             return
           }
-          const effectiveResolution = query.resolution ?? storeResolution
-          tracks
-            // Resolving instead of rejecting for an unknown context: a vessel
-            // the store has never seen may still be in a history provider —
-            // recorded before this plugin was installed, say — and 404ing
-            // before asking would hide data that exists.
-            .getTimed(context, query.window)
-            .then((points) => ({ points, known: true }))
-            .catch(() => ({ points: [] as TimedPosition[], known: false }))
-            .then(async ({ points: stored, known }) => {
-              // A history provider is the finer source for as long as its
-              // retention reaches; the store is what remains of everything
-              // older, and of any period the provider missed.
-              // A query with no window still gets history: `/self/track` with
-              // no parameters is the common case, and skipping the provider
-              // there would quietly serve store-only data. With nothing else
-              // to go on, the window spans what the store holds, extended to
-              // now so the provider can supply anything more recent.
-              const window = query.window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
-              const history = await historyPositions(app, context, window, effectiveResolution, app.debug)
-              const points = history.points.length
-                ? reconcile(history.points, stored, history.resolutionMs).positions
-                : stored
-              // 404 only for a vessel neither source knows at all. A known
-              // vessel with nothing inside the window is an empty track, not a
-              // missing one — the difference matters to a client narrowing a
-              // window rather than asking about an unknown context.
-              if (points.length === 0 && !known) {
+          readSegments(context, query)
+            .then((segments) => {
+              if (segments === undefined) {
                 res.status(404)
                 res.json({ message: `No track available for ${context}` })
                 return
               }
-              const segments = segment(thin(points, query.resolution), segmentGap)
               res.json({
                 type: 'MultiLineString',
                 coordinates: segments.map((points) => points.map(({ position }) => toLngLat(position))),
@@ -656,8 +679,77 @@ export default function ThePlugin(app: App): Plugin {
             })
         }
 
+      /**
+       * One vessel's track as a GPX file.
+       *
+       * Serialised by `toGpx` rather than assembled here, so the export a user
+       * downloads is the same document the module produces everywhere else.
+       * The webapp cannot reach that module — it ships as static files with no
+       * bundler — which is why the conversion lives behind a route instead of
+       * being duplicated in the page.
+       */
+      const gpxHandler =
+        (contextOf: (req: Request) => string): RequestHandler =>
+        (req: Request, res: Response) => {
+          if (!tracks) {
+            notAvailable(res)
+            return
+          }
+          const context = contextOf(req)
+          let query: TrackQuery
+          try {
+            query = parseTrackQuery(req.query)
+          } catch (err) {
+            res.status(400)
+            res.json({ message: err instanceof TimeWindowError ? err.message : 'Invalid query parameters' })
+            return
+          }
+          readSegments(context, query)
+            .then((segments) => {
+              if (segments === undefined) {
+                res.status(404)
+                res.json({ message: `No track available for ${context}` })
+                return
+              }
+              const label = nameOf(context)
+              const filename = gpxFilename(label)
+              res.type('application/gpx+xml')
+              // Two forms, per RFC 5987. A header carries bytes, not text, so
+              // `setHeader` throws ERR_INVALID_CHAR on a name outside Latin-1
+              // -- which this route's catch would have reported as a 404, and
+              // a name inside it would arrive mojibaked instead. The quoted
+              // form is ASCII for readers that understand nothing else; the
+              // `filename*` form carries the real name.
+              res.setHeader(
+                'Content-Disposition',
+                `attachment; filename="${asciiFilename(filename)}"; filename*=UTF-8''${rfc8187(filename)}`,
+              )
+              res.send(toGpx([{ name: label, context, segments }]))
+            })
+            .catch((err: unknown) => {
+              // Not a 404: `readSegments` already reported an unknown vessel by
+              // resolving undefined, so anything reaching here is this route
+              // failing -- serialisation, a header, a write. Reporting that as
+              // "no track available" is what disguised an ERR_INVALID_CHAR
+              // from a non-Latin-1 filename as a missing track.
+              app.error(`Could not export GPX for ${context}: ${errorDetail(err)}`)
+              if (!res.headersSent) {
+                res.status(500)
+                res.json({ message: `Could not export the track for ${context}` })
+              }
+            })
+        }
+
       const trackHandler = singleTrackHandler((req) => resolveContext(String(req.params.vesselId), app.selfContext))
       router.get('/vessels/:vesselId/track', trackHandler)
+      router.get(
+        '/vessels/:vesselId/track.gpx',
+        gpxHandler((req) => resolveContext(String(req.params.vesselId), app.selfContext)),
+      )
+      router.get(
+        '/self/track.gpx',
+        gpxHandler(() => app.selfContext),
+      )
 
       // Freeboard-SK requests the own vessel's trail here rather than at
       // /vessels/self/track. Plugin routes are mounted before the v1 REST

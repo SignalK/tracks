@@ -1,5 +1,6 @@
 import request from 'supertest'
 import { afterEach, describe, expect, it } from 'vitest'
+import { fromGpx } from './gpx.js'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { TestHarness } from './harness.test-utils.js'
 
@@ -386,5 +387,103 @@ describe('track names', () => {
     const res = await request(h.app).get(`${API}/tracks?times`).expect(200)
 
     expect(res.body[OTHER_CONTEXT].name).toBe('AIS MIA')
+  })
+})
+
+// The webapp cannot reach `toGpx` -- it ships as static files with no bundler
+// -- so the conversion lives behind a route rather than being duplicated in
+// the page, where it would drift from the module.
+describe('GET /vessels/:vesselId/track.gpx', () => {
+  it('serves the track as a GPX document', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    const res = await request(h.app).get(`${API}/vessels/${SELF_ID}/track.gpx`).expect(200)
+
+    expect(res.headers['content-type']).toContain('application/gpx+xml')
+    expect(res.text).toContain('<gpx')
+  })
+
+  // Parsed rather than string-matched: what matters is that a reader gets a
+  // document back, not that it was spelled a particular way.
+  it('serves a document that reads back as the same track', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    const res = await request(h.app).get(`${API}/self/track.gpx`).expect(200)
+    const [track] = fromGpx(res.text)
+
+    expect(track?.context).toBe(SELF_CONTEXT)
+    expect(track?.segments.flat().map((p) => p.position)).toEqual([[60.1, 24.9]])
+  })
+
+  it('offers the file under a name derived from the vessel', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    const res = await request(h.app).get(`${API}/self/track.gpx`).expect(200)
+
+    // Two parameters, per RFC 5987: an ASCII-only quoted form for readers that
+    // understand nothing else, and filename* carrying the real name.
+    expect(res.headers['content-disposition']).toBe(
+      'attachment; filename="Own-Ship.gpx"; filename*=UTF-8\'\'Own-Ship.gpx',
+    )
+  })
+
+  // An HTTP header carries bytes: a name outside Latin-1 makes setHeader throw,
+  // and this route's catch would have reported that as "no track available" --
+  // a 404 for a track that exists. A name inside Latin-1 but outside ASCII
+  // arrives mojibaked instead, which nobody reports as a bug.
+  it.each([
+    ['a Latin-1 name', 'Ärger'],
+    ['a non-Latin-1 name', '日本'],
+  ])('serves the file for %s', async (_kind, vesselName) => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      paths: { [`${OTHER_CONTEXT}.name`]: vesselName },
+    })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(200)
+
+    const disposition = res.headers['content-disposition'] ?? ''
+    // The real name travels in filename*, ASCII-only in the quoted form.
+    expect(disposition).toContain(`filename*=UTF-8''${encodeURIComponent(`AIS-${vesselName}.gpx`)}`)
+    expect(/filename="([^"]*)"/.exec(disposition)?.[1]).toMatch(/^[\x20-\x7e]+$/)
+  })
+
+  // RFC 8187's attr-char excludes !'()*, which encodeURIComponent leaves raw.
+  it('escapes reserved characters in the extended filename', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      paths: { [`${OTHER_CONTEXT}.name`]: 'Boat (Test)' },
+    })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(200)
+
+    const extended = /filename\*=UTF-8''(\S+)/.exec(res.headers['content-disposition'] ?? '')?.[1]
+    expect(extended).toBeDefined()
+    expect(extended).not.toMatch(/[!'()*]/)
+  })
+
+  it('404s for a vessel neither the store nor history knows', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    await request(h.app).get(`${API}/vessels/urn:mrn:imo:mmsi:999999999/track.gpx`).expect(404)
+  })
+
+  // The GPX and JSON routes share one read pipeline, so a query answered by
+  // one must be answered the same way by the other -- the history
+  // reconciliation and windowless fallback are too subtle to duplicate.
+  it('returns the same points as the JSON route', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]], [SELF_CONTEXT, [60.2, 25.0]])
+
+    const json = await request(h.app).get(`${API}/self/track`).expect(200)
+    const gpx = await request(h.app).get(`${API}/self/track.gpx`).expect(200)
+
+    const fromJson = (json.body.coordinates as [number, number][][]).flat().map(([lng, lat]) => [lat, lng])
+    expect(
+      fromGpx(gpx.text)[0]
+        ?.segments.flat()
+        .map((p) => p.position),
+    ).toEqual(fromJson)
   })
 })

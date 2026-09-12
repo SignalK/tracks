@@ -66,6 +66,8 @@ interface StubElement {
   hidden: boolean
   dataset: Record<string, string>
   children: StubElement[]
+  href?: string
+  rel?: string
 }
 
 const element = (tagName: string): StubElement => {
@@ -399,5 +401,72 @@ describe('the webapp renders what the API returns', () => {
     expect(table.hidden).toBe(true)
     expect(status.dataset.state).toBe('error')
     expect(status.textContent).not.toContain('No tracks')
+  })
+})
+
+// The export link is a plain <a>, so the browser handles saving and the page
+// never holds a whole track in memory.
+describe('the webapp offers a GPX download', () => {
+  it('links the own vessel through the self alias', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          feature({
+            context: SELF,
+            isSelf: true,
+            from: '2026-09-01T00:00:00Z',
+            to: '2026-09-01T02:00:00Z',
+            pointCount: 2,
+          }),
+        ],
+      },
+    })
+
+    const link = tbody.children[0]!.children[4]!.children[0]!
+    expect(link.href).toContain('/self/track.gpx')
+  })
+
+  it('links another vessel by its context', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          feature({
+            context: OTHER,
+            contextName: 'Ariadne',
+            isSelf: false,
+            from: '2026-09-01T00:00:00Z',
+            to: '2026-09-01T02:00:00Z',
+            pointCount: 2,
+          }),
+        ],
+      },
+    })
+
+    const link = tbody.children[0]!.children[4]!.children[0]!
+    expect(link.href).toContain(encodeURIComponent(OTHER))
+    expect(link.href).toContain('track.gpx')
+  })
+
+  // The list shows a bounded window, and the export must not quietly differ
+  // from what the row says it contains.
+  it('exports the same window the list shows', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          feature({
+            context: SELF,
+            isSelf: true,
+            from: '2026-09-01T00:00:00Z',
+            to: '2026-09-01T02:00:00Z',
+            pointCount: 2,
+          }),
+        ],
+      },
+    })
+
+    expect(tbody.children[0]!.children[4]!.children[0]!.href).toContain('duration=P30D')
   })
 })

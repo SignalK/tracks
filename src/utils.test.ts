@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { createInBounds, resolveContext, toIsoTimes, validateParameters, trackLabel, contextName } from './utils.js'
+import {
+  createInBounds,
+  resolveContext,
+  toIsoTimes,
+  validateParameters,
+  trackLabel,
+  contextName,
+  gpxFilename,
+  asciiFilename,
+  rfc8187,
+} from './utils.js'
 
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
 
@@ -199,5 +209,108 @@ describe('trackLabel', () => {
   // is labelled like any other target rather than guessed at.
   it('falls back to the mmsi when selfContext is unknown', () => {
     expect(trackLabel(SELF, undefined, none)).toBe('AIS 211111111')
+  })
+})
+
+describe('gpxFilename', () => {
+  it.each([
+    ['Own Ship', 'Own-Ship.gpx'],
+    ['AIS MIA', 'AIS-MIA.gpx'],
+  ])('turns %s into a filename', (label, expected) => {
+    expect(gpxFilename(label)).toBe(expected)
+  })
+
+  // A vessel name arrives from an AIS transmission: it must not be able to
+  // escape the downloads folder or break out of the header it travels in.
+  it.each([
+    ['a path traversal', '../../etc/passwd'],
+    ['a quote', 'a"b'],
+    ['a backslash', 'a\\b'],
+    ['a control character', 'a\u0000b'],
+  ])('neutralises %s', (_kind, label) => {
+    const name = gpxFilename(label)
+
+    const unsafe = [...name].filter((character) => '/\\"\''.includes(character) || character < ' ')
+
+    expect(unsafe).toEqual([])
+    expect(name.startsWith('.')).toBe(false)
+    expect(name.endsWith('.gpx')).toBe(true)
+  })
+
+  // Replacing everything outside ASCII would quietly rename somebody's boat.
+  it.each([
+    ['Ärger', 'Ärger.gpx'],
+    ['日本', '日本.gpx'],
+  ])('keeps non-ASCII in %s', (label, expected) => {
+    expect(gpxFilename(label)).toBe(expected)
+  })
+
+  it.each([
+    ['empty', ''],
+    ['only whitespace', '   '],
+    ['only separators', '///'],
+  ])('falls back for a %s name', (_kind, label) => {
+    expect(gpxFilename(label)).toBe('track.gpx')
+  })
+})
+
+describe('asciiFilename', () => {
+  it('leaves an ASCII filename alone', () => {
+    expect(asciiFilename('AIS-Ariadne.gpx')).toBe('AIS-Ariadne.gpx')
+  })
+
+  // An HTTP header carries bytes: anything outside Latin-1 makes setHeader
+  // throw, and anything outside ASCII is reinterpreted byte-wise by the
+  // client, so the quoted form has to be ASCII even though the real name
+  // travels in filename*.
+  it.each([
+    ['an umlaut', 'AIS-Ärger.gpx'],
+    ['CJK', '日本.gpx'],
+    ['an emoji', 'boat-🚢.gpx'],
+  ])('replaces %s', (_kind, filename) => {
+    const result = asciiFilename(filename)
+
+    expect([...result].every((character) => character < '\u0080')).toBe(true)
+    expect(result.endsWith('.gpx')).toBe(true)
+  })
+
+  // Pinned exactly, because "all ASCII and ends in .gpx" holds for almost any
+  // mangling -- including ones that leave a leading dash or an empty stem.
+  it.each([
+    ['AIS-Ärger.gpx', 'AIS-rger.gpx'],
+    ['AIS-Ariadne.gpx', 'AIS-Ariadne.gpx'],
+    ['Ärger.gpx', 'rger.gpx'],
+  ])('renders %s as %s', (filename, expected) => {
+    expect(asciiFilename(filename)).toBe(expected)
+  })
+
+  it.each([['日本.gpx'], ['.gpx'], ['🚢.gpx']])('falls back for %s, where nothing readable survives', (filename) => {
+    expect(asciiFilename(filename)).toBe('track.gpx')
+  })
+
+  it('never leaves a leading dash', () => {
+    expect(asciiFilename('Ärger.gpx').startsWith('-')).toBe(false)
+  })
+})
+
+describe('rfc8187', () => {
+  it('leaves an unreserved name alone', () => {
+    expect(rfc8187('AIS-Ariadne.gpx')).toBe('AIS-Ariadne.gpx')
+  })
+
+  // encodeURIComponent is close but not exact: it leaves !'()* unescaped, and
+  // RFC 8187's attr-char set excludes them, so a vessel called `Boat (Test)`
+  // would put raw parentheses into the header.
+  it.each([
+    ['parentheses', 'Boat (Test).gpx'],
+    ['an apostrophe', "L'ILE.gpx"],
+    ['an asterisk', 'Star*.gpx'],
+    ['an exclamation mark', 'Hey!.gpx'],
+  ])('escapes %s', (_kind, filename) => {
+    expect(rfc8187(filename)).not.toMatch(/[!'()*]/)
+  })
+
+  it('percent-encodes non-ASCII as UTF-8', () => {
+    expect(rfc8187('日本.gpx')).toBe('%E6%97%A5%E6%9C%AC.gpx')
   })
 })
