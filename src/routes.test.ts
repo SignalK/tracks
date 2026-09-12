@@ -420,7 +420,33 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
 
     const res = await request(h.app).get(`${API}/self/track.gpx`).expect(200)
 
-    expect(res.headers['content-disposition']).toBe('attachment; filename="Own-Ship.gpx"')
+    // Two parameters, per RFC 5987: an ASCII-only quoted form for readers that
+    // understand nothing else, and filename* carrying the real name.
+    expect(res.headers['content-disposition']).toBe(
+      'attachment; filename="Own-Ship.gpx"; filename*=UTF-8\'\'Own-Ship.gpx',
+    )
+  })
+
+  // An HTTP header carries bytes: a name outside Latin-1 makes setHeader throw,
+  // and this route's catch would have reported that as "no track available" --
+  // a 404 for a track that exists. A name inside Latin-1 but outside ASCII
+  // arrives mojibaked instead, which nobody reports as a bug.
+  it.each([
+    ['a Latin-1 name', 'Ärger'],
+    ['a non-Latin-1 name', '日本'],
+  ])('serves the file for %s', async (_kind, vesselName) => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      paths: { [`${OTHER_CONTEXT}.name`]: vesselName },
+    })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(200)
+
+    const disposition = res.headers['content-disposition'] ?? ''
+    // The real name travels in filename*, ASCII-only in the quoted form.
+    expect(disposition).toContain(`filename*=UTF-8''${encodeURIComponent(`AIS-${vesselName}.gpx`)}`)
+    expect(/filename="([^"]*)"/.exec(disposition)?.[1]).toMatch(/^[\x20-\x7e]+$/)
   })
 
   it('404s for a vessel neither the store nor history knows', async () => {

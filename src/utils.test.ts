@@ -7,6 +7,7 @@ import {
   trackLabel,
   contextName,
   gpxFilename,
+  asciiFilename,
 } from './utils.js'
 
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
@@ -249,5 +250,44 @@ describe('gpxFilename', () => {
     ['only separators', '///'],
   ])('falls back for a %s name', (_kind, label) => {
     expect(gpxFilename(label)).toBe('track.gpx')
+  })
+})
+
+describe('asciiFilename', () => {
+  it('leaves an ASCII filename alone', () => {
+    expect(asciiFilename('AIS-Ariadne.gpx')).toBe('AIS-Ariadne.gpx')
+  })
+
+  // An HTTP header carries bytes: anything outside Latin-1 makes setHeader
+  // throw, and anything outside ASCII is reinterpreted byte-wise by the
+  // client, so the quoted form has to be ASCII even though the real name
+  // travels in filename*.
+  it.each([
+    ['an umlaut', 'AIS-Ärger.gpx'],
+    ['CJK', '日本.gpx'],
+    ['an emoji', 'boat-🚢.gpx'],
+  ])('replaces %s', (_kind, filename) => {
+    const result = asciiFilename(filename)
+
+    expect([...result].every((character) => character < '\u0080')).toBe(true)
+    expect(result.endsWith('.gpx')).toBe(true)
+  })
+
+  // Pinned exactly, because "all ASCII and ends in .gpx" holds for almost any
+  // mangling -- including ones that leave a leading dash or an empty stem.
+  it.each([
+    ['AIS-Ärger.gpx', 'AIS-rger.gpx'],
+    ['AIS-Ariadne.gpx', 'AIS-Ariadne.gpx'],
+    ['Ärger.gpx', 'rger.gpx'],
+  ])('renders %s as %s', (filename, expected) => {
+    expect(asciiFilename(filename)).toBe(expected)
+  })
+
+  it.each([['日本.gpx'], ['.gpx'], ['🚢.gpx']])('falls back for %s, where nothing readable survives', (filename) => {
+    expect(asciiFilename(filename)).toBe('track.gpx')
+  })
+
+  it('never leaves a leading dash', () => {
+    expect(asciiFilename('Ärger.gpx').startsWith('-')).toBe(false)
   })
 })

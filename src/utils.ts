@@ -290,3 +290,23 @@ export function gpxFilename(label: string): string {
     .replace(/^[-.]+|[-.]+$/g, '')
   return `${safe === '' ? 'track' : safe}.gpx`
 }
+
+/**
+ * The ASCII-only form of a filename, for the quoted `Content-Disposition`
+ * parameter.
+ *
+ * An HTTP header carries bytes: anything outside Latin-1 makes `setHeader`
+ * throw, and anything outside ASCII is reinterpreted byte-wise by the client,
+ * so `Ärger.gpx` arrives as mojibake. The real name travels in the `filename*`
+ * parameter; this is the fallback for readers that do not implement it.
+ */
+export function asciiFilename(filename: string): string {
+  // A rough fallback on purpose. Every current browser reads `filename*`, which
+  // carries the real name; this form exists for readers that do not, and no
+  // transliteration of `日本` into ASCII would be more use to them than a dash.
+  // Two vessels whose names differ only outside ASCII therefore collide here,
+  // which is a worse outcome than a leading dash on every such download.
+  const ascii = [...filename].map((character) => (character < '\u0080' ? character : '-')).join('')
+  const trimmed = ascii.replace(/-{2,}/g, '-').replace(/^-+/, '')
+  return trimmed === '.gpx' || trimmed === '' ? 'track.gpx' : trimmed
+}

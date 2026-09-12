@@ -46,6 +46,7 @@ import {
   trackLabel,
   contextName,
   gpxFilename,
+  asciiFilename,
 } from './utils.js'
 
 export interface ContextPosition {
@@ -709,12 +710,20 @@ export default function ThePlugin(app: App): Plugin {
                 res.json({ message: `No track available for ${context}` })
                 return
               }
+              const label = nameOf(context)
+              const filename = gpxFilename(label)
               res.type('application/gpx+xml')
-              // A filename the user can tell apart in a downloads folder, and
-              // one no vessel name can turn into a path: only the characters a
-              // filename safely carries survive.
-              res.setHeader('Content-Disposition', `attachment; filename="${gpxFilename(nameOf(context))}"`)
-              res.send(toGpx([{ name: nameOf(context), context, segments }]))
+              // Two forms, per RFC 5987. A header carries bytes, not text, so
+              // `setHeader` throws ERR_INVALID_CHAR on a name outside Latin-1
+              // -- which this route's catch would have reported as a 404, and
+              // a name inside it would arrive mojibaked instead. The quoted
+              // form is ASCII for readers that understand nothing else; the
+              // `filename*` form carries the real name.
+              res.setHeader(
+                'Content-Disposition',
+                `attachment; filename="${asciiFilename(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+              )
+              res.send(toGpx([{ name: label, context, segments }]))
             })
             .catch(() => {
               res.status(404)
