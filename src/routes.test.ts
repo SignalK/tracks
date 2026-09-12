@@ -484,7 +484,14 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
       history: { contexts: [OTHER_CONTEXT], rows: [] },
     })
 
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(200)
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(200)
+
+    // Parsed rather than pattern-matched: a 200 carrying malformed GPX would
+    // otherwise pass. `toGpx` omits a <trk> that has no segments -- a track
+    // with a name and no points loses nothing by being left out -- so an empty
+    // export is a well-formed document carrying no tracks at all.
+    expect(res.text).toContain('<gpx ')
+    expect(fromGpx(res.text)).toEqual([])
   })
 
   it('still 404s when the provider lists no such context', async () => {
@@ -503,6 +510,56 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     })
 
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+  })
+
+  // The reason the existence question is not scoped to the requested window.
+  // A provider filters its context list by the range it is asked for, and a
+  // bare /track with an empty store falls back to a window of the last day --
+  // so a vessel last seen before that is exactly the one a window-scoped probe
+  // would fail to rescue.
+  it('serves an empty track for a vessel whose history predates the fallback window', async () => {
+    const TWO_DAYS_AGO = Date.now() - 2 * 24 * 60 * 60 * 1000
+    const h = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [OTHER_CONTEXT], contextsSince: TWO_DAYS_AGO, rows: [] },
+    })
+
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
+
+    expect(res.body.coordinates).toEqual([])
+  })
+
+  it('still 404s when the existence query itself fails', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [OTHER_CONTEXT], rows: [], getContextsRejects: true },
+    })
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+  })
+
+  // A provider that never answers must not hold the request open indefinitely:
+  // the bounded call gives up and the 404 stands.
+  it('still 404s when the existence query never settles', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [OTHER_CONTEXT], rows: [], getContextsHangs: true },
+    })
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+  }, 15_000)
+
+  // At least one provider maps its stored `self` back to the spec's spelling,
+  // so the own vessel has to be recognised under either one.
+  it('accepts vessels.self as naming the own vessel', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: ['vessels.self'], rows: [] },
+    })
+
+    const res = await request(h.app).get(`${API}/vessels/${SELF_ID}/track`).expect(200)
+
+    expect(res.body.coordinates).toEqual([])
   })
 
   it('404s for a vessel neither the store nor history knows', async () => {

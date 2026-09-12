@@ -87,8 +87,21 @@ export interface HarnessOptions {
    * returns — separately, because the difference between them is the whole
    * point of the existence probe: a provider can know a vessel and still have
    * no rows inside the asked window.
+   *
+   * `contextsSince` back-dates those contexts: a real provider filters its
+   * context list by the asked range (questdb builds a `WHERE` from it), so a
+   * stub that answers regardless of range cannot show what the probe misses.
+   * `getContextsRejects` and `getContextsHangs` cover the other two ways a
+   * provider can fail to answer.
    */
-  history?: { contexts?: string[]; rows?: unknown[]; withoutGetContexts?: boolean }
+  history?: {
+    contexts?: string[]
+    contextsSince?: number
+    rows?: unknown[]
+    withoutGetContexts?: boolean
+    getContextsRejects?: boolean
+    getContextsHangs?: boolean
+  }
 }
 
 export function createHarness(options: HarnessOptions = {}): TestHarness {
@@ -128,7 +141,24 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
                 }),
               ...(options.history?.withoutGetContexts === true
                 ? {}
-                : { getContexts: () => Promise.resolve(options.history?.contexts ?? []) }),
+                : {
+                    getContexts: (query: { from: { toString: () => string }; to: { toString: () => string } }) => {
+                      if (options.history?.getContextsRejects === true) {
+                        return Promise.reject(new Error('provider unavailable'))
+                      }
+                      if (options.history?.getContextsHangs === true) {
+                        return new Promise<string[]>(() => undefined)
+                      }
+                      const contexts = options.history?.contexts ?? []
+                      const since = options.history?.contextsSince
+                      // Mirror a range-filtering provider: a context whose data
+                      // predates the asked window is simply not listed.
+                      if (since !== undefined && since < Date.parse(query.from.toString())) {
+                        return Promise.resolve([])
+                      }
+                      return Promise.resolve(contexts)
+                    },
+                  }),
             }),
         }),
     ...(options.withoutTrackApi

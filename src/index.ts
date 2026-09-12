@@ -245,6 +245,20 @@ const HISTORY_QUERY_TIMEOUT_MS = 5000
 const WINDOWLESS_HISTORY_SPAN_MS = 24 * 60 * 60 * 1000
 
 /**
+ * How far back the existence probe looks when asking whether a provider knows
+ * a vessel at all.
+ *
+ * It has to name a span: the History API's time range has no unbounded form,
+ * every branch of it carries a bound. A provider filters its context list by
+ * that range — questdb builds a SQL `WHERE` from it — so a probe scoped to the
+ * requested window would still miss a vessel whose history ended before it,
+ * which is the very case the probe exists to catch. Ten years is "ever" for a
+ * boat log, and the cost lands only on the branch that was already about to
+ * 404.
+ */
+const EXISTENCE_PROBE_SPAN_MS = 10 * 365 * 24 * 60 * 60 * 1000
+
+/**
  * Config values arrive from the plugin UI as numbers, but a hand-edited
  * settings file can supply strings. Accept both, reject anything non-finite so
  * a bad value falls back to the default instead of poisoning arithmetic with NaN.
@@ -313,13 +327,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
- * Positions a history provider holds for a window, or none.
- *
- * Best-effort by design: a provider that is absent, slow, or failing must not
- * fail the query, because the plugin's own store can always answer it. The
- * provider is the finer source where it reaches, not a required one.
- */
-/**
  * Whether a history provider holds anything at all for a context.
  *
  * Asked only when a track is about to 404: `getValues` narrowed to a window
@@ -332,7 +339,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  * method, errors, or hangs leaves the 404 standing rather than holding the
  * request open.
  */
-async function historyKnowsContext(app: App, context: Context, window: TimeWindow, debug: Debug): Promise<boolean> {
+async function historyKnowsContext(app: App, context: Context, debug: Debug): Promise<boolean> {
   const getHistoryApi = app.getHistoryApi
   if (!getHistoryApi) {
     return false
@@ -345,10 +352,11 @@ async function historyKnowsContext(app: App, context: Context, window: TimeWindo
     if (!historyApi.getContexts) {
       return false
     }
+    const now = Date.now()
     const contexts = await withTimeout(
       historyApi.getContexts({
-        from: Temporal.Instant.from(new Date(window.from).toISOString()),
-        to: Temporal.Instant.from(new Date(window.to).toISOString()),
+        from: Temporal.Instant.from(new Date(now - EXISTENCE_PROBE_SPAN_MS).toISOString()),
+        to: Temporal.Instant.from(new Date(now).toISOString()),
       }),
       HISTORY_QUERY_TIMEOUT_MS,
     )
@@ -364,6 +372,13 @@ async function historyKnowsContext(app: App, context: Context, window: TimeWindo
   }
 }
 
+/**
+ * Positions a history provider holds for a window, or none.
+ *
+ * Best-effort by design: a provider that is absent, slow, or failing must not
+ * fail the query, because the plugin's own store can always answer it. The
+ * provider is the finer source where it reaches, not a required one.
+ */
 async function historyPositions(
   app: App,
   context: Context,
@@ -697,9 +712,9 @@ export default function ThePlugin(app: App): Plugin {
         //
         // The provider is asked a second time here, and only here: `getValues`
         // narrowed to a window cannot distinguish an unknown vessel from one
-        // whose history lies outside it. The extra call costs nothing on the
-        // common path, which never reaches this branch.
-        if (points.length === 0 && !known && !(await historyKnowsContext(app, context, window, app.debug))) {
+        // whose history lies outside it. That second question is deliberately
+        // not scoped to the window, for the same reason.
+        if (points.length === 0 && !known && !(await historyKnowsContext(app, context, app.debug))) {
           return undefined
         }
         return segment(thin(points, query.resolution), segmentGap)
