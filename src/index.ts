@@ -104,6 +104,20 @@ interface HistoryValuesQuery {
 
 interface HistoryApi {
   getValues(query: HistoryValuesQuery): Promise<HistoryValuesResponse>
+  /**
+   * Contexts the provider holds data for, within a time range.
+   *
+   * Optional here though the upstream interface requires it: a provider
+   * registered against an older server-api may not implement it, and a missing
+   * method must degrade rather than throw.
+   */
+  getContexts?(query: HistoryContextsQuery): Promise<unknown[]>
+}
+
+/** `ContextsRequest` upstream: a time range, with Instants rather than strings. */
+interface HistoryContextsQuery {
+  from: Temporal.Instant
+  to: Temporal.Instant
 }
 
 interface HistoryValuesResponse {
@@ -231,6 +245,48 @@ const HISTORY_QUERY_TIMEOUT_MS = 5000
 const WINDOWLESS_HISTORY_SPAN_MS = 24 * 60 * 60 * 1000
 
 /**
+ * The earliest instant the existence probe asks about.
+ *
+ * The probe has to name a bound: the History API's time range has no
+ * unbounded form, every branch of `TimeRangeParams` carries one. A provider
+ * filters its context list by the range it is given — questdb builds a SQL
+ * `WHERE` from it — so any bound later than the provider's oldest row can
+ * still miss a vessel and 404 it, which is the case the probe exists to catch.
+ *
+ * The Unix epoch is the bound rather than some span of years: it predates
+ * satellite navigation, so no position fix can lie before it, and unlike a
+ * fixed "wide enough" window it cannot be outlived. The cost lands only on the
+ * branch that was already about to 404, and the answer is cached.
+ */
+const EXISTENCE_PROBE_FROM_MS = 0
+
+/**
+ * How long a provider's context list is reused before asking again.
+ *
+ * The probe runs only for a vessel about to 404, which is precisely the
+ * request a client can repeat without limit — the routes are open, so
+ * enumerating vessel ids would otherwise drive one epoch-wide `getContexts`
+ * per request, each able to block for the timeout.
+ *
+ * The whole list is cached rather than a per-context answer, or enumeration
+ * would simply fill the cache with distinct keys and query just as often. The
+ * cost is that a vessel a provider learns about becomes visible up to this
+ * long after the fact, which is not a delay anyone can perceive in a track
+ * that is already minutes old.
+ */
+const KNOWN_CONTEXTS_TTL_MS = 30_000
+
+/**
+ * How long a *failed* context query is remembered.
+ *
+ * Short, so a provider that recovers is noticed quickly, but not zero: with
+ * the entry simply dropped, a provider that hangs is asked again by every
+ * subsequent miss while the earlier calls are still pending — reinstating per
+ * request exactly the cost the cache exists to prevent.
+ */
+const KNOWN_CONTEXTS_FAILURE_TTL_MS = 1_000
+
+/**
  * Config values arrive from the plugin UI as numbers, but a hand-edited
  * settings file can supply strings. Accept both, reject anything non-finite so
  * a bad value falls back to the default instead of poisoning arithmetic with NaN.
@@ -250,6 +306,16 @@ const notAvailable = (res: Response) => {
   res.status(404)
   res.json({ message: 'Tracks API not available because tracks plugin is not enabled' })
 }
+
+/**
+ * The history provider could not answer, and nothing else could either.
+ *
+ * Distinct from a missing track: a 404 asserts that no source knows the
+ * vessel, which a failed provider read cannot support. Reporting the failure
+ * as an empty track would present an outage as "this vessel has no positions
+ * here" — the one answer that is certainly wrong.
+ */
+class HistoryUnavailableError extends Error {}
 
 const errorDetail = (err: unknown): string => (err instanceof Error && err.stack ? err.stack : String(err))
 
@@ -282,9 +348,16 @@ function windowSpanning(stored: TimedPosition[], fallbackMs: number): TimeWindow
  * promise wins. A race leaves it armed, holding the event loop open for the
  * remainder of the timeout on every call that succeeds.
  */
+/**
+ * A bound expired. Distinct from the error a provider itself raises, because
+ * "did not answer in time" and "is not installed" are different answers and
+ * only one of them is an outage.
+ */
+class HistoryTimeoutError extends Error {}
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms)
+    const timer = setTimeout(() => reject(new HistoryTimeoutError(`timed out after ${ms}ms`)), ms)
     promise.then(
       (value) => {
         clearTimeout(timer)
@@ -296,6 +369,98 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       },
     )
   })
+}
+
+/**
+ * A cache entry holding the promise rather than its value, so callers that
+ * arrive while a query is still running join it instead of starting another.
+ */
+interface KnownContexts {
+  at: number
+  contexts: Promise<ReadonlySet<string>>
+}
+
+/**
+ * Whether a history provider holds anything at all for a context.
+ *
+ * Asked only when a track is about to 404: `getValues` narrowed to a window
+ * cannot tell "this vessel is unknown" from "this vessel has nothing *here*",
+ * and 404ing on the second is wrong — the contract is that a 404 means neither
+ * source knows the vessel. A vessel whose history lies wholly outside the
+ * asked window is known, and deserves an empty track.
+ *
+ * Best-effort, like every other provider call here: a provider that lacks the
+ * method, errors, or hangs leaves the 404 standing rather than holding the
+ * request open.
+ */
+async function historyKnowsContext(
+  app: App,
+  context: Context,
+  debug: Debug,
+  cache: { current: KnownContexts | undefined },
+): Promise<boolean> {
+  const getHistoryApi = app.getHistoryApi
+  if (!getHistoryApi) {
+    return false
+  }
+  try {
+    const now = Date.now()
+    // Reused while fresh, and shared while in flight: a burst of misses is one
+    // question to the provider, not one each. The promise is cached rather than
+    // its result so concurrent callers join the same query instead of starting
+    // their own.
+    //
+    // Resolving the provider is inside the cached promise, not before it: a
+    // slow or failing `getHistoryApi` would otherwise be paid per request, and
+    // could time out into a 404 for a vessel the cached list already knows.
+    const cached = cache.current
+    if (cached === undefined || now - cached.at >= KNOWN_CONTEXTS_TTL_MS) {
+      const contexts = withTimeout(
+        getHistoryApi(app.config?.settings?.historyApi?.defaultProvider)
+          .then((historyApi) =>
+            historyApi.getContexts
+              ? historyApi.getContexts({
+                  from: Temporal.Instant.from(new Date(EXISTENCE_PROBE_FROM_MS).toISOString()),
+                  to: Temporal.Instant.from(new Date(now).toISOString()),
+                })
+              : // A provider built against an older server-api has no such
+                // method. Nothing is known, and that is a cacheable answer.
+                [],
+          )
+          // Indexed once per fetch rather than scanned per request: the branch
+          // that consults this is the one an open route lets a client repeat
+          // without limit, and a provider on a busy install lists thousands of
+          // vessels. The `vessels.self` spelling at least one provider returns
+          // is resolved here, while `app.selfContext` is a single fixed value,
+          // so the lookup itself is a plain membership test.
+          .then(
+            (listed) =>
+              new Set(
+                (listed ?? [])
+                  .filter((c): c is string => typeof c === 'string')
+                  .map((c) => (c === 'vessels.self' ? app.selfContext : c)),
+              ) as ReadonlySet<string>,
+          ),
+        HISTORY_QUERY_TIMEOUT_MS,
+      )
+      // Dropped on failure so the next miss retries rather than inheriting a
+      // rejection for the rest of the window. The catch is attached here, not
+      // awaited, so a rejection never escapes as an unhandled one.
+      const entry: KnownContexts = { at: now, contexts }
+      contexts.catch(() => {
+        if (cache.current === entry) {
+          // Back-dated rather than dropped: the next miss after the failure
+          // window retries, while a burst inside it does not re-ask.
+          cache.current = { at: now - KNOWN_CONTEXTS_TTL_MS + KNOWN_CONTEXTS_FAILURE_TTL_MS, contexts }
+        }
+      })
+      cache.current = entry
+    }
+    return (await cache.current!.contexts).has(context)
+  } catch (err) {
+    debug(`History contexts unavailable for ${context}: ${errorDetail(err)}`)
+    return false
+  }
 }
 
 /**
@@ -311,7 +476,7 @@ async function historyPositions(
   window: TimeWindow,
   resolutionMs: number,
   debug: Debug,
-): Promise<{ points: TimedPosition[]; resolutionMs: number }> {
+): Promise<{ points: TimedPosition[]; resolutionMs: number; failed: boolean }> {
   // The API takes whole seconds, so the width the provider actually bucketed
   // by is not necessarily the one asked for. Reconciling on the requested
   // width would leave a stored point in a bucket history already covered, and
@@ -320,17 +485,36 @@ async function historyPositions(
   const applied = providerSeconds * 1000
   const getHistoryApi = app.getHistoryApi
   if (!getHistoryApi) {
-    return { points: [], resolutionMs: applied }
+    // Not a failure: no provider installed is the documented normal case, and
+    // the store answers alone. Only a provider that was asked and could not
+    // answer counts as one.
+    return { points: [], resolutionMs: applied, failed: false }
   }
+  // Resolved in its own step, because failing to reach a provider and failing
+  // to read one are different answers. The server rejects this call outright
+  // when no provider is registered — the default install — and a service that
+  // is not installed cannot be having an outage. Only a read that fails after
+  // a provider was obtained is one.
+  let historyApi: HistoryApi
   try {
     // Bounded because both awaits reach third-party code. Without this a
     // provider that never settles holds the request open, and the store
     // fallback below is never reached — which would make the "best-effort"
     // this function promises untrue.
-    const historyApi = await withTimeout(
+    historyApi = await withTimeout(
       getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
       HISTORY_QUERY_TIMEOUT_MS,
     )
+  } catch (err) {
+    // A provider that was registered but did not answer in time is an outage;
+    // only the server's own rejection means there is nothing installed to ask.
+    const timedOut = err instanceof HistoryTimeoutError
+    if (debug.enabled) {
+      debug(`${timedOut ? 'History provider timed out' : 'No history provider'} for ${context}: ${errorDetail(err)}`)
+    }
+    return { points: [], resolutionMs: applied, failed: timedOut }
+  }
+  try {
     const response = await withTimeout(
       historyApi.getValues({
         context,
@@ -364,12 +548,16 @@ async function historyPositions(
     if (debug.enabled) {
       debug(`History supplied ${points.length} position(s) for ${context}`)
     }
-    return { points, resolutionMs: applied }
+    return { points, resolutionMs: applied, failed: false }
   } catch (err) {
     if (debug.enabled) {
       debug(`History unavailable for ${context}: ${errorDetail(err)}`)
     }
-    return { points: [], resolutionMs: applied }
+    // Reported rather than swallowed. The store still answers where it can —
+    // a provider is an enrichment, not a dependency — but a caller with
+    // nothing else to serve has to be able to tell "no positions" from "could
+    // not ask".
+    return { points: [], resolutionMs: applied, failed: true }
   }
 }
 
@@ -398,6 +586,13 @@ export default function ThePlugin(app: App): Plugin {
   const sourceWatch = new SourceWatch()
   let glitchFilter = new GlitchFilter({ maxSpeedKnots: DEFAULT_MAX_SPEED_KNOTS })
   let stateGate = new StateGate(app.selfContext, DEFAULT_PAUSE_STATES)
+  /**
+   * The history provider's context list, cached between existence probes.
+   *
+   * Per plugin instance rather than module-global: two instances would
+   * otherwise answer from each other's provider.
+   */
+  const knownContexts: { current: KnownContexts | undefined } = { current: undefined }
 
   /** The own vessel's navigation.state, or undefined when it reports none. */
   function getVesselState(): string | undefined {
@@ -556,6 +751,10 @@ export default function ThePlugin(app: App): Plugin {
             // about.
             const asked = window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
             const history = await historyPositions(app, context, asked, effective, app.debug)
+            // `failed` is deliberately not escalated here: the v2 contract has
+            // no per-context error and no 404, so a provider outage degrades to
+            // the store's own points rather than failing a multi-context query
+            // for every other vessel in it.
             return history.points.length ? reconcile(history.points, stored, history.resolutionMs).positions : stored
           },
         }),
@@ -577,6 +776,9 @@ export default function ThePlugin(app: App): Plugin {
       sourceWatch.clear()
       glitchFilter.clear()
       stateGate.clear()
+      // A restart often follows a provider change; keeping the old list would
+      // answer from a provider that is no longer the one installed.
+      knownContexts.current = undefined
       // Release the file handle a sqlite store holds, so a plugin restart does
       // not leak it and the WAL gets checkpointed.
       //
@@ -635,8 +837,25 @@ export default function ThePlugin(app: App): Plugin {
           : stored
         // 404 only for a vessel neither source knows at all. A known vessel
         // with nothing inside the window is an empty track, not a missing one.
-        if (points.length === 0 && !known) {
-          return undefined
+        //
+        // The provider is asked a second time here, and only here: `getValues`
+        // narrowed to a window cannot distinguish an unknown vessel from one
+        // whose history lies outside it. That second question is deliberately
+        // not scoped to the window, for the same reason.
+        if (points.length === 0) {
+          // Either source knowing the vessel is enough: the store may hold it
+          // with nothing inside the asked window, which is an empty track
+          // rather than a missing one.
+          const vesselKnown = known || (await historyKnowsContext(app, context, app.debug, knownContexts))
+          if (!vesselKnown) {
+            return undefined
+          }
+          // Known, but there is nothing to serve and the one source that might
+          // have had something could not be read. Answering 200 here would
+          // report an outage as an empty history.
+          if (history.failed) {
+            throw new HistoryUnavailableError(`History provider could not be read for ${context}`)
+          }
         }
         return segment(thin(points, query.resolution), segmentGap)
       }
@@ -673,7 +892,16 @@ export default function ThePlugin(app: App): Plugin {
                 name: nameOf(context),
               })
             })
-            .catch(() => {
+            .catch((err: unknown) => {
+              // A provider outage is not a missing vessel. Reporting it as 404
+              // told clients the track does not exist, which is the one thing
+              // a failed read cannot establish.
+              if (err instanceof HistoryUnavailableError) {
+                app.error(`${err.message}`)
+                res.status(503)
+                res.json({ message: `Track history is temporarily unavailable for ${context}` })
+                return
+              }
               res.status(404)
               res.json({ message: `No track available for ${context}` })
             })
@@ -732,6 +960,14 @@ export default function ThePlugin(app: App): Plugin {
               // failing -- serialisation, a header, a write. Reporting that as
               // "no track available" is what disguised an ERR_INVALID_CHAR
               // from a non-Latin-1 filename as a missing track.
+              if (err instanceof HistoryUnavailableError) {
+                app.error(`${err.message}`)
+                if (!res.headersSent) {
+                  res.status(503)
+                  res.json({ message: `Track history is temporarily unavailable for ${context}` })
+                }
+                return
+              }
               app.error(`Could not export GPX for ${context}: ${errorDetail(err)}`)
               if (!res.headersSent) {
                 res.status(500)
