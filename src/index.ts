@@ -360,7 +360,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  */
 interface KnownContexts {
   at: number
-  contexts: Promise<unknown[]>
+  contexts: Promise<ReadonlySet<string>>
 }
 
 /**
@@ -399,16 +399,31 @@ async function historyKnowsContext(
     const cached = cache.current
     if (cached === undefined || now - cached.at >= KNOWN_CONTEXTS_TTL_MS) {
       const contexts = withTimeout(
-        getHistoryApi(app.config?.settings?.historyApi?.defaultProvider).then((historyApi) =>
-          historyApi.getContexts
-            ? historyApi.getContexts({
-                from: Temporal.Instant.from(new Date(EXISTENCE_PROBE_FROM_MS).toISOString()),
-                to: Temporal.Instant.from(new Date(now).toISOString()),
-              })
-            : // A provider built against an older server-api has no such
-              // method. Nothing is known, and that is a cacheable answer.
-              [],
-        ),
+        getHistoryApi(app.config?.settings?.historyApi?.defaultProvider)
+          .then((historyApi) =>
+            historyApi.getContexts
+              ? historyApi.getContexts({
+                  from: Temporal.Instant.from(new Date(EXISTENCE_PROBE_FROM_MS).toISOString()),
+                  to: Temporal.Instant.from(new Date(now).toISOString()),
+                })
+              : // A provider built against an older server-api has no such
+                // method. Nothing is known, and that is a cacheable answer.
+                [],
+          )
+          // Indexed once per fetch rather than scanned per request: the branch
+          // that consults this is the one an open route lets a client repeat
+          // without limit, and a provider on a busy install lists thousands of
+          // vessels. The `vessels.self` spelling at least one provider returns
+          // is resolved here, while `app.selfContext` is a single fixed value,
+          // so the lookup itself is a plain membership test.
+          .then(
+            (listed) =>
+              new Set(
+                (listed ?? [])
+                  .filter((c): c is string => typeof c === 'string')
+                  .map((c) => (c === 'vessels.self' ? app.selfContext : c)),
+              ) as ReadonlySet<string>,
+          ),
         HISTORY_QUERY_TIMEOUT_MS,
       )
       // Dropped on failure so the next miss retries rather than inheriting a
@@ -422,13 +437,7 @@ async function historyKnowsContext(
       })
       cache.current = entry
     }
-    const contexts = await cache.current!.contexts
-    // Providers return bare strings, and at least one maps its stored `self`
-    // back to the spec's `vessels.self` — so the vessel's own context has to
-    // match under either spelling.
-    return (contexts ?? []).some(
-      (listed) => listed === context || (listed === 'vessels.self' && context === app.selfContext),
-    )
+    return (await cache.current!.contexts).has(context)
   } catch (err) {
     debug(`History contexts unavailable for ${context}: ${errorDetail(err)}`)
     return false

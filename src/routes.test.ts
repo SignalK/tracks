@@ -608,10 +608,14 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   // The bound is the epoch, not a span of years, so a provider that still
   // holds a context from long ago is not mistaken for one that never knew it.
   it('finds a vessel whose history is older than any fixed span', async () => {
-    const FIFTEEN_YEARS_AGO = Date.now() - 15 * 365 * 24 * 60 * 60 * 1000
+    // Dated at the epoch itself, so any lower bound later than the epoch --
+    // fifteen years, twenty, any fixed span -- excludes the context and fails
+    // this test. A merely old fixture would survive a regression to a wider
+    // fixed window.
+    const UNIX_EPOCH = 0
     const h = (harness = createHarness({
       selfPosition: [60, 24],
-      history: { contexts: [OTHER_CONTEXT], contextsSince: FIFTEEN_YEARS_AGO, rows: [] },
+      history: { contexts: [OTHER_CONTEXT], contextsSince: UNIX_EPOCH, rows: [] },
     }))
 
     const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
