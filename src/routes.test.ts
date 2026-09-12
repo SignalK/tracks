@@ -712,6 +712,31 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(probes).toBe(2)
   })
 
+  // A restart usually follows a provider change, so the list a stopped plugin
+  // had must not answer for the provider that replaces it.
+  it('forgets the cached context list across a restart', async () => {
+    let known: string[] = []
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: {
+        rows: [],
+        get contexts() {
+          return known
+        },
+      },
+    }))
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+
+    // The provider now knows the vessel. Without the restart the cached list
+    // would keep answering 404 for the rest of the window.
+    known = [OTHER_CONTEXT]
+    h.stop()
+    h.restart()
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
+  })
+
   // A failed probe must not be remembered: the next miss has to ask again
   // rather than inherit the rejection for the rest of the window.
   it('retries after a failed existence query rather than caching the failure', async () => {

@@ -46,6 +46,13 @@ export interface TestHarness {
   setSelfState: (state: string | undefined) => void
   stop: () => void
   /**
+   * Start the same plugin instance again, with the config it was built with.
+   *
+   * A fresh harness would not do: what a restart has to show is the state the
+   * instance drops on `stop()`, which a new instance never had.
+   */
+  restart: () => void
+  /**
    * How many positions the plugin's bus subscription has accepted.
    *
    * Observable after stop(), when the store itself is closed and unreadable —
@@ -222,13 +229,14 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
   }
 
   const plugin = ThePlugin(app)
-  plugin.start({
+  const startConfig = {
     // No minimum spacing, so a synchronous burst of fed positions is all kept.
     // The sqlite store enforces resolution on write rather than through rxjs
     // throttling, so 0 genuinely means every position lands.
     resolution: 0,
     ...options.config,
-  })
+  }
+  plugin.start(startConfig)
 
   const expressApp = express()
   expressApp.use('/signalk/v1/api', plugin.signalKApiRoutes(express.Router()))
@@ -261,6 +269,7 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     // there. The directory is a mkdtemp under the OS temp dir, so leaving it is
     // harmless.
     stop: () => plugin.stop(),
+    restart: () => plugin.start(startConfig),
     emitted: () => emitted,
     errors,
     statuses,
