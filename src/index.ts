@@ -726,9 +726,17 @@ export default function ThePlugin(app: App): Plugin {
               )
               res.send(toGpx([{ name: label, context, segments }]))
             })
-            .catch(() => {
-              res.status(404)
-              res.json({ message: `No track available for ${context}` })
+            .catch((err: unknown) => {
+              // Not a 404: `readSegments` already reported an unknown vessel by
+              // resolving undefined, so anything reaching here is this route
+              // failing -- serialisation, a header, a write. Reporting that as
+              // "no track available" is what disguised an ERR_INVALID_CHAR
+              // from a non-Latin-1 filename as a missing track.
+              app.error(`Could not export GPX for ${context}: ${errorDetail(err)}`)
+              if (!res.headersSent) {
+                res.status(500)
+                res.json({ message: `Could not export the track for ${context}` })
+              }
             })
         }
 
