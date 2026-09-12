@@ -80,6 +80,15 @@ export interface HarnessOptions {
    * starts when `registerTrackApiProvider` is absent.
    */
   withoutTrackApi?: boolean
+  /**
+   * A history provider for the plugin to reconcile against.
+   *
+   * `contexts` is what `getContexts` lists, and `rows` what `getValues`
+   * returns — separately, because the difference between them is the whole
+   * point of the existence probe: a provider can know a vessel and still have
+   * no rows inside the asked window.
+   */
+  history?: { contexts?: string[]; rows?: unknown[]; withoutGetContexts?: boolean }
 }
 
 export function createHarness(options: HarnessOptions = {}): TestHarness {
@@ -105,6 +114,23 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     selfContext,
     getDataDirPath: () => dataDir,
     ...(options.paths === undefined ? {} : { getPath: (path: string): unknown => options.paths?.[path] }),
+    ...(options.history === undefined
+      ? {}
+      : {
+          getHistoryApi: () =>
+            Promise.resolve({
+              getValues: () =>
+                Promise.resolve({
+                  context: selfContext,
+                  range: { from: '', to: '' },
+                  values: [],
+                  data: options.history?.rows ?? [],
+                }),
+              ...(options.history?.withoutGetContexts === true
+                ? {}
+                : { getContexts: () => Promise.resolve(options.history?.contexts ?? []) }),
+            }),
+        }),
     ...(options.withoutTrackApi
       ? {}
       : {

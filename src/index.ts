@@ -104,6 +104,20 @@ interface HistoryValuesQuery {
 
 interface HistoryApi {
   getValues(query: HistoryValuesQuery): Promise<HistoryValuesResponse>
+  /**
+   * Contexts the provider holds data for, within a time range.
+   *
+   * Optional here though the upstream interface requires it: a provider
+   * registered against an older server-api may not implement it, and a missing
+   * method must degrade rather than throw.
+   */
+  getContexts?(query: HistoryContextsQuery): Promise<unknown[]>
+}
+
+/** `ContextsRequest` upstream: a time range, with Instants rather than strings. */
+interface HistoryContextsQuery {
+  from: Temporal.Instant
+  to: Temporal.Instant
 }
 
 interface HistoryValuesResponse {
@@ -305,6 +319,51 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  * fail the query, because the plugin's own store can always answer it. The
  * provider is the finer source where it reaches, not a required one.
  */
+/**
+ * Whether a history provider holds anything at all for a context.
+ *
+ * Asked only when a track is about to 404: `getValues` narrowed to a window
+ * cannot tell "this vessel is unknown" from "this vessel has nothing *here*",
+ * and 404ing on the second is wrong — the contract is that a 404 means neither
+ * source knows the vessel. A vessel whose history lies wholly outside the
+ * asked window is known, and deserves an empty track.
+ *
+ * Best-effort, like every other provider call here: a provider that lacks the
+ * method, errors, or hangs leaves the 404 standing rather than holding the
+ * request open.
+ */
+async function historyKnowsContext(app: App, context: Context, window: TimeWindow, debug: Debug): Promise<boolean> {
+  const getHistoryApi = app.getHistoryApi
+  if (!getHistoryApi) {
+    return false
+  }
+  try {
+    const historyApi = await withTimeout(
+      getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
+      HISTORY_QUERY_TIMEOUT_MS,
+    )
+    if (!historyApi.getContexts) {
+      return false
+    }
+    const contexts = await withTimeout(
+      historyApi.getContexts({
+        from: Temporal.Instant.from(new Date(window.from).toISOString()),
+        to: Temporal.Instant.from(new Date(window.to).toISOString()),
+      }),
+      HISTORY_QUERY_TIMEOUT_MS,
+    )
+    // Providers return bare strings, and at least one maps its stored `self`
+    // back to the spec's `vessels.self` — so the vessel's own context has to
+    // match under either spelling.
+    return (contexts ?? []).some(
+      (listed) => listed === context || (listed === 'vessels.self' && context === app.selfContext),
+    )
+  } catch (err) {
+    debug(`History contexts unavailable for ${context}: ${errorDetail(err)}`)
+    return false
+  }
+}
+
 async function historyPositions(
   app: App,
   context: Context,
@@ -635,7 +694,12 @@ export default function ThePlugin(app: App): Plugin {
           : stored
         // 404 only for a vessel neither source knows at all. A known vessel
         // with nothing inside the window is an empty track, not a missing one.
-        if (points.length === 0 && !known) {
+        //
+        // The provider is asked a second time here, and only here: `getValues`
+        // narrowed to a window cannot distinguish an unknown vessel from one
+        // whose history lies outside it. The extra call costs nothing on the
+        // common path, which never reaches this branch.
+        if (points.length === 0 && !known && !(await historyKnowsContext(app, context, window, app.debug))) {
           return undefined
         }
         return segment(thin(points, query.resolution), segmentGap)

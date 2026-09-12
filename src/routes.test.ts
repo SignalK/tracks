@@ -464,6 +464,47 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(extended).not.toMatch(/[!'()*]/)
   })
 
+  // A 404 means neither source knows the vessel. `getValues` narrowed to a
+  // window cannot tell an unknown vessel from one whose history lies outside
+  // it, so a vessel the provider lists is a known vessel with an empty track.
+  it('serves an empty track for a vessel history knows but has no rows for', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [OTHER_CONTEXT], rows: [] },
+    })
+
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
+
+    expect(res.body.coordinates).toEqual([])
+  })
+
+  it('exports an empty GPX for that vessel rather than 404ing', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [OTHER_CONTEXT], rows: [] },
+    })
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(200)
+  })
+
+  it('still 404s when the provider lists no such context', async () => {
+    const h = createHarness({ selfPosition: [60, 24], history: { contexts: [], rows: [] } })
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+  })
+
+  // The upstream interface requires getContexts, but a provider built against
+  // an older server-api may not have it. A missing method must degrade to the
+  // old behaviour rather than throw.
+  it('still 404s against a provider with no getContexts', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      history: { rows: [], withoutGetContexts: true },
+    })
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+  })
+
   it('404s for a vessel neither the store nor history knows', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
 
