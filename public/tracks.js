@@ -69,8 +69,34 @@ function row(properties) {
   if (properties.isSelf) {
     name.className = 'self'
   }
-  tr.append(name, cell(when(properties.from)), cell(when(properties.to)), cell(properties.pointCount, 'num'))
+  tr.append(
+    name,
+    cell(when(properties.from)),
+    cell(when(properties.to)),
+    cell(properties.pointCount, 'num'),
+    exportCell(properties),
+  )
   return tr
+}
+
+/**
+ * A link that downloads this track as GPX.
+ *
+ * A plain link rather than a fetch: the browser already knows how to save a
+ * response with a Content-Disposition on it, and the server sets one. Doing it
+ * by hand would mean holding a whole track in memory to build a blob.
+ */
+function exportCell({ context, isSelf }) {
+  const td = document.createElement('td')
+  const link = document.createElement('a')
+  // `self` resolves server-side; using it keeps the URL short and avoids
+  // guessing how the own vessel's context should be spelled.
+  const vessel = isSelf ? 'self/track.gpx' : `vessels/${encodeURIComponent(context)}/track.gpx`
+  link.href = `../../signalk/v1/api/${vessel}?duration=${WINDOW}`
+  link.textContent = 'GPX'
+  link.rel = 'nofollow'
+  td.append(link)
+  return td
 }
 
 function cell(text, className) {

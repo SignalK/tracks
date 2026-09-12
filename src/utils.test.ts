@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { createInBounds, resolveContext, toIsoTimes, validateParameters, trackLabel, contextName } from './utils.js'
+import {
+  createInBounds,
+  resolveContext,
+  toIsoTimes,
+  validateParameters,
+  trackLabel,
+  contextName,
+  gpxFilename,
+} from './utils.js'
 
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
 
@@ -199,5 +207,47 @@ describe('trackLabel', () => {
   // is labelled like any other target rather than guessed at.
   it('falls back to the mmsi when selfContext is unknown', () => {
     expect(trackLabel(SELF, undefined, none)).toBe('AIS 211111111')
+  })
+})
+
+describe('gpxFilename', () => {
+  it.each([
+    ['Own Ship', 'Own-Ship.gpx'],
+    ['AIS MIA', 'AIS-MIA.gpx'],
+  ])('turns %s into a filename', (label, expected) => {
+    expect(gpxFilename(label)).toBe(expected)
+  })
+
+  // A vessel name arrives from an AIS transmission: it must not be able to
+  // escape the downloads folder or break out of the header it travels in.
+  it.each([
+    ['a path traversal', '../../etc/passwd'],
+    ['a quote', 'a"b'],
+    ['a backslash', 'a\\b'],
+    ['a control character', 'a\u0000b'],
+  ])('neutralises %s', (_kind, label) => {
+    const name = gpxFilename(label)
+
+    const unsafe = [...name].filter((character) => '/\\"\''.includes(character) || character < ' ')
+
+    expect(unsafe).toEqual([])
+    expect(name.startsWith('.')).toBe(false)
+    expect(name.endsWith('.gpx')).toBe(true)
+  })
+
+  // Replacing everything outside ASCII would quietly rename somebody's boat.
+  it.each([
+    ['Ärger', 'Ärger.gpx'],
+    ['日本', '日本.gpx'],
+  ])('keeps non-ASCII in %s', (label, expected) => {
+    expect(gpxFilename(label)).toBe(expected)
+  })
+
+  it.each([
+    ['empty', ''],
+    ['only whitespace', '   '],
+    ['only separators', '///'],
+  ])('falls back for a %s name', (_kind, label) => {
+    expect(gpxFilename(label)).toBe('track.gpx')
   })
 })

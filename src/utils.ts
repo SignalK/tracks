@@ -270,3 +270,23 @@ function mmsiFromContext(context: string): string | undefined {
   const match = /urn:mrn:imo:mmsi:(\d+)$/.exec(context)
   return match?.[1]
 }
+
+/**
+ * A track label as a filename a browser can save.
+ *
+ * A vessel name arrives from an AIS transmission and is not ours to trust in a
+ * path, so the characters that could break out of one — separators, quotes,
+ * controls — are replaced. Everything else is kept, including non-ASCII: a
+ * boat called `Ärger` keeps its name.
+ */
+export function gpxFilename(label: string): string {
+  // Only the characters a path or a header could be broken by are replaced,
+  // rather than everything outside ASCII: stripping those turns `Ärger` into
+  // `rger` and `日本` into nothing at all, quietly renaming somebody's vessel.
+  const safe = label
+    .replace(/[\p{Cc}\p{Cf}"'\\/:*?<>|]+/gu, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+  return `${safe === '' ? 'track' : safe}.gpx`
+}
