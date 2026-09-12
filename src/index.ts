@@ -277,6 +277,16 @@ const EXISTENCE_PROBE_FROM_MS = 0
 const KNOWN_CONTEXTS_TTL_MS = 30_000
 
 /**
+ * How long a *failed* context query is remembered.
+ *
+ * Short, so a provider that recovers is noticed quickly, but not zero: with
+ * the entry simply dropped, a provider that hangs is asked again by every
+ * subsequent miss while the earlier calls are still pending — reinstating per
+ * request exactly the cost the cache exists to prevent.
+ */
+const KNOWN_CONTEXTS_FAILURE_TTL_MS = 1_000
+
+/**
  * Config values arrive from the plugin UI as numbers, but a hand-edited
  * settings file can supply strings. Accept both, reject anything non-finite so
  * a bad value falls back to the default instead of poisoning arithmetic with NaN.
@@ -338,9 +348,16 @@ function windowSpanning(stored: TimedPosition[], fallbackMs: number): TimeWindow
  * promise wins. A race leaves it armed, holding the event loop open for the
  * remainder of the timeout on every call that succeeds.
  */
+/**
+ * A bound expired. Distinct from the error a provider itself raises, because
+ * "did not answer in time" and "is not installed" are different answers and
+ * only one of them is an outage.
+ */
+class HistoryTimeoutError extends Error {}
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms)
+    const timer = setTimeout(() => reject(new HistoryTimeoutError(`timed out after ${ms}ms`)), ms)
     promise.then(
       (value) => {
         clearTimeout(timer)
@@ -432,7 +449,9 @@ async function historyKnowsContext(
       const entry: KnownContexts = { at: now, contexts }
       contexts.catch(() => {
         if (cache.current === entry) {
-          cache.current = undefined
+          // Back-dated rather than dropped: the next miss after the failure
+          // window retries, while a burst inside it does not re-ask.
+          cache.current = { at: now - KNOWN_CONTEXTS_TTL_MS + KNOWN_CONTEXTS_FAILURE_TTL_MS, contexts }
         }
       })
       cache.current = entry
@@ -487,10 +506,13 @@ async function historyPositions(
       HISTORY_QUERY_TIMEOUT_MS,
     )
   } catch (err) {
+    // A provider that was registered but did not answer in time is an outage;
+    // only the server's own rejection means there is nothing installed to ask.
+    const timedOut = err instanceof HistoryTimeoutError
     if (debug.enabled) {
-      debug(`No history provider for ${context}: ${errorDetail(err)}`)
+      debug(`${timedOut ? 'History provider timed out' : 'No history provider'} for ${context}: ${errorDetail(err)}`)
     }
-    return { points: [], resolutionMs: applied, failed: false }
+    return { points: [], resolutionMs: applied, failed: timedOut }
   }
   try {
     const response = await withTimeout(

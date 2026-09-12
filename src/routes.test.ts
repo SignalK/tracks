@@ -660,6 +660,19 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track?timespan=1h`).expect(503)
   })
 
+  // A registered provider that wedges is an outage, not an absent one. The
+  // distinction matters because the bound expiring and the server saying "no
+  // provider configured" both surface as a rejected `getHistoryApi`.
+  it('reports an outage when a registered provider never resolves', async () => {
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: { providerHangs: true },
+    }))
+    h.seedTrack(OTHER_CONTEXT, [[60.2, 24.8]], [Date.now() - 90 * 24 * 60 * 60 * 1000])
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track?timespan=1h`).expect(503)
+  }, 20_000)
+
   // The server rejects `getHistoryApi` outright when no provider is
   // registered, which is the default install. A service that is not installed
   // cannot be having an outage, so this must stay an ordinary empty track --
@@ -723,7 +736,10 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
 
     // The provider learns about the vessel, and the clock passes the window.
     known = [OTHER_CONTEXT]
-    vi.useFakeTimers()
+    // Only the clock, not the timer set: the request passes through
+    // `withTimeout`, which arms a real `setTimeout` to bound the provider
+    // call. Faking that too would leave a hung call with nothing to reject it.
+    vi.useFakeTimers({ toFake: ['Date'] })
     try {
       vi.setSystemTime(Date.now() + 31_000)
       await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
@@ -758,6 +774,31 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
   })
 
+  // The cache exists because an open route lets a client repeat a miss without
+  // limit. Dropping the entry the moment a probe fails would hand exactly that
+  // cost back for the one provider least able to bear it: each later miss
+  // starting another query while the earlier ones are still pending.
+  it('does not re-ask a failing provider once per request', async () => {
+    let probes = 0
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: {
+        rows: [],
+        contexts: [OTHER_CONTEXT],
+        get getContextsRejects() {
+          probes += 1
+          return true
+        },
+      },
+    }))
+
+    for (let i = 0; i < 5; i += 1) {
+      await request(h.app).get(`${API}/vessels/vessels.urn:mrn:imo:mmsi:90000000${i}/track`).expect(404)
+    }
+
+    expect(probes).toBe(1)
+  })
+
   // A failed probe must not be remembered: the next miss has to ask again
   // rather than inherit the rejection for the rest of the window.
   it('retries after a failed existence query rather than caching the failure', async () => {
@@ -778,7 +819,17 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
     failing = false
 
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
+    // Past the failure window, not instantly: a failed probe is remembered
+    // briefly so a wedged provider is not re-asked by every request, and the
+    // behaviour being pinned is that it is not remembered *indefinitely*.
+    // Only the clock is faked -- `withTimeout` needs a real timer set.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(Date.now() + 2_000)
+      await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
+    } finally {
+      vi.useRealTimers()
+    }
     expect(probes).toBeGreaterThan(1)
   })
 

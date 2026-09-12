@@ -126,6 +126,8 @@ export interface HarnessOptions {
      * registered — the default install, and not an outage.
      */
     noProvider?: boolean
+    /** Never resolve `getHistoryApi`: a registered provider that wedges. */
+    providerHangs?: boolean
   }
 }
 
@@ -170,39 +172,44 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
       ? {}
       : {
           getHistoryApi: () =>
-            options.history?.noProvider === true
-              ? Promise.reject(new Error('No history api provider configured'))
-              : Promise.resolve({
-                  getValues: () =>
-                    options.history?.getValuesRejects === true
-                      ? Promise.reject(new Error('history provider unavailable'))
-                      : Promise.resolve({
-                          context: selfContext,
-                          range: { from: '', to: '' },
-                          values: [],
-                          data: options.history?.rows ?? [],
+            options.history?.providerHangs === true
+              ? new Promise<never>(() => undefined)
+              : options.history?.noProvider === true
+                ? Promise.reject(new Error('No history api provider configured'))
+                : Promise.resolve({
+                    getValues: () =>
+                      options.history?.getValuesRejects === true
+                        ? Promise.reject(new Error('history provider unavailable'))
+                        : Promise.resolve({
+                            context: selfContext,
+                            range: { from: '', to: '' },
+                            values: [],
+                            data: options.history?.rows ?? [],
+                          }),
+                    ...(options.history?.withoutGetContexts === true
+                      ? {}
+                      : {
+                          getContexts: (query: {
+                            from: { toString: () => string }
+                            to: { toString: () => string }
+                          }) => {
+                            if (options.history?.getContextsRejects === true) {
+                              return Promise.reject(new Error('provider unavailable'))
+                            }
+                            if (options.history?.getContextsHangs === true) {
+                              return new Promise<string[]>(() => undefined)
+                            }
+                            const contexts = options.history?.contexts ?? []
+                            const since = options.history?.contextsSince
+                            // Mirror a range-filtering provider: a context whose data
+                            // predates the asked window is simply not listed.
+                            const answer =
+                              since !== undefined && since < Date.parse(query.from.toString()) ? [] : contexts
+                            const deferred = options.history?.deferContexts
+                            return deferred ? deferred.wait.then(() => answer) : Promise.resolve(answer)
+                          },
                         }),
-                  ...(options.history?.withoutGetContexts === true
-                    ? {}
-                    : {
-                        getContexts: (query: { from: { toString: () => string }; to: { toString: () => string } }) => {
-                          if (options.history?.getContextsRejects === true) {
-                            return Promise.reject(new Error('provider unavailable'))
-                          }
-                          if (options.history?.getContextsHangs === true) {
-                            return new Promise<string[]>(() => undefined)
-                          }
-                          const contexts = options.history?.contexts ?? []
-                          const since = options.history?.contextsSince
-                          // Mirror a range-filtering provider: a context whose data
-                          // predates the asked window is simply not listed.
-                          const answer =
-                            since !== undefined && since < Date.parse(query.from.toString()) ? [] : contexts
-                          const deferred = options.history?.deferContexts
-                          return deferred ? deferred.wait.then(() => answer) : Promise.resolve(answer)
-                        },
-                      }),
-                }),
+                  }),
         }),
     ...(options.withoutTrackApi
       ? {}
