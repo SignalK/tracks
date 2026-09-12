@@ -529,6 +529,81 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(res.body.coordinates).toEqual([])
   })
 
+  // The probe runs only for a vessel about to 404 -- which is exactly the
+  // request a client can repeat without limit, since the routes are open. One
+  // question to the provider must serve a burst of them, or enumerating vessel
+  // ids would drive a ten-year query each time.
+  it('asks the provider once for a burst of misses, not once per request', async () => {
+    let probes = 0
+    const h = createHarness({
+      selfPosition: [60, 24],
+      history: {
+        rows: [],
+        get contexts() {
+          probes += 1
+          return []
+        },
+      },
+    })
+    harness = h
+
+    for (let i = 0; i < 5; i += 1) {
+      await request(h.app).get(`${API}/vessels/vessels.urn:mrn:imo:mmsi:90000000${i}/track`).expect(404)
+    }
+
+    expect(probes).toBe(1)
+  })
+
+  // A fresh store proves coalescing rather than the cache window: every request
+  // is issued before any answer comes back, so only sharing the in-flight query
+  // can collapse them.
+  it('shares one in-flight query across concurrent misses', async () => {
+    let probes = 0
+    const h = createHarness({
+      selfPosition: [60, 24],
+      history: {
+        rows: [],
+        get contexts() {
+          probes += 1
+          return []
+        },
+      },
+    })
+    harness = h
+
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, () => request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`)),
+    )
+
+    expect(responses.map((r) => r.status)).toEqual(Array(8).fill(404))
+    expect(probes).toBe(1)
+  })
+
+  // A failed probe must not be remembered: the next miss has to ask again
+  // rather than inherit the rejection for the rest of the window.
+  it('retries after a failed existence query rather than caching the failure', async () => {
+    let probes = 0
+    let failing = true
+    const h = createHarness({
+      selfPosition: [60, 24],
+      history: {
+        rows: [],
+        contexts: [OTHER_CONTEXT],
+        get getContextsRejects() {
+          probes += 1
+          return failing
+        },
+      },
+    })
+    harness = h
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+    failing = false
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
+    expect(probes).toBeGreaterThan(1)
+  })
+
   it('still 404s when the existence query itself fails', async () => {
     const h = createHarness({
       selfPosition: [60, 24],

@@ -95,6 +95,7 @@ export interface HarnessOptions {
    * provider can fail to answer.
    */
   history?: {
+    /** Read on every `getContexts` call, so a getter can count the probes. */
     contexts?: string[]
     contextsSince?: number
     rows?: unknown[]

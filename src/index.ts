@@ -259,6 +259,22 @@ const WINDOWLESS_HISTORY_SPAN_MS = 24 * 60 * 60 * 1000
 const EXISTENCE_PROBE_SPAN_MS = 10 * 365 * 24 * 60 * 60 * 1000
 
 /**
+ * How long a provider's context list is reused before asking again.
+ *
+ * The probe runs only for a vessel about to 404, which is precisely the
+ * request a client can repeat without limit — the routes are open, so
+ * enumerating vessel ids would otherwise drive one ten-year `getContexts`
+ * per request, each able to block for the timeout.
+ *
+ * The whole list is cached rather than a per-context answer, or enumeration
+ * would simply fill the cache with distinct keys and query just as often. The
+ * cost is that a vessel a provider learns about becomes visible up to this
+ * long after the fact, which is not a delay anyone can perceive in a track
+ * that is already minutes old.
+ */
+const KNOWN_CONTEXTS_TTL_MS = 30_000
+
+/**
  * Config values arrive from the plugin UI as numbers, but a hand-edited
  * settings file can supply strings. Accept both, reject anything non-finite so
  * a bad value falls back to the default instead of poisoning arithmetic with NaN.
@@ -326,6 +342,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   })
 }
 
+/** A provider's context list, and when it was fetched. */
+interface KnownContexts {
+  at: number
+  contexts: Promise<unknown[]>
+}
+
 /**
  * Whether a history provider holds anything at all for a context.
  *
@@ -339,7 +361,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  * method, errors, or hangs leaves the 404 standing rather than holding the
  * request open.
  */
-async function historyKnowsContext(app: App, context: Context, debug: Debug): Promise<boolean> {
+async function historyKnowsContext(
+  app: App,
+  context: Context,
+  debug: Debug,
+  cache: { current: KnownContexts | undefined },
+): Promise<boolean> {
   const getHistoryApi = app.getHistoryApi
   if (!getHistoryApi) {
     return false
@@ -353,13 +380,31 @@ async function historyKnowsContext(app: App, context: Context, debug: Debug): Pr
       return false
     }
     const now = Date.now()
-    const contexts = await withTimeout(
-      historyApi.getContexts({
-        from: Temporal.Instant.from(new Date(now - EXISTENCE_PROBE_SPAN_MS).toISOString()),
-        to: Temporal.Instant.from(new Date(now).toISOString()),
-      }),
-      HISTORY_QUERY_TIMEOUT_MS,
-    )
+    // Reused while fresh, and shared while in flight: a burst of misses is one
+    // question to the provider, not one each. The promise is cached rather than
+    // its result so concurrent callers join the same query instead of starting
+    // their own.
+    const cached = cache.current
+    if (cached === undefined || now - cached.at >= KNOWN_CONTEXTS_TTL_MS) {
+      const contexts = withTimeout(
+        historyApi.getContexts({
+          from: Temporal.Instant.from(new Date(now - EXISTENCE_PROBE_SPAN_MS).toISOString()),
+          to: Temporal.Instant.from(new Date(now).toISOString()),
+        }),
+        HISTORY_QUERY_TIMEOUT_MS,
+      )
+      // Dropped on failure so the next miss retries rather than inheriting a
+      // rejection for the rest of the window. The catch is attached here, not
+      // awaited, so a rejection never escapes as an unhandled one.
+      const entry: KnownContexts = { at: now, contexts }
+      contexts.catch(() => {
+        if (cache.current === entry) {
+          cache.current = undefined
+        }
+      })
+      cache.current = entry
+    }
+    const contexts = await cache.current!.contexts
     // Providers return bare strings, and at least one maps its stored `self`
     // back to the spec's `vessels.self` — so the vessel's own context has to
     // match under either spelling.
@@ -472,6 +517,13 @@ export default function ThePlugin(app: App): Plugin {
   const sourceWatch = new SourceWatch()
   let glitchFilter = new GlitchFilter({ maxSpeedKnots: DEFAULT_MAX_SPEED_KNOTS })
   let stateGate = new StateGate(app.selfContext, DEFAULT_PAUSE_STATES)
+  /**
+   * The history provider's context list, cached between existence probes.
+   *
+   * Per plugin instance rather than module-global: two instances would
+   * otherwise answer from each other's provider.
+   */
+  const knownContexts: { current: KnownContexts | undefined } = { current: undefined }
 
   /** The own vessel's navigation.state, or undefined when it reports none. */
   function getVesselState(): string | undefined {
@@ -651,6 +703,9 @@ export default function ThePlugin(app: App): Plugin {
       sourceWatch.clear()
       glitchFilter.clear()
       stateGate.clear()
+      // A restart often follows a provider change; keeping the old list would
+      // answer from a provider that is no longer the one installed.
+      knownContexts.current = undefined
       // Release the file handle a sqlite store holds, so a plugin restart does
       // not leak it and the WAL gets checkpointed.
       //
@@ -714,7 +769,7 @@ export default function ThePlugin(app: App): Plugin {
         // narrowed to a window cannot distinguish an unknown vessel from one
         // whose history lies outside it. That second question is deliberately
         // not scoped to the window, for the same reason.
-        if (points.length === 0 && !known && !(await historyKnowsContext(app, context, app.debug))) {
+        if (points.length === 0 && !known && !(await historyKnowsContext(app, context, app.debug, knownContexts))) {
           return undefined
         }
         return segment(thin(points, query.resolution), segmentGap)
