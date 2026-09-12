@@ -245,18 +245,20 @@ const HISTORY_QUERY_TIMEOUT_MS = 5000
 const WINDOWLESS_HISTORY_SPAN_MS = 24 * 60 * 60 * 1000
 
 /**
- * How far back the existence probe looks when asking whether a provider knows
- * a vessel at all.
+ * The earliest instant the existence probe asks about.
  *
- * It has to name a span: the History API's time range has no unbounded form,
- * every branch of it carries a bound. A provider filters its context list by
- * that range — questdb builds a SQL `WHERE` from it — so a probe scoped to the
- * requested window would still miss a vessel whose history ended before it,
- * which is the very case the probe exists to catch. Ten years is "ever" for a
- * boat log, and the cost lands only on the branch that was already about to
- * 404.
+ * The probe has to name a bound: the History API's time range has no
+ * unbounded form, every branch of `TimeRangeParams` carries one. A provider
+ * filters its context list by the range it is given — questdb builds a SQL
+ * `WHERE` from it — so any bound later than the provider's oldest row can
+ * still miss a vessel and 404 it, which is the case the probe exists to catch.
+ *
+ * The Unix epoch is the bound rather than some span of years: it predates
+ * satellite navigation, so no position fix can lie before it, and unlike a
+ * fixed "wide enough" window it cannot be outlived. The cost lands only on the
+ * branch that was already about to 404, and the answer is cached.
  */
-const EXISTENCE_PROBE_SPAN_MS = 10 * 365 * 24 * 60 * 60 * 1000
+const EXISTENCE_PROBE_FROM_MS = 0
 
 /**
  * How long a provider's context list is reused before asking again.
@@ -387,7 +389,7 @@ async function historyKnowsContext(
         getHistoryApi(app.config?.settings?.historyApi?.defaultProvider).then((historyApi) =>
           historyApi.getContexts
             ? historyApi.getContexts({
-                from: Temporal.Instant.from(new Date(now - EXISTENCE_PROBE_SPAN_MS).toISOString()),
+                from: Temporal.Instant.from(new Date(EXISTENCE_PROBE_FROM_MS).toISOString()),
                 to: Temporal.Instant.from(new Date(now).toISOString()),
               })
             : // A provider built against an older server-api has no such

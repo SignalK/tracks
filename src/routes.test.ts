@@ -1,5 +1,5 @@
 import request from 'supertest'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fromGpx } from './gpx.js'
 import { createHarness, deferred, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { TestHarness } from './harness.test-utils.js'
@@ -562,10 +562,20 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   it('shares one in-flight query across concurrent misses', async () => {
     let calls = 0
     const gate = deferred()
+    const allArrived = deferred()
+    let arrived = 0
     const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: {
-        rows: [],
+        // Read once per getValues call, which every request makes on its way
+        // to the probe -- so this counts arrivals without a new harness knob.
+        get rows() {
+          arrived += 1
+          if (arrived === 8) {
+            allArrived.release()
+          }
+          return []
+        },
         contexts: [],
         deferContexts: {
           release: gate.release,
@@ -576,14 +586,16 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
         },
       },
     }))
+    const arrivals = allArrived.wait
 
     const inFlight = Array.from({ length: 8 }, () =>
       request(h.app)
         .get(`${API}/vessels/${OTHER_CONTEXT}/track`)
         .then((r) => r),
     )
-    // Every request is now parked inside the provider call, none answered.
-    await new Promise((resolve) => setTimeout(resolve, 30))
+    // Waited on rather than slept through: the gate opens when the last of the
+    // eight has reached the store, so "all in flight" is observed, not timed.
+    await arrivals
     expect(calls).toBe(1)
 
     gate.release()
@@ -591,6 +603,51 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
 
     expect(responses.map((r) => r.status)).toEqual(Array(8).fill(404))
     expect(calls).toBe(1)
+  })
+
+  // The bound is the epoch, not a span of years, so a provider that still
+  // holds a context from long ago is not mistaken for one that never knew it.
+  it('finds a vessel whose history is older than any fixed span', async () => {
+    const FIFTEEN_YEARS_AGO = Date.now() - 15 * 365 * 24 * 60 * 60 * 1000
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [OTHER_CONTEXT], contextsSince: FIFTEEN_YEARS_AGO, rows: [] },
+    }))
+
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
+
+    expect(res.body.coordinates).toEqual([])
+  })
+
+  // The cache has to expire, or a vessel a provider has newly learned about
+  // would stay invisible for the rest of the process.
+  it('asks again once the cached list has expired', async () => {
+    let probes = 0
+    let known: string[] = []
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: {
+        rows: [],
+        get contexts() {
+          probes += 1
+          return known
+        },
+      },
+    }))
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+    expect(probes).toBe(1)
+
+    // The provider learns about the vessel, and the clock passes the window.
+    known = [OTHER_CONTEXT]
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(Date.now() + 31_000)
+      await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(probes).toBe(2)
   })
 
   // A failed probe must not be remembered: the next miss has to ask again
