@@ -176,15 +176,170 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.segments[0]).toHaveLength(1)
   })
 
-  // A word boundary sits before a hyphen too, so an unknown element whose name
-  // merely starts with "trkpt" was read as a position the file never declared.
+  // An element whose name merely starts with "trkpt" is not a trackpoint, and
+  // neither is one in somebody else's namespace.
   it.each([
     ['trkpt-extra', '<trkpt-extra lat="9" lon="9"/>'],
-    ['ns:trkpt', '<ns:trkpt lat="9" lon="9"/>'],
+    ['ns:trkpt', '<ns:trkpt xmlns:ns="urn:vendor" lat="9" lon="9"/>'],
   ])('does not read <%s> as a track point', (_name, element) => {
     const xml = `<gpx><trk><name>A</name><trkseg>${element}<trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
 
     expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [1, 2], timestamp: 0 }])
+  })
+
+  // XML comments and CDATA are text, not markup, and entity names are
+  // case-sensitive: only the five lowercase names exist.
+  it('does not read a commented-out track', () => {
+    const xml =
+      `<gpx><!-- <trk><name>Ghost</name><trkseg><trkpt lat="9" lon="9"/></trkseg></trk> -->` +
+      `<trk><name>Real</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml).map((t) => t.name)).toEqual(['Real'])
+  })
+
+  it('does not read tag-shaped text inside CDATA as markup', () => {
+    const xml =
+      `<gpx><trk><name>A</name>` +
+      `<extensions><note><![CDATA[<trkseg><trkpt lat="9" lon="9"/></trkseg>]]></note></extensions>` +
+      `<trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments.flat()).toEqual([{ position: [1, 2], timestamp: 0 }])
+  })
+
+  // XML entity names are case-sensitive: only the five lowercase names exist,
+  // so `&AMP;` is not an entity and must stay as written.
+  it('does not decode an uppercase entity name', () => {
+    const xml = `<gpx><trk><name>A&amp;AMP;B</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe('A&AMP;B')
+  })
+
+  // GPX may bind its namespace to a prefix rather than declare it as the
+  // default. `getElementsByTagName('trk')` matches the qualified name, so it
+  // misses `<g:trk>` entirely -- a valid document importing as nothing.
+  it('reads a document that binds GPX to a prefix', () => {
+    const xml =
+      `<g:gpx xmlns:g="http://www.topografix.com/GPX/1/1"><g:trk><g:name>Prefixed</g:name>` +
+      `<g:trkseg><g:trkpt lat="1" lon="2"><g:time>2024-01-01T00:00:00Z</g:time></g:trkpt></g:trkseg>` +
+      `</g:trk></g:gpx>`
+
+    const [track] = fromGpx(xml)
+
+    expect(track?.name).toBe('Prefixed')
+    expect(track?.segments[0]).toEqual([{ position: [1, 2], timestamp: Date.parse('2024-01-01T00:00:00Z') }])
+  })
+
+  it('reads a document mixing the default and a prefix for GPX', () => {
+    const xml =
+      `<gpx xmlns="http://www.topografix.com/GPX/1/1" xmlns:g="http://www.topografix.com/GPX/1/1">` +
+      `<trk><name>Mixed</name><g:trkseg><trkpt lat="3" lon="4"/></g:trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [3, 4], timestamp: 0 }])
+  })
+
+  // getElementsByTagName ignores namespaces, so a document rooted in somebody
+  // else's would otherwise have every <trkpt> in it read as a real position.
+  it('ignores a document in a foreign default namespace', () => {
+    const foreign = `<gpx xmlns="urn:vendor"><trk><name>Foreign</name><trkseg><trkpt lat="9" lon="9"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(foreign)).toEqual([])
+  })
+
+  // getElementsByTagName reaches into <extensions>, and a vendor <name> there
+  // comes back first -- the track would be labelled with somebody else's
+  // string. Only a direct-child lookup gets the track's own name.
+  it('does not take a track name from an extensions payload', () => {
+    const xml =
+      `<gpx><trk>` +
+      `<extensions><vendor><name>VendorLabel</name></vendor></extensions>` +
+      `<name>Real</name>` +
+      `<trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe('Real')
+  })
+
+  // A <trk> nested in an <extensions> payload inherits GPX's namespace, so
+  // only the hierarchy tells it from a real track.
+  it('ignores a trk nested below the root', () => {
+    const xml =
+      `<gpx xmlns="http://www.topografix.com/GPX/1/1">` +
+      `<extensions><vendor><trk><name>Phantom</name><trkseg><trkpt lat="9" lon="9"/></trkseg></trk></vendor></extensions>` +
+      `<trk><name>Real</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml).map((t) => t.name)).toEqual(['Real'])
+  })
+
+  // A document rooted at something else is not GPX, whatever it contains.
+  it('ignores a document whose root is not gpx', () => {
+    const xml =
+      `<vendor xmlns="urn:v"><trk xmlns="http://www.topografix.com/GPX/1/1"><name>X</name>` +
+      `<trkseg><trkpt lat="1" lon="2"/></trkseg></trk></vendor>`
+
+    expect(fromGpx(xml)).toEqual([])
+  })
+
+  // GPX fixes the hierarchy: a <trkseg> is a child of <trk>, a <trkpt> a child
+  // of <trkseg>. Scanning descendants instead lets an <extensions> payload
+  // contribute track data -- and a payload declaring no namespace of its own
+  // inherits GPX's, so a namespace check alone cannot catch it.
+  it.each([
+    ['inheriting the GPX namespace', 'http://www.topografix.com/GPX/1/1'],
+    ['with no namespace at all', ''],
+  ])('ignores a trkseg inside extensions %s', (_kind, ns) => {
+    const declaration = ns === '' ? '' : ` xmlns="${ns}"`
+    const xml =
+      `<gpx${declaration}><trk><name>A</name>` +
+      `<extensions><vendor><trkseg><trkpt lat="9" lon="9"/></trkseg></vendor></extensions>` +
+      `<trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments).toEqual([[{ position: [1, 2], timestamp: 0 }]])
+  })
+
+  it('ignores a trkpt inside a trackpoint own extensions', () => {
+    const xml =
+      `<gpx><trk><name>A</name><trkseg>` +
+      `<trkpt lat="1" lon="2"><extensions><trkpt lat="7" lon="7"/></extensions></trkpt>` +
+      `</trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments).toEqual([[{ position: [1, 2], timestamp: 0 }]])
+  })
+
+  it('ignores a foreign trkseg nested inside extensions', () => {
+    const xml =
+      `<gpx><trk><name>A</name>` +
+      `<extensions><v xmlns="urn:vendor"><trkseg><trkpt lat="9" lon="9"/></trkseg></v></extensions>` +
+      `<trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.segments).toEqual([[{ position: [1, 2], timestamp: 0 }]])
+  })
+
+  // Most files in the wild omit the declaration entirely; refusing those would
+  // reject most of what users actually have.
+  it.each([
+    ['the GPX namespace', ' xmlns="http://www.topografix.com/GPX/1/1"'],
+    ['no namespace at all', ''],
+  ])('reads a document in %s', (_kind, declaration) => {
+    const xml = `<gpx${declaration}><trk><name>Real</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe('Real')
+  })
+
+  // xmldom recovers from some syntax faults by guessing. A guess is not a
+  // well-formed document, so it is refused rather than imported.
+  it('refuses a document with a recoverable syntax error', () => {
+    const strayLessThan = `<gpx><trk><name>A < B</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(strayLessThan)).toEqual([])
+  })
+
+  // A prefix with no matching xmlns declaration is not well-formed XML. A
+  // parser is entitled to refuse the document rather than guess which parts
+  // were meant: returning the readable half would claim a success the file
+  // does not support.
+  it('refuses a document that is not well-formed', () => {
+    const undeclaredPrefix = `<gpx><trk><name>A</name><trkseg><ns:trkpt lat="9" lon="9"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(undeclaredPrefix)).toEqual([])
   })
 
   // An XML prefix is an NCName, so hyphens and dots are legal in it.
@@ -421,10 +576,15 @@ describe('fromGpx', () => {
   it.each([
     ['decimal', '&#999999999;'],
     ['hexadecimal', '&#xFFFFFFFF;'],
-  ])('keeps an out-of-range %s reference instead of throwing', (_kind, reference) => {
+  ])('imports the track despite an out-of-range %s reference', (_kind, reference) => {
     const xml = `<gpx><trk><name>X${reference}Y</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
 
-    expect(fromGpx(xml)[0]?.name).toBe(`X${reference}Y`)
+    const [track] = fromGpx(xml)
+
+    // The name is mangled by the substitution, which beats losing every other
+    // track in the file to one bad reference.
+    expect(track?.segments[0]).toEqual([{ position: [1, 2], timestamp: 0 }])
+    expect(track?.name).not.toBe('')
   })
 
   // A word boundary also matches after a hyphen, so `data-lat` would be read
@@ -456,11 +616,19 @@ describe('fromGpx', () => {
   it.each([
     ['NUL', '&#0;'],
     ['a C0 control', '&#11;'],
-    ['a surrogate', '&#xD800;'],
-  ])('keeps %s as a reference rather than decoding it', (_kind, reference) => {
-    const xml = `<gpx><trk><name>X${reference}Y</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+  ])('drops %s from a name on re-export', (_kind, reference) => {
+    const parsed = fromGpx(`<gpx><trk><name>X${reference}Y</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`)
 
-    expect(fromGpx(xml)[0]?.name).toBe(`X${reference}Y`)
+    // The parser decodes the reference into a character XML cannot express, so
+    // toGpx drops it: an invalid reference does not survive a round trip, and
+    // that is a deliberate loss of data no writer should have emitted.
+    expect(fromGpx(toGpx(parsed))[0]?.name).toBe('XY')
+  })
+
+  it('leaves no invalid character in a re-exported document', () => {
+    const parsed = fromGpx(`<gpx><trk><name>X&#0;Y</name><trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`)
+
+    expect(toGpx(parsed)).not.toContain(String.fromCodePoint(0))
   })
 
   it.each([

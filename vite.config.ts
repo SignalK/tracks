@@ -15,7 +15,7 @@ export default defineConfig({
       fileName: 'index',
     },
     rollupOptions: {
-      external: [/^node:/, 'rxjs', 'rxjs/operators', 'express', /^typebox/, '@js-temporal/polyfill'],
+      external: [/^node:/, 'rxjs', 'rxjs/operators', 'express', /^typebox/, '@js-temporal/polyfill', '@xmldom/xmldom'],
     },
     sourcemap: true,
     minify: false,
