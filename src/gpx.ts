@@ -170,7 +170,12 @@ export function fromGpx(xml: string): GpxTrack[] {
   return tracks
 }
 
-/** The text of a track's direct `<name>` child, or '' when it has none. */
+/**
+ * The text of a direct GPX child with this local name.
+ *
+ * Direct rather than `getElementsByTagName`, which would reach a `<name>`
+ * inside an `<extensions>` payload and label the track with a vendor's string.
+ */
 function childText(trk: Element, local: string): string {
   for (const child of Array.from(trk.childNodes)) {
     if (isElement(child) && child.localName === local && isGpxNamespace(child)) {

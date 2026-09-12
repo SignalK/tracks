@@ -187,9 +187,8 @@ describe('fromGpx', () => {
     expect(fromGpx(xml)[0]?.segments[0]).toEqual([{ position: [1, 2], timestamp: 0 }])
   })
 
-  // Three things a pattern cannot do, and a parser does for free: tell a
-  // comment from markup, tell CDATA text from markup, and treat entity names
-  // as case-sensitive.
+  // XML comments and CDATA are text, not markup, and entity names are
+  // case-sensitive: only the five lowercase names exist.
   it('does not read a commented-out track', () => {
     const xml =
       `<gpx><!-- <trk><name>Ghost</name><trkseg><trkpt lat="9" lon="9"/></trkseg></trk> -->` +
@@ -244,6 +243,19 @@ describe('fromGpx', () => {
     const foreign = `<gpx xmlns="urn:vendor"><trk><name>Foreign</name><trkseg><trkpt lat="9" lon="9"/></trkseg></trk></gpx>`
 
     expect(fromGpx(foreign)).toEqual([])
+  })
+
+  // getElementsByTagName reaches into <extensions>, and a vendor <name> there
+  // comes back first -- the track would be labelled with somebody else's
+  // string. Only a direct-child lookup gets the track's own name.
+  it('does not take a track name from an extensions payload', () => {
+    const xml =
+      `<gpx><trk>` +
+      `<extensions><vendor><name>VendorLabel</name></vendor></extensions>` +
+      `<name>Real</name>` +
+      `<trkseg><trkpt lat="1" lon="2"/></trkseg></trk></gpx>`
+
+    expect(fromGpx(xml)[0]?.name).toBe('Real')
   })
 
   // A <trk> nested in an <extensions> payload inherits GPX's namespace, so
