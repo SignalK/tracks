@@ -117,7 +117,12 @@ export interface HarnessOptions {
   }
 }
 
-/** A promise a test resolves by hand, for `deferContexts`. */
+/**
+ * A promise held open until a test releases it.
+ *
+ * Lets a test observe that every request has reached the provider before any
+ * answer exists, which a timed wait can only assume.
+ */
 export function deferred(): { release: () => void; wait: Promise<void> } {
   let release = () => undefined as void
   const wait = new Promise<void>((resolve) => {

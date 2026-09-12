@@ -265,7 +265,7 @@ const EXISTENCE_PROBE_FROM_MS = 0
  *
  * The probe runs only for a vessel about to 404, which is precisely the
  * request a client can repeat without limit — the routes are open, so
- * enumerating vessel ids would otherwise drive one ten-year `getContexts`
+ * enumerating vessel ids would otherwise drive one epoch-wide `getContexts`
  * per request, each able to block for the timeout.
  *
  * The whole list is cached rather than a per-context answer, or enumeration
@@ -305,7 +305,7 @@ const notAvailable = (res: Response) => {
  * as an empty track would present an outage as "this vessel has no positions
  * here" — the one answer that is certainly wrong.
  */
-export class HistoryUnavailableError extends Error {}
+class HistoryUnavailableError extends Error {}
 
 const errorDetail = (err: unknown): string => (err instanceof Error && err.stack ? err.stack : String(err))
 
@@ -354,7 +354,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   })
 }
 
-/** A provider's context list, and when it was fetched. */
+/**
+ * A cache entry holding the promise rather than its value, so callers that
+ * arrive while a query is still running join it instead of starting another.
+ */
 interface KnownContexts {
   at: number
   contexts: Promise<unknown[]>
@@ -795,14 +798,17 @@ export default function ThePlugin(app: App): Plugin {
         // narrowed to a window cannot distinguish an unknown vessel from one
         // whose history lies outside it. That second question is deliberately
         // not scoped to the window, for the same reason.
-        if (points.length === 0 && !known) {
-          if (!(await historyKnowsContext(app, context, app.debug, knownContexts))) {
+        if (points.length === 0) {
+          // Either source knowing the vessel is enough: the store may hold it
+          // with nothing inside the asked window, which is an empty track
+          // rather than a missing one.
+          const vesselKnown = known || (await historyKnowsContext(app, context, app.debug, knownContexts))
+          if (!vesselKnown) {
             return undefined
           }
-          // The provider knows the vessel but could not be read, and the store
-          // holds nothing: there is no track to serve and no basis for saying
-          // there is none. Answering 200 with an empty track would report an
-          // outage as an empty history.
+          // Known, but there is nothing to serve and the one source that might
+          // have had something could not be read. Answering 200 here would
+          // report an outage as an empty history.
           if (history.failed) {
             throw new HistoryUnavailableError(`History provider could not be read for ${context}`)
           }

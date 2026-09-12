@@ -532,7 +532,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   // The probe runs only for a vessel about to 404 -- which is exactly the
   // request a client can repeat without limit, since the routes are open. One
   // question to the provider must serve a burst of them, or enumerating vessel
-  // ids would drive a ten-year query each time.
+  // ids would drive an epoch-wide query each time.
   it('asks the provider once for a burst of misses, not once per request', async () => {
     let probes = 0
     const h = (harness = createHarness({
@@ -640,6 +640,20 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     }))
 
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(503)
+  })
+
+  // `known` alone is not a reason to answer 200. The store can hold a vessel
+  // and still have nothing inside the asked window, and if the provider that
+  // might have covered it cannot be read, there is still nothing to serve.
+  it('reports an outage even when the store knows the vessel', async () => {
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [], rows: [], getValuesRejects: true },
+    }))
+    // Stored, but long before the window the request asks for.
+    h.seedTrack(OTHER_CONTEXT, [[60.2, 24.8]], [Date.now() - 90 * 24 * 60 * 60 * 1000])
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track?timespan=1h`).expect(503)
   })
 
   // The store remains the fallback: a provider is an enrichment, not a
