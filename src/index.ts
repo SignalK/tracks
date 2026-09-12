@@ -372,25 +372,28 @@ async function historyKnowsContext(
     return false
   }
   try {
-    const historyApi = await withTimeout(
-      getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
-      HISTORY_QUERY_TIMEOUT_MS,
-    )
-    if (!historyApi.getContexts) {
-      return false
-    }
     const now = Date.now()
     // Reused while fresh, and shared while in flight: a burst of misses is one
     // question to the provider, not one each. The promise is cached rather than
     // its result so concurrent callers join the same query instead of starting
     // their own.
+    //
+    // Resolving the provider is inside the cached promise, not before it: a
+    // slow or failing `getHistoryApi` would otherwise be paid per request, and
+    // could time out into a 404 for a vessel the cached list already knows.
     const cached = cache.current
     if (cached === undefined || now - cached.at >= KNOWN_CONTEXTS_TTL_MS) {
       const contexts = withTimeout(
-        historyApi.getContexts({
-          from: Temporal.Instant.from(new Date(now - EXISTENCE_PROBE_SPAN_MS).toISOString()),
-          to: Temporal.Instant.from(new Date(now).toISOString()),
-        }),
+        getHistoryApi(app.config?.settings?.historyApi?.defaultProvider).then((historyApi) =>
+          historyApi.getContexts
+            ? historyApi.getContexts({
+                from: Temporal.Instant.from(new Date(now - EXISTENCE_PROBE_SPAN_MS).toISOString()),
+                to: Temporal.Instant.from(new Date(now).toISOString()),
+              })
+            : // A provider built against an older server-api has no such
+              // method. Nothing is known, and that is a cacheable answer.
+              [],
+        ),
         HISTORY_QUERY_TIMEOUT_MS,
       )
       // Dropped on failure so the next miss retries rather than inheriting a

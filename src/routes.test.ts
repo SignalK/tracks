@@ -337,10 +337,10 @@ describe('track names', () => {
   })
 
   it('names another vessel from its AIS name', async () => {
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       paths: { [`${OTHER_CONTEXT}.name`]: 'MIA' },
-    })
+    }))
     h.emit(OTHER_CONTEXT, [60.2, 24.8])
 
     const res = await request(h.app).get(`${API}/tracks`).expect(200)
@@ -351,7 +351,7 @@ describe('track names', () => {
   // Older servers have no getPath at all, and a vessel can be tracked before
   // its static report arrives. Neither may leave the track unlabelled.
   it('falls back to the mmsi when the server cannot resolve a name', async () => {
-    const h = createHarness({ selfPosition: [60, 24] })
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
     h.emit(OTHER_CONTEXT, [60.2, 24.8])
 
     const res = await request(h.app).get(`${API}/tracks`).expect(200)
@@ -364,7 +364,7 @@ describe('track names', () => {
   // first position, and a track stuck at "AIS 987654321" forever is the bug.
   it('picks up a name that arrives after the first request', async () => {
     const paths: Record<string, unknown> = {}
-    const h = createHarness({ selfPosition: [60, 24], paths })
+    const h = (harness = createHarness({ selfPosition: [60, 24], paths }))
     h.emit(OTHER_CONTEXT, [60.2, 24.8])
 
     const before = await request(h.app).get(`${API}/tracks`).expect(200)
@@ -378,10 +378,10 @@ describe('track names', () => {
   })
 
   it('names tracks in the timed response too', async () => {
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       paths: { [`${OTHER_CONTEXT}.name`]: 'MIA' },
-    })
+    }))
     h.emit(OTHER_CONTEXT, [60.2, 24.8])
 
     const res = await request(h.app).get(`${API}/tracks?times`).expect(200)
@@ -435,10 +435,10 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     ['a Latin-1 name', 'Ärger'],
     ['a non-Latin-1 name', '日本'],
   ])('serves the file for %s', async (_kind, vesselName) => {
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       paths: { [`${OTHER_CONTEXT}.name`]: vesselName },
-    })
+    }))
     h.emit(OTHER_CONTEXT, [60.2, 24.8])
 
     const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(200)
@@ -451,10 +451,10 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
 
   // RFC 8187's attr-char excludes !'()*, which encodeURIComponent leaves raw.
   it('escapes reserved characters in the extended filename', async () => {
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       paths: { [`${OTHER_CONTEXT}.name`]: 'Boat (Test)' },
-    })
+    }))
     h.emit(OTHER_CONTEXT, [60.2, 24.8])
 
     const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(200)
@@ -468,10 +468,10 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   // window cannot tell an unknown vessel from one whose history lies outside
   // it, so a vessel the provider lists is a known vessel with an empty track.
   it('serves an empty track for a vessel history knows but has no rows for', async () => {
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: { contexts: [OTHER_CONTEXT], rows: [] },
-    })
+    }))
 
     const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
 
@@ -479,10 +479,10 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   })
 
   it('exports an empty GPX for that vessel rather than 404ing', async () => {
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: { contexts: [OTHER_CONTEXT], rows: [] },
-    })
+    }))
 
     const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(200)
 
@@ -495,7 +495,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   })
 
   it('still 404s when the provider lists no such context', async () => {
-    const h = createHarness({ selfPosition: [60, 24], history: { contexts: [], rows: [] } })
+    const h = (harness = createHarness({ selfPosition: [60, 24], history: { contexts: [], rows: [] } }))
 
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
   })
@@ -504,10 +504,10 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   // an older server-api may not have it. A missing method must degrade to the
   // old behaviour rather than throw.
   it('still 404s against a provider with no getContexts', async () => {
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: { rows: [], withoutGetContexts: true },
-    })
+    }))
 
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
   })
@@ -519,10 +519,10 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   // would fail to rescue.
   it('serves an empty track for a vessel whose history predates the fallback window', async () => {
     const TWO_DAYS_AGO = Date.now() - 2 * 24 * 60 * 60 * 1000
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: { contexts: [OTHER_CONTEXT], contextsSince: TWO_DAYS_AGO, rows: [] },
-    })
+    }))
 
     const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
 
@@ -535,7 +535,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   // ids would drive a ten-year query each time.
   it('asks the provider once for a burst of misses, not once per request', async () => {
     let probes = 0
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: {
         rows: [],
@@ -544,8 +544,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
           return []
         },
       },
-    })
-    harness = h
+    }))
 
     for (let i = 0; i < 5; i += 1) {
       await request(h.app).get(`${API}/vessels/vessels.urn:mrn:imo:mmsi:90000000${i}/track`).expect(404)
@@ -559,7 +558,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   // can collapse them.
   it('shares one in-flight query across concurrent misses', async () => {
     let probes = 0
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: {
         rows: [],
@@ -568,8 +567,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
           return []
         },
       },
-    })
-    harness = h
+    }))
 
     const responses = await Promise.all(
       Array.from({ length: 8 }, () => request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`)),
@@ -584,7 +582,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   it('retries after a failed existence query rather than caching the failure', async () => {
     let probes = 0
     let failing = true
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: {
         rows: [],
@@ -594,8 +592,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
           return failing
         },
       },
-    })
-    harness = h
+    }))
 
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
     failing = false
@@ -605,10 +602,10 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   })
 
   it('still 404s when the existence query itself fails', async () => {
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: { contexts: [OTHER_CONTEXT], rows: [], getContextsRejects: true },
-    })
+    }))
 
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
   })
@@ -616,10 +613,10 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   // A provider that never answers must not hold the request open indefinitely:
   // the bounded call gives up and the 404 stands.
   it('still 404s when the existence query never settles', async () => {
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: { contexts: [OTHER_CONTEXT], rows: [], getContextsHangs: true },
-    })
+    }))
 
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
   }, 15_000)
@@ -627,10 +624,10 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   // At least one provider maps its stored `self` back to the spec's spelling,
   // so the own vessel has to be recognised under either one.
   it('accepts vessels.self as naming the own vessel', async () => {
-    const h = createHarness({
+    const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: { contexts: ['vessels.self'], rows: [] },
-    })
+    }))
 
     const res = await request(h.app).get(`${API}/vessels/${SELF_ID}/track`).expect(200)
 
