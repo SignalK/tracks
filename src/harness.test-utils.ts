@@ -112,6 +112,8 @@ export interface HarnessOptions {
      * collapse them.
      */
     deferContexts?: { release: () => void; wait: Promise<void> }
+    /** Fail the windowed read, leaving the provider unable to answer at all. */
+    getValuesRejects?: boolean
   }
 }
 
@@ -153,12 +155,14 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
           getHistoryApi: () =>
             Promise.resolve({
               getValues: () =>
-                Promise.resolve({
-                  context: selfContext,
-                  range: { from: '', to: '' },
-                  values: [],
-                  data: options.history?.rows ?? [],
-                }),
+                options.history?.getValuesRejects === true
+                  ? Promise.reject(new Error('history provider unavailable'))
+                  : Promise.resolve({
+                      context: selfContext,
+                      range: { from: '', to: '' },
+                      values: [],
+                      data: options.history?.rows ?? [],
+                    }),
               ...(options.history?.withoutGetContexts === true
                 ? {}
                 : {

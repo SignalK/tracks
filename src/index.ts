@@ -297,6 +297,16 @@ const notAvailable = (res: Response) => {
   res.json({ message: 'Tracks API not available because tracks plugin is not enabled' })
 }
 
+/**
+ * The history provider could not answer, and nothing else could either.
+ *
+ * Distinct from a missing track: a 404 asserts that no source knows the
+ * vessel, which a failed provider read cannot support. Reporting the failure
+ * as an empty track would present an outage as "this vessel has no positions
+ * here" — the one answer that is certainly wrong.
+ */
+export class HistoryUnavailableError extends Error {}
+
 const errorDetail = (err: unknown): string => (err instanceof Error && err.stack ? err.stack : String(err))
 
 /**
@@ -435,7 +445,7 @@ async function historyPositions(
   window: TimeWindow,
   resolutionMs: number,
   debug: Debug,
-): Promise<{ points: TimedPosition[]; resolutionMs: number }> {
+): Promise<{ points: TimedPosition[]; resolutionMs: number; failed: boolean }> {
   // The API takes whole seconds, so the width the provider actually bucketed
   // by is not necessarily the one asked for. Reconciling on the requested
   // width would leave a stored point in a bucket history already covered, and
@@ -444,7 +454,10 @@ async function historyPositions(
   const applied = providerSeconds * 1000
   const getHistoryApi = app.getHistoryApi
   if (!getHistoryApi) {
-    return { points: [], resolutionMs: applied }
+    // Not a failure: no provider installed is the documented normal case, and
+    // the store answers alone. Only a provider that was asked and could not
+    // answer counts as one.
+    return { points: [], resolutionMs: applied, failed: false }
   }
   try {
     // Bounded because both awaits reach third-party code. Without this a
@@ -488,12 +501,16 @@ async function historyPositions(
     if (debug.enabled) {
       debug(`History supplied ${points.length} position(s) for ${context}`)
     }
-    return { points, resolutionMs: applied }
+    return { points, resolutionMs: applied, failed: false }
   } catch (err) {
     if (debug.enabled) {
       debug(`History unavailable for ${context}: ${errorDetail(err)}`)
     }
-    return { points: [], resolutionMs: applied }
+    // Reported rather than swallowed. The store still answers where it can —
+    // a provider is an enrichment, not a dependency — but a caller with
+    // nothing else to serve has to be able to tell "no positions" from "could
+    // not ask".
+    return { points: [], resolutionMs: applied, failed: true }
   }
 }
 
@@ -687,6 +704,10 @@ export default function ThePlugin(app: App): Plugin {
             // about.
             const asked = window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
             const history = await historyPositions(app, context, asked, effective, app.debug)
+            // `failed` is deliberately not escalated here: the v2 contract has
+            // no per-context error and no 404, so a provider outage degrades to
+            // the store's own points rather than failing a multi-context query
+            // for every other vessel in it.
             return history.points.length ? reconcile(history.points, stored, history.resolutionMs).positions : stored
           },
         }),
@@ -774,8 +795,17 @@ export default function ThePlugin(app: App): Plugin {
         // narrowed to a window cannot distinguish an unknown vessel from one
         // whose history lies outside it. That second question is deliberately
         // not scoped to the window, for the same reason.
-        if (points.length === 0 && !known && !(await historyKnowsContext(app, context, app.debug, knownContexts))) {
-          return undefined
+        if (points.length === 0 && !known) {
+          if (!(await historyKnowsContext(app, context, app.debug, knownContexts))) {
+            return undefined
+          }
+          // The provider knows the vessel but could not be read, and the store
+          // holds nothing: there is no track to serve and no basis for saying
+          // there is none. Answering 200 with an empty track would report an
+          // outage as an empty history.
+          if (history.failed) {
+            throw new HistoryUnavailableError(`History provider could not be read for ${context}`)
+          }
         }
         return segment(thin(points, query.resolution), segmentGap)
       }
@@ -812,7 +842,16 @@ export default function ThePlugin(app: App): Plugin {
                 name: nameOf(context),
               })
             })
-            .catch(() => {
+            .catch((err: unknown) => {
+              // A provider outage is not a missing vessel. Reporting it as 404
+              // told clients the track does not exist, which is the one thing
+              // a failed read cannot establish.
+              if (err instanceof HistoryUnavailableError) {
+                app.error(`${err.message}`)
+                res.status(503)
+                res.json({ message: `Track history is temporarily unavailable for ${context}` })
+                return
+              }
               res.status(404)
               res.json({ message: `No track available for ${context}` })
             })
@@ -871,6 +910,14 @@ export default function ThePlugin(app: App): Plugin {
               // failing -- serialisation, a header, a write. Reporting that as
               // "no track available" is what disguised an ERR_INVALID_CHAR
               // from a non-Latin-1 filename as a missing track.
+              if (err instanceof HistoryUnavailableError) {
+                app.error(`${err.message}`)
+                if (!res.headersSent) {
+                  res.status(503)
+                  res.json({ message: `Track history is temporarily unavailable for ${context}` })
+                }
+                return
+              }
               app.error(`Could not export GPX for ${context}: ${errorDetail(err)}`)
               if (!res.headersSent) {
                 res.status(500)

@@ -619,6 +619,54 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(res.body.coordinates).toEqual([])
   })
 
+  // A provider outage is not a missing vessel. With nothing in the store and
+  // no way to read the provider, there is no track to serve and no basis for
+  // claiming there is none -- so neither 200-with-nothing nor 404 is honest.
+  it('reports a provider outage as unavailable rather than as an empty track', async () => {
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [OTHER_CONTEXT], rows: [], getValuesRejects: true },
+    }))
+
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(503)
+
+    expect(res.body.message).toMatch(/unavailable/i)
+  })
+
+  it('reports the same outage on the GPX route', async () => {
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [OTHER_CONTEXT], rows: [], getValuesRejects: true },
+    }))
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(503)
+  })
+
+  // The store remains the fallback: a provider is an enrichment, not a
+  // dependency, so an outage must not fail a query the store can answer.
+  it('still serves the stored track when the provider fails', async () => {
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [OTHER_CONTEXT], rows: [], getValuesRejects: true },
+    }))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
+
+    expect(res.body.coordinates.flat()).not.toHaveLength(0)
+  })
+
+  // An outage does not turn an unknown vessel into an available one: if the
+  // provider can still say it never knew the vessel, 404 remains correct.
+  it('still 404s when the provider fails but reports no such vessel', async () => {
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [], rows: [], getValuesRejects: true },
+    }))
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+  })
+
   // The cache has to expire, or a vessel a provider has newly learned about
   // would stay invisible for the rest of the process.
   it('asks again once the cached list has expired', async () => {
