@@ -1,7 +1,7 @@
 import request from 'supertest'
 import { afterEach, describe, expect, it } from 'vitest'
 import { fromGpx } from './gpx.js'
-import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
+import { createHarness, deferred, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { TestHarness } from './harness.test-utils.js'
 
 const API = '/signalk/v1/api'
@@ -553,28 +553,44 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(probes).toBe(1)
   })
 
-  // A fresh store proves coalescing rather than the cache window: every request
-  // is issued before any answer comes back, so only sharing the in-flight query
-  // can collapse them.
+  // Two things make this test the real thing rather than a restatement of the
+  // cache. The provider's answer is held open, so the first caller cannot fill
+  // the cache before the others arrive. And every request is dispatched before
+  // any is awaited -- supertest does not send on construction, so building an
+  // array of requests and awaiting them later would run them one at a time and
+  // the cache alone would satisfy the assertion.
   it('shares one in-flight query across concurrent misses', async () => {
-    let probes = 0
+    let calls = 0
+    const gate = deferred()
     const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: {
         rows: [],
-        get contexts() {
-          probes += 1
-          return []
+        contexts: [],
+        deferContexts: {
+          release: gate.release,
+          get wait() {
+            calls += 1
+            return gate.wait
+          },
         },
       },
     }))
 
-    const responses = await Promise.all(
-      Array.from({ length: 8 }, () => request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`)),
+    const inFlight = Array.from({ length: 8 }, () =>
+      request(h.app)
+        .get(`${API}/vessels/${OTHER_CONTEXT}/track`)
+        .then((r) => r),
     )
+    // Every request is now parked inside the provider call, none answered.
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(calls).toBe(1)
+
+    gate.release()
+    const responses = await Promise.all(inFlight)
 
     expect(responses.map((r) => r.status)).toEqual(Array(8).fill(404))
-    expect(probes).toBe(1)
+    expect(calls).toBe(1)
   })
 
   // A failed probe must not be remembered: the next miss has to ask again

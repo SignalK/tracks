@@ -102,7 +102,26 @@ export interface HarnessOptions {
     withoutGetContexts?: boolean
     getContextsRejects?: boolean
     getContextsHangs?: boolean
+    /**
+     * Hold every `getContexts` call open until the returned release is run.
+     *
+     * A provider that answers immediately cannot distinguish sharing an
+     * in-flight query from reusing a cached result: the first caller would
+     * have filled the cache before the rest arrived. Deferring the answer
+     * parks every caller inside the probe at once, so only sharing can
+     * collapse them.
+     */
+    deferContexts?: { release: () => void; wait: Promise<void> }
   }
+}
+
+/** A promise a test resolves by hand, for `deferContexts`. */
+export function deferred(): { release: () => void; wait: Promise<void> } {
+  let release = () => undefined as void
+  const wait = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  return { release, wait }
 }
 
 export function createHarness(options: HarnessOptions = {}): TestHarness {
@@ -154,10 +173,9 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
                       const since = options.history?.contextsSince
                       // Mirror a range-filtering provider: a context whose data
                       // predates the asked window is simply not listed.
-                      if (since !== undefined && since < Date.parse(query.from.toString())) {
-                        return Promise.resolve([])
-                      }
-                      return Promise.resolve(contexts)
+                      const answer = since !== undefined && since < Date.parse(query.from.toString()) ? [] : contexts
+                      const deferred = options.history?.deferContexts
+                      return deferred ? deferred.wait.then(() => answer) : Promise.resolve(answer)
                     },
                   }),
             }),
