@@ -792,8 +792,17 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
       },
     }))
 
-    for (let i = 0; i < 5; i += 1) {
-      await request(h.app).get(`${API}/vessels/vessels.urn:mrn:imo:mmsi:90000000${i}/track`).expect(404)
+    // Frozen rather than left to wall time: the window is a second, and five
+    // sequential requests that each reach sqlite can outrun it on a loaded
+    // runner -- which would fail the test for being slow rather than wrong.
+    // Only the clock is faked; `withTimeout` needs a real timer set.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      for (let i = 0; i < 5; i += 1) {
+        await request(h.app).get(`${API}/vessels/vessels.urn:mrn:imo:mmsi:90000000${i}/track`).expect(404)
+      }
+    } finally {
+      vi.useRealTimers()
     }
 
     expect(probes).toBe(1)
