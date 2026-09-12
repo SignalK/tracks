@@ -8,6 +8,7 @@ import {
   contextName,
   gpxFilename,
   asciiFilename,
+  rfc8187,
 } from './utils.js'
 
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
@@ -289,5 +290,27 @@ describe('asciiFilename', () => {
 
   it('never leaves a leading dash', () => {
     expect(asciiFilename('Ärger.gpx').startsWith('-')).toBe(false)
+  })
+})
+
+describe('rfc8187', () => {
+  it('leaves an unreserved name alone', () => {
+    expect(rfc8187('AIS-Ariadne.gpx')).toBe('AIS-Ariadne.gpx')
+  })
+
+  // encodeURIComponent is close but not exact: it leaves !'()* unescaped, and
+  // RFC 8187's attr-char set excludes them, so a vessel called `Boat (Test)`
+  // would put raw parentheses into the header.
+  it.each([
+    ['parentheses', 'Boat (Test).gpx'],
+    ['an apostrophe', "L'ILE.gpx"],
+    ['an asterisk', 'Star*.gpx'],
+    ['an exclamation mark', 'Hey!.gpx'],
+  ])('escapes %s', (_kind, filename) => {
+    expect(rfc8187(filename)).not.toMatch(/[!'()*]/)
+  })
+
+  it('percent-encodes non-ASCII as UTF-8', () => {
+    expect(rfc8187('日本.gpx')).toBe('%E6%97%A5%E6%9C%AC.gpx')
   })
 })

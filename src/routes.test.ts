@@ -449,6 +449,21 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(/filename="([^"]*)"/.exec(disposition)?.[1]).toMatch(/^[\x20-\x7e]+$/)
   })
 
+  // RFC 8187's attr-char excludes !'()*, which encodeURIComponent leaves raw.
+  it('escapes reserved characters in the extended filename', async () => {
+    const h = createHarness({
+      selfPosition: [60, 24],
+      paths: { [`${OTHER_CONTEXT}.name`]: 'Boat (Test)' },
+    })
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(200)
+
+    const extended = /filename\*=UTF-8''(\S+)/.exec(res.headers['content-disposition'] ?? '')?.[1]
+    expect(extended).toBeDefined()
+    expect(extended).not.toMatch(/[!'()*]/)
+  })
+
   it('404s for a vessel neither the store nor history knows', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
 

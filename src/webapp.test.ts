@@ -66,7 +66,6 @@ interface StubElement {
   hidden: boolean
   dataset: Record<string, string>
   children: StubElement[]
-  // Set by the page on the anchor it builds for the GPX download.
   href?: string
   rel?: string
 }

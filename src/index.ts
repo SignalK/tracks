@@ -47,6 +47,7 @@ import {
   contextName,
   gpxFilename,
   asciiFilename,
+  rfc8187,
 } from './utils.js'
 
 export interface ContextPosition {
@@ -721,7 +722,7 @@ export default function ThePlugin(app: App): Plugin {
               // `filename*` form carries the real name.
               res.setHeader(
                 'Content-Disposition',
-                `attachment; filename="${asciiFilename(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+                `attachment; filename="${asciiFilename(filename)}"; filename*=UTF-8''${rfc8187(filename)}`,
               )
               res.send(toGpx([{ name: label, context, segments }]))
             })

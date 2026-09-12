@@ -310,3 +310,18 @@ export function asciiFilename(filename: string): string {
   const trimmed = ascii.replace(/-{2,}/g, '-').replace(/^-+/, '')
   return trimmed === '.gpx' || trimmed === '' ? 'track.gpx' : trimmed
 }
+
+/**
+ * A filename as an RFC 8187 extended value, for `filename*`.
+ *
+ * `encodeURIComponent` is close but not exact: it leaves `!'()*` unescaped,
+ * and RFC 8187's `attr-char` set excludes them. A vessel called
+ * `Boat (Test)` would otherwise put raw parentheses into the header, which is
+ * not a valid extended value.
+ */
+export function rfc8187(filename: string): string {
+  return encodeURIComponent(filename).replace(
+    /[!'()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  )
+}
