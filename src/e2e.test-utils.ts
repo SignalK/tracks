@@ -98,6 +98,16 @@ export interface E2EOptions {
    * depends on — rather than against a provider's private storage.
    */
   plugins?: Record<string, Record<string, unknown>>
+  /**
+   * Plugin id to pin as the server's default history provider.
+   *
+   * The server takes the *first* provider that registers as the default, so a
+   * second one installed in the server checkout — KIP registers as a history
+   * provider, and a dev checkout usually has it — silently wins and answers
+   * every unqualified history query with nothing. Naming the one the test
+   * installed makes the run independent of whatever else is lying around.
+   */
+  historyProvider?: string
   /** Port to boot on, when a test needs its own server. */
   port?: number
 }
@@ -122,6 +132,16 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
       2,
     ),
   )
+
+  if (options.historyProvider) {
+    // The server reads this as `settings.historyApi.defaultProvider`; without
+    // a settings file it boots with empty settings and falls back to
+    // registration order.
+    writeFileSync(
+      join(configDir, 'settings.json'),
+      JSON.stringify({ historyApi: { defaultProvider: options.historyProvider } }, null, 2),
+    )
+  }
 
   for (const [pkg, configuration] of Object.entries(options.plugins ?? {})) {
     execFileSync('npm', ['install', pkg], { cwd: configDir, stdio: 'pipe' })
