@@ -60,6 +60,10 @@ beforeAll(async () => {
     // A different port from plugin.e2e.test.ts so the two files never collide.
     port: 4790,
     config: { source: 'history', resolution: 1000, pointsToKeep: 500 },
+    // Named rather than left to registration order: any other history
+    // provider in the server checkout would otherwise become the default and
+    // answer these queries with nothing.
+    historyProvider: 'signalk-questdb',
     plugins: {
       'signalk-questdb': {
         questdbHost: new URL(QUESTDB_URL).hostname,
