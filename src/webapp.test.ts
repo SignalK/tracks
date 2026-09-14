@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { trackLabel } from './utils.js'
+import { parseDuration } from './timeWindow.js'
 
 /**
  * The webapp ships as plain static files with no build step, so it cannot
@@ -427,6 +428,34 @@ describe('the webapp offers a GPX download', () => {
     expect(link.href).toContain('/self/track.gpx')
   })
 
+  // The export link goes to the *v1* route, whose duration is a number with a
+  // unit suffix -- not the ISO 8601 form the v2 listing takes. Sharing one
+  // constant between them sent `P30D` here and made every download a 400.
+  it('asks the export route for a duration it can parse', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          feature({
+            context: SELF,
+            isSelf: true,
+            from: '2026-09-01T00:00:00Z',
+            to: '2026-09-01T02:00:00Z',
+            pointCount: 2,
+          }),
+        ],
+      },
+    })
+
+    const link = tbody.children[0]!.children[4]!.children[0]!
+    const duration = new URL(link.href!, 'http://localhost/').searchParams.get('duration')
+
+    expect(duration).toBeTruthy()
+    // Parsed by the route's own parser rather than pattern-matched, so this
+    // keeps holding if the accepted spelling ever changes.
+    expect(() => parseDuration(duration!)).not.toThrow()
+  })
+
   it('links another vessel by its context', async () => {
     const { tbody } = await render({
       body: {
@@ -467,6 +496,14 @@ describe('the webapp offers a GPX download', () => {
       },
     })
 
-    expect(tbody.children[0]!.children[4]!.children[0]!.href).toContain('duration=P30D')
+    // Compared as a length of time rather than as a string: the two routes
+    // spell a duration differently, and asserting the literal here is what
+    // pinned the v2 spelling onto the v1 export route.
+    const href = tbody.children[0]!.children[4]!.children[0]!.href!
+    const exported = parseDuration(new URL(href, 'http://localhost/').searchParams.get('duration')!)
+    const listed = readFileSync('public/tracks.js', 'utf8').match(/WINDOW_V2 = '([^']+)'/)?.[1]
+
+    expect(listed).toBe('P30D')
+    expect(exported).toBe(30 * 24 * 60 * 60 * 1000)
   })
 })

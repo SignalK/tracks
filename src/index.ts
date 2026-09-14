@@ -189,8 +189,6 @@ interface Plugin {
 
 interface TracksPluginConfig {
   resolution?: number
-  /** Days of the own vessel's track to keep. 0 keeps everything. */
-  retentionDays?: number
   /** Days another vessel is kept after its last fix. 0 keeps every vessel. */
   aisRetentionDays?: number
   /** Minutes without a fix that start a new track segment. 0 disables. */
@@ -654,7 +652,10 @@ export default function ThePlugin(app: App): Plugin {
           {
             file: join(dataDir, 'tracks.db'),
             resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
-            retention: (toNumber(config.retentionDays) ?? 0) * 24 * 60 * 60 * 1000,
+            // The own vessel's track is never aged out: it is the one worth
+            // keeping, and a year of it at the default resolution is a few
+            // megabytes. Other vessels are pruned by aisRetentionDays.
+            retention: 0,
             segmentGap,
           },
           app.debug,
@@ -1077,14 +1078,6 @@ export default function ThePlugin(app: App): Plugin {
           minimum: 0,
           title: 'Track resolution (milliseconds)',
           default: DEFAULT_RESOLUTION,
-        },
-        retentionDays: {
-          type: 'integer',
-          minimum: 0,
-          title: "Days of the own vessel's track to keep",
-          description:
-            'Positions older than this are deleted. 0, the default, keeps everything — a track is worth more the longer it goes back, and a year of one vessel at the default resolution is a few megabytes.',
-          default: 0,
         },
         aisRetentionDays: {
           type: 'integer',
