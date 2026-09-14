@@ -16,11 +16,15 @@
   "files": [
     "app-icon.svg",
     "dist",
+    "docs",
     "public"
   ],
   "signalk": {
     "displayName": "Tracks",
-    "appIcon": "./app-icon.svg"
+    "appIcon": "./app-icon.svg",
+    "screenshots": [
+      "./docs/screenshots/tracks_1.png"
+    ]
   },
   "keywords": [
     "signalk-node-server-plugin",

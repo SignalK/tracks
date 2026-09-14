@@ -75,6 +75,23 @@ describe('the app icon', () => {
     expect(existsSync(`public/${basename}`)).toBe(true)
   })
 
+  // Same discipline as the icon, applied before it can break: the App Store
+  // reads these package-relative, so a path that does not ship is a real 404
+  // rather than the advisory warning a mislocated icon produces.
+  it('declares screenshots that actually ship', () => {
+    const shots = (pkg.signalk as { screenshots?: string[] }).screenshots
+    expect(shots).toBeDefined()
+    expect(shots!.length).toBeGreaterThan(0)
+
+    for (const shot of shots!) {
+      const relative = shot.replace(/^\.\//, '')
+      expect(existsSync(relative), relative).toBe(true)
+      // The files allowlist is what decides whether it reaches the tarball.
+      const top = relative.split('/')[0]!
+      expect(pkg.files, `${relative} needs "${top}" in files`).toContain(top)
+    }
+  })
+
   it('keeps the two copies identical', () => {
     // A stale root copy would show the old icon in the App Store while the
     // plugin list showed the new one.
