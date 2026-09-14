@@ -20,12 +20,11 @@
   ],
   "signalk": {
     "displayName": "Tracks",
-    "appIcon": "app-icon.svg"
+    "appIcon": "./app-icon.svg"
   },
   "keywords": [
     "signalk-node-server-plugin",
     "signalk-webapp",
-    "signalk-embeddable-webapp",
     "signalk-category-utility"
   ],
   "author": "Teppo Kurki <teppo.kurki@iki.fi>",
