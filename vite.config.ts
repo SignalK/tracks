@@ -32,6 +32,13 @@ export default defineConfig({
     // slow enough at filesystem work to cross that line. The tests themselves
     // finish in milliseconds locally; this is headroom for the platform, not
     // permission for a slow test.
-    testTimeout: 20_000,
+    //
+    // Raised from 20s after Windows crossed it four times in one day, on three
+    // different tests in trackProvider.test.ts -- including two that seed only
+    // 60 points. That spread is the tell: it is not one expensive test but
+    // contention across the 41 harnesses the file opens, so trimming any single
+    // one would not have helped. The whole file still runs in about a second
+    // locally.
+    testTimeout: 45_000,
   },
 })
