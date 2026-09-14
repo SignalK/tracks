@@ -19,7 +19,7 @@
   ],
   "signalk": {
     "displayName": "Tracks",
-    "appIcon": "./public/app-icon.svg"
+    "appIcon": "./app-icon.svg"
   },
   "keywords": [
     "signalk-node-server-plugin",

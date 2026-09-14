@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { trackLabel } from './utils.js'
 import { parseDuration } from './timeWindow.js'
@@ -16,6 +16,53 @@ import { parseDuration } from './timeWindow.js'
  */
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
 const OTHER = 'vessels.urn:mrn:imo:mmsi:987654321'
+
+/**
+ * The plugin's icon, which two different consumers resolve differently.
+ *
+ * The admin UI composes the webapp's mount root with `signalk.appIcon`, and
+ * that mount root *is* `public/` — so a declaration of `./public/app-icon.svg`
+ * points a level too deep and 404s, while the file still serves fine at the
+ * URL a human would try. That is exactly how this shipped broken: the asset
+ * was verified at a path nothing actually requests.
+ *
+ * The page links the same file as its favicon, relative to the same root, so
+ * one declaration has to satisfy both.
+ */
+describe('the app icon', () => {
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
+    signalk?: { appIcon?: string }
+    files?: string[]
+  }
+
+  it('declares an icon that exists under the webapp root', () => {
+    const declared = pkg.signalk?.appIcon
+    expect(declared).toBeDefined()
+
+    // Resolved the way the admin UI resolves it: against public/, which is
+    // what the server mounts at the webapp's URL root.
+    const onDisk = `public/${declared!.replace(/^\.\//, '')}`
+
+    expect(existsSync(onDisk)).toBe(true)
+  })
+
+  it('links the same file as the page favicon', () => {
+    const declared = pkg.signalk?.appIcon!.replace(/^\.\//, '')
+    const html = readFileSync('public/index.html', 'utf8')
+    const href = /<link[^>]+rel="icon"[^>]+href="([^"]+)"/.exec(html)?.[1]
+
+    expect(href).toBeDefined()
+    expect(href!.replace(/^\.\//, '')).toBe(declared)
+  })
+
+  it('ships the icon inside public/, which the files allowlist carries', () => {
+    // app-icon.svg is no longer listed separately: it rides along in public/,
+    // and dropping public/ from files would silently remove both the webapp
+    // and its icon.
+    expect(pkg.files).toContain('public')
+    expect(existsSync('public/app-icon.svg')).toBe(true)
+  })
+})
 
 describe('the webapp labels tracks as the server does', () => {
   const cases: { context: string; contextName?: string; isSelf: boolean }[] = [
