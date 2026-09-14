@@ -55,12 +55,32 @@ describe('the app icon', () => {
     expect(href!.replace(/^\.\//, '')).toBe(declared)
   })
 
-  it('ships the icon inside public/, which the files allowlist carries', () => {
-    // app-icon.svg is no longer listed separately: it rides along in public/,
-    // and dropping public/ from files would silently remove both the webapp
-    // and its icon.
+  // Two consumers resolve the same declaration differently, so the file ships
+  // at both paths rather than betting on one of them.
+  //
+  // The admin UI composes the webapp's mount root -- which *is* public/ --
+  // with appIcon. The App Store resolves it package-relative against the CDN,
+  // and only finds public/ by falling back through a candidate list after the
+  // primary URL 404s. A root copy costs 1.7 kB, spares that round-trip, and
+  // stops the packaging check warning on every release.
+  it('ships the icon at both paths every consumer resolves', () => {
+    const basename = pkg.signalk!.appIcon!.replace(/^\.\//, '')
+
+    // Package-relative: what the App Store asks the CDN for first.
+    expect(pkg.files).toContain(basename)
+    expect(existsSync(basename)).toBe(true)
+
+    // Webapp root: what the admin UI and the page favicon resolve.
     expect(pkg.files).toContain('public')
-    expect(existsSync('public/app-icon.svg')).toBe(true)
+    expect(existsSync(`public/${basename}`)).toBe(true)
+  })
+
+  it('keeps the two copies identical', () => {
+    // A stale root copy would show the old icon in the App Store while the
+    // plugin list showed the new one.
+    const basename = pkg.signalk!.appIcon!.replace(/^\.\//, '')
+
+    expect(readFileSync(basename, 'utf8')).toBe(readFileSync(`public/${basename}`, 'utf8'))
   })
 })
 
