@@ -76,6 +76,23 @@ export interface TrackStore {
   ): Promise<TrackCollection>
 
   /**
+   * Remember the name a context is currently known by.
+   *
+   * Names are resolved live from the server's data model on every request,
+   * because an AIS static report can arrive long after the first position. But
+   * the model is empty after a restart, so a track recorded for months would
+   * show as a bare MMSI until the vessel next transmits — and never again for
+   * one that has since left. Storing what was known closes that gap.
+   *
+   * `timestamp` dates the observation so a later report replaces an earlier
+   * one rather than the first sighting winning forever.
+   */
+  recordName(context: Context, name: string, timestamp?: number): void
+
+  /** The last name stored for a context, or undefined if none ever was. */
+  nameFor(context: Context): string | undefined
+
+  /**
    * Drop contexts whose newest position is older than `maxAge` ms.
    *
    * `keep` is never pruned however long it has been idle. The own vessel's

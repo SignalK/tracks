@@ -288,3 +288,71 @@ describe('prune and the write throttle', () => {
     }
   })
 })
+
+describe('remembered names', () => {
+  it('survives a restart', () => {
+    // The whole point: the server's data model is empty after a restart, so a
+    // track recorded for months would show a bare MMSI until the vessel next
+    // transmits -- and never again for one that has left. Needs a real file;
+    // an in-memory database cannot outlive its own close.
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-name-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const first = new SqliteTrackStore({ file }, debug)
+      first.recordName(ctx, 'Ariadne')
+      first.close()
+
+      const reopened = new SqliteTrackStore({ file }, debug)
+      expect(reopened.nameFor(ctx)).toBe('Ariadne')
+      reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('lets a later report replace an earlier one', () => {
+    const store = newStore()
+
+    store.recordName(ctx, 'Old Name', 1000)
+    store.recordName(ctx, 'New Name', 2000)
+
+    expect(store.nameFor(ctx)).toBe('New Name')
+    store.close()
+  })
+
+  it('ignores an older observation arriving late', () => {
+    // Deltas can be replayed or delayed; a stale one must not undo a
+    // correction.
+    const store = newStore()
+
+    store.recordName(ctx, 'Current', 2000)
+    store.recordName(ctx, 'Stale', 1000)
+
+    expect(store.nameFor(ctx)).toBe('Current')
+    store.close()
+  })
+
+  it('forgets the name of a vessel that ages out', () => {
+    // Otherwise this table grows for every target a harbour puts past the
+    // receiver, long after the positions themselves are gone.
+    const store = newStore()
+
+    store.newPosition(other, [60, 24], Date.now() - 10 * 24 * 60 * 60 * 1000)
+    store.recordName(other, 'Departed')
+    expect(store.nameFor(other)).toBe('Departed')
+
+    store.prune(24 * 60 * 60 * 1000, ctx)
+
+    expect(store.nameFor(other)).toBeUndefined()
+    store.close()
+  })
+
+  it('keeps nothing for a blank name', () => {
+    const store = newStore()
+
+    store.recordName(ctx, '   ')
+
+    expect(store.nameFor(ctx)).toBeUndefined()
+    store.close()
+  })
+})

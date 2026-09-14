@@ -106,4 +106,18 @@ describe('Tracks', () => {
     tracks.prune(-1) // cutoff in the future: everything is stale
     expect(tracks.getAccumulator(CONTEXT, false)).toBeUndefined()
   })
+
+  // A name left behind outlives the track it describes, and would be handed
+  // back to the context if it ever returned unnamed -- the stale label the
+  // live-first lookup exists to avoid.
+  it('forgets a remembered name when its track is pruned', () => {
+    const tracks = new Tracks({ resolution: 0, pointsToKeep: 10 }, debug)
+    tracks.newPosition(CONTEXT, [1, 1])
+    tracks.recordName(CONTEXT, 'Ariadne')
+    expect(tracks.nameFor(CONTEXT)).toBe('Ariadne')
+
+    tracks.prune(-1) // cutoff in the future: everything is stale
+
+    expect(tracks.nameFor(CONTEXT)).toBeUndefined()
+  })
 })

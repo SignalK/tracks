@@ -348,6 +348,53 @@ describe('track names', () => {
     expect(res.body[OTHER_CONTEXT].name).toBe('AIS MIA')
   })
 
+  // The server's data model is empty after a restart, and a vessel that has
+  // sailed out of range never repeats its static report. Without a remembered
+  // name its months-old track reverts to a bare MMSI for good.
+  it('still knows a name the data model has forgotten', async () => {
+    const paths: Record<string, unknown> = { [`${OTHER_CONTEXT}.name`]: 'MIA' }
+    const h = (harness = createHarness({ selfPosition: [60, 24], paths }))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    // The vessel goes out of range: the server forgets it, then restarts.
+    delete paths[`${OTHER_CONTEXT}.name`]
+    h.stop()
+    h.restart()
+
+    const res = await request(h.app).get(`${API}/tracks`).expect(200)
+
+    expect(res.body[OTHER_CONTEXT].name).toBe('AIS MIA')
+  })
+
+  // A remembered name is a stand-in, never an override: an AIS static report
+  // can arrive long after the first position, and correcting the name is
+  // exactly what it is for.
+  it('prefers the live name over the remembered one', async () => {
+    const paths: Record<string, unknown> = { [`${OTHER_CONTEXT}.name`]: 'MIA' }
+    const h = (harness = createHarness({ selfPosition: [60, 24], paths }))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    paths[`${OTHER_CONTEXT}.name`] = 'MIA II'
+
+    const res = await request(h.app).get(`${API}/tracks`).expect(200)
+
+    expect(res.body[OTHER_CONTEXT].name).toBe('AIS MIA II')
+  })
+
+  // Remembering must stay per-vessel: a name recorded for one context may not
+  // leak onto another that was never named.
+  it('does not lend a remembered name to an unnamed vessel', async () => {
+    const third = 'vessels.urn:mrn:imo:mmsi:111222333'
+    const paths: Record<string, unknown> = { [`${OTHER_CONTEXT}.name`]: 'MIA' }
+    const h = (harness = createHarness({ selfPosition: [60, 24], paths }))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+    h.emit(third, [60.3, 24.7])
+
+    const res = await request(h.app).get(`${API}/tracks`).expect(200)
+
+    expect(res.body[third].name).toBe('AIS 111222333')
+  })
+
   // Older servers have no getPath at all, and a vessel can be tracked before
   // its static report arrives. Neither may leave the track unlabelled.
   it('falls back to the mmsi when the server cannot resolve a name', async () => {
