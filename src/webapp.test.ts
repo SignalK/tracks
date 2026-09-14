@@ -1,6 +1,7 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { trackLabel } from './utils.js'
+import { parseDuration } from './timeWindow.js'
 
 /**
  * The webapp ships as plain static files with no build step, so it cannot
@@ -15,6 +16,53 @@ import { trackLabel } from './utils.js'
  */
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
 const OTHER = 'vessels.urn:mrn:imo:mmsi:987654321'
+
+/**
+ * The plugin's icon, which two different consumers resolve differently.
+ *
+ * The admin UI composes the webapp's mount root with `signalk.appIcon`, and
+ * that mount root *is* `public/` — so a declaration of `./public/app-icon.svg`
+ * points a level too deep and 404s, while the file still serves fine at the
+ * URL a human would try. That is exactly how this shipped broken: the asset
+ * was verified at a path nothing actually requests.
+ *
+ * The page links the same file as its favicon, relative to the same root, so
+ * one declaration has to satisfy both.
+ */
+describe('the app icon', () => {
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
+    signalk?: { appIcon?: string }
+    files?: string[]
+  }
+
+  it('declares an icon that exists under the webapp root', () => {
+    const declared = pkg.signalk?.appIcon
+    expect(declared).toBeDefined()
+
+    // Resolved the way the admin UI resolves it: against public/, which is
+    // what the server mounts at the webapp's URL root.
+    const onDisk = `public/${declared!.replace(/^\.\//, '')}`
+
+    expect(existsSync(onDisk)).toBe(true)
+  })
+
+  it('links the same file as the page favicon', () => {
+    const declared = pkg.signalk?.appIcon!.replace(/^\.\//, '')
+    const html = readFileSync('public/index.html', 'utf8')
+    const href = /<link[^>]+rel="icon"[^>]+href="([^"]+)"/.exec(html)?.[1]
+
+    expect(href).toBeDefined()
+    expect(href!.replace(/^\.\//, '')).toBe(declared)
+  })
+
+  it('ships the icon inside public/, which the files allowlist carries', () => {
+    // app-icon.svg is no longer listed separately: it rides along in public/,
+    // and dropping public/ from files would silently remove both the webapp
+    // and its icon.
+    expect(pkg.files).toContain('public')
+    expect(existsSync('public/app-icon.svg')).toBe(true)
+  })
+})
 
 describe('the webapp labels tracks as the server does', () => {
   const cases: { context: string; contextName?: string; isSelf: boolean }[] = [
@@ -427,6 +475,34 @@ describe('the webapp offers a GPX download', () => {
     expect(link.href).toContain('/self/track.gpx')
   })
 
+  // The export link goes to the *v1* route, whose duration is a number with a
+  // unit suffix -- not the ISO 8601 form the v2 listing takes. Sharing one
+  // constant between them sent `P30D` here and made every download a 400.
+  it('asks the export route for a duration it can parse', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          feature({
+            context: SELF,
+            isSelf: true,
+            from: '2026-09-01T00:00:00Z',
+            to: '2026-09-01T02:00:00Z',
+            pointCount: 2,
+          }),
+        ],
+      },
+    })
+
+    const link = tbody.children[0]!.children[4]!.children[0]!
+    const duration = new URL(link.href!, 'http://localhost/').searchParams.get('duration')
+
+    expect(duration).toBeTruthy()
+    // Parsed by the route's own parser rather than pattern-matched, so this
+    // keeps holding if the accepted spelling ever changes.
+    expect(() => parseDuration(duration!)).not.toThrow()
+  })
+
   it('links another vessel by its context', async () => {
     const { tbody } = await render({
       body: {
@@ -467,6 +543,14 @@ describe('the webapp offers a GPX download', () => {
       },
     })
 
-    expect(tbody.children[0]!.children[4]!.children[0]!.href).toContain('duration=P30D')
+    // Compared as a length of time rather than as a string: the two routes
+    // spell a duration differently, and asserting the literal here is what
+    // pinned the v2 spelling onto the v1 export route.
+    const href = tbody.children[0]!.children[4]!.children[0]!.href!
+    const exported = parseDuration(new URL(href, 'http://localhost/').searchParams.get('duration')!)
+    const listed = readFileSync('public/tracks.js', 'utf8').match(/WINDOW_V2 = '([^']+)'/)?.[1]
+
+    expect(listed).toBe('P30D')
+    expect(exported).toBe(30 * 24 * 60 * 60 * 1000)
   })
 })

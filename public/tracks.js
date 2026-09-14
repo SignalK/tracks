@@ -19,7 +19,11 @@
  * days covers the passage someone is looking for while keeping the query
  * something the store can serve.
  */
-const WINDOW = 'P30D'
+// The two APIs spell a duration differently: v2 takes ISO 8601, v1 takes a
+// number with a unit suffix. One constant for both sent `P30D` to the v1
+// export route, which rejected it and made every GPX download a 400.
+const WINDOW_V2 = 'P30D'
+const WINDOW_V1 = '30d'
 
 /**
  * Ceiling on the list request.
@@ -31,7 +35,7 @@ const WINDOW = 'P30D'
 const REQUEST_TIMEOUT_MS = 30_000
 
 /** Relative, because the server mounts this under /@signalk/tracks-plugin. */
-const TRACKS_URL = `../../signalk/v2/api/tracks?geometry=false&duration=${WINDOW}`
+const TRACKS_URL = `../../signalk/v2/api/tracks?geometry=false&duration=${WINDOW_V2}`
 
 const status = document.getElementById('status')
 const table = document.getElementById('tracks')
@@ -92,7 +96,7 @@ function exportCell({ context, isSelf }) {
   // `self` resolves server-side; using it keeps the URL short and avoids
   // guessing how the own vessel's context should be spelled.
   const vessel = isSelf ? 'self/track.gpx' : `vessels/${encodeURIComponent(context)}/track.gpx`
-  link.href = `../../signalk/v1/api/${vessel}?duration=${WINDOW}`
+  link.href = `../../signalk/v1/api/${vessel}?duration=${WINDOW_V1}`
   link.textContent = 'GPX'
   link.rel = 'nofollow'
   td.append(link)

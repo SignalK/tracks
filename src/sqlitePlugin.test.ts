@@ -171,25 +171,31 @@ describe('an unusable data directory', () => {
   })
 })
 
-// The two retentions are configured separately, so neither may switch the other
-// off. Gating the prune call on the AIS setting meant `aisRetentionDays: 0` —
-// "keep every vessel" — silently stopped trimming the own vessel's track too.
-describe('retention settings are independent', () => {
-  it('still trims the own track when AIS retention is disabled', async () => {
+// The own vessel's track is never aged out -- it is the one worth keeping, and
+// a year of it is a few megabytes. Only other vessels are pruned, which a busy
+// harbour makes necessary. There is deliberately no setting for the first.
+describe('own vessel retention', () => {
+  it('keeps the own track however old, while pruning other vessels', async () => {
     vi.useFakeTimers()
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-both-'))
     const { app, emit } = createApp(dir)
     const plugin = ThePlugin(app)
     try {
-      plugin.start({ resolution: 0, retentionDays: 1, aisRetentionDays: 0 })
+      plugin.start({ resolution: 0, aisRetentionDays: 1 })
       const self = SELF_CONTEXT as ContextPosition['context']
-      emit(self, [60, 24], Date.now() - 3 * 24 * 60 * 60 * 1000)
+      const other = 'vessels.urn:mrn:imo:mmsi:987654321' as ContextPosition['context']
+      const ancient = Date.now() - 3 * 24 * 60 * 60 * 1000
+      emit(self, [60, 24], ancient)
       emit(self, [60.1, 24.1], Date.now())
+      emit(other, [61, 25], ancient)
 
       // One hour on: the prune timer fires.
       await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
 
-      await expect(plugin.getTracks()?.get(self)).resolves.toHaveLength(1)
+      // Both of the own vessel's positions survive, including the old one.
+      await expect(plugin.getTracks()?.get(self)).resolves.toHaveLength(2)
+      // The other vessel, silent for three days, is gone.
+      await expect(plugin.getTracks()?.get(other)).rejects.toThrow()
     } finally {
       plugin.stop()
       vi.useRealTimers()

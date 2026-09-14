@@ -221,9 +221,9 @@ describe('retention', () => {
   })
 })
 
-// `retentionDays` is configured as "days of the own vessel's track to keep", so
-// it must not reach into another vessel's rows — and the AIS sweep must not be
-// what decides whether it runs at all.
+// The store's `retention` trims the kept context's own rows. The plugin no
+// longer sets it — the own vessel's track is never aged out — but the store
+// option remains, and it must not reach into another vessel's rows.
 describe('retention scope', () => {
   it('trims only the kept context, not every vessel', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-ret-'))
