@@ -32,6 +32,19 @@ describe('README examples', () => {
     expect(inBounds([0, 170])).toBe(false)
   })
 
+  // "A parameter these routes do not read is rejected with 400 rather than
+  // ignored" -- and bbox is the one a reader is most likely to try, having seen
+  // it on /tracks.
+  it('rejects a parameter the single-vessel routes do not read', () => {
+    expect(() => parseTrackQuery({ bbox: '24,59,26,61' })).toThrow(/Unknown query parameter bbox/)
+    expect(() => parseTrackQuery({ duratoin: '6h' })).toThrow(/duratoin/)
+  })
+
+  it('accepts bbox and radius where they are documented, on the collection route', () => {
+    expect(() => parseTrackQuery({ bbox: '130,-35,139,-33' }, Date.now(), ['bbox', 'radius'])).not.toThrow()
+    expect(() => parseTrackQuery({ radius: '50000' }, Date.now(), ['bbox', 'radius'])).not.toThrow()
+  })
+
   it('?duration=6h is a six hour window ending now', () => {
     const now = Date.parse('2026-08-09T12:00:00Z')
     expect(parseTrackQuery({ duration: '6h' }, now).window).toEqual({

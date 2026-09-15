@@ -1047,6 +1047,9 @@ export default function ThePlugin(app: App): Plugin {
       )
 
       // return all / filtered vessel tracks
+      /** Only the collection route filters spatially; see AGENTS.md on v1 vs v2. */
+      const SPATIAL_PARAMS = ['bbox', 'radius'] as const
+
       const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
         app.debug(req.query)
         if (!tracks) {
@@ -1056,7 +1059,7 @@ export default function ThePlugin(app: App): Plugin {
         let query: TrackQuery
         let params: TrackParams
         try {
-          query = parseTrackQuery(req.query)
+          query = parseTrackQuery(req.query, Date.now(), SPATIAL_PARAMS)
           // Inside the try on purpose: a malformed bbox used to reach the
           // matcher, throw there, and be caught by the result handler's
           // `.catch()`, which answers 404 -- reporting a bad query as an empty

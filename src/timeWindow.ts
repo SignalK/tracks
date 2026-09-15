@@ -16,6 +16,13 @@ import type { TimedPosition, TimeWindow } from './types.js'
  * `resolution` is shared by both and expresses the minimum spacing between
  * returned points, thinning the track for wide time ranges.
  */
+/**
+ * The query keys these routes read. Kept beside the schema so the two cannot
+ * drift: a key added to one without the other either fails validation or is
+ * rejected as unknown.
+ */
+const QUERY_KEYS = ['from', 'to', 'duration', 'timespan', 'timespanOffset', 'resolution', 'times'] as const
+
 const QuerySchema = Type.Object({
   from: Type.Optional(Type.String()),
   to: Type.Optional(Type.String()),
@@ -110,7 +117,28 @@ export interface TrackQuery {
  * `timespan`/`timespanOffset` pair. Absent all of them, no window is applied
  * and the whole retained track is returned, as before.
  */
-export function parseTrackQuery(query: Record<string, unknown>, now: number = Date.now()): TrackQuery {
+export function parseTrackQuery(
+  query: Record<string, unknown>,
+  now: number = Date.now(),
+  alsoAllowed: readonly string[] = [],
+): TrackQuery {
+  // A parameter the route cannot honour is a question it is not answering, and
+  // answering 200 says it did. Unknown keys were silently dropped, so `?bbox=`
+  // on a single-vessel route -- reasonable, having seen bbox on /tracks -- read
+  // as a filtered track when it was the whole one, and a typo like
+  // `?duratoin=6h` quietly returned everything retained.
+  //
+  // Spelled per route rather than globally: /tracks genuinely takes bbox and
+  // radius, the single-vessel routes genuinely do not.
+  const unknown = Object.keys(query).filter(
+    (key) => !QUERY_KEYS.includes(key as (typeof QUERY_KEYS)[number]) && !alsoAllowed.includes(key),
+  )
+  if (unknown.length > 0) {
+    const allowed = [...QUERY_KEYS, ...alsoAllowed].join(', ')
+    throw new TimeWindowError(
+      `Unknown query parameter${unknown.length > 1 ? 's' : ''} ${unknown.join(', ')}; accepted: ${allowed}`,
+    )
+  }
   const raw = {
     from: firstString(query.from),
     to: firstString(query.to),
