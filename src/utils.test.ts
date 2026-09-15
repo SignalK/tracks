@@ -4,6 +4,9 @@ import {
   resolveContext,
   toIsoTimes,
   validateParameters,
+  QueryParameterError,
+  SelfPositionUnavailableError,
+  createMatcher,
   trackLabel,
   contextName,
   gpxFilename,
@@ -81,10 +84,25 @@ describe('validateParameters', () => {
     expect(inBounds([135, -34])).toBe(false) // the same point written lat-first
   })
 
+  // Thrown, not dropped: a bbox that yields null skips the filter entirely and
+  // answers with every track, so a typo silently returns more than was asked
+  // for. Absent stays absent -- no bbox is not an error.
   it('rejects a bbox that is not four finite numbers', () => {
-    expect(validateParameters({ bbox: '1,2,3' }, undefined).bbox).toBeNull()
-    expect(validateParameters({ bbox: '1,2,3,abc' }, undefined).bbox).toBeNull()
-    expect(validateParameters({ bbox: '' }, undefined).bbox).toBeNull()
+    expect(() => validateParameters({ bbox: '1,2,3' }, undefined)).toThrow(QueryParameterError)
+    expect(() => validateParameters({ bbox: '1,2,3,abc' }, undefined)).toThrow(QueryParameterError)
+    expect(() => validateParameters({ bbox: '' }, undefined)).toThrow(QueryParameterError)
+  })
+
+  // #80. createInBounds throws on an inverted box, which the route's catch
+  // reported as 404 -- a malformed query impersonating an empty result.
+  it('rejects a bbox whose south exceeds its north', () => {
+    expect(() => validateParameters({ bbox: '24,61,26,59' }, undefined)).toThrow(
+      /bbox south \(61\) must not be greater than north \(59\)/,
+    )
+  })
+
+  it('leaves an absent bbox unfiltered', () => {
+    expect(validateParameters({}, undefined).bbox).toBeNull()
   })
 
   it('parses radius and falls back to the configured default', () => {
@@ -95,6 +113,20 @@ describe('validateParameters', () => {
 
   it('keeps an explicit radius of zero rather than the default', () => {
     expect(validateParameters({ radius: '0' }, 1000).radius).toBe(0)
+  })
+
+  // Thrown rather than dropped, for the same reason as the bbox: a radius that
+  // yields null skips the filter and answers with every track.
+  it('rejects a radius that is not a number', () => {
+    expect(() => validateParameters({ radius: 'abc' }, undefined)).toThrow(QueryParameterError)
+    expect(() => validateParameters({ radius: '' }, undefined)).toThrow(QueryParameterError)
+    expect(() => validateParameters({ radius: 'Infinity' }, undefined)).toThrow(QueryParameterError)
+  })
+
+  // A negative radius matched nothing at all -- an empty result for a query
+  // that cannot be satisfied, which reads as "no vessels near you".
+  it('rejects a negative radius', () => {
+    expect(() => validateParameters({ radius: '-5' }, undefined)).toThrow(/must not be negative/)
   })
 
   it('takes the first value when express repeats a query parameter', () => {
@@ -312,5 +344,15 @@ describe('rfc8187', () => {
 
   it('percent-encodes non-ASCII as UTF-8', () => {
     expect(rfc8187('日本.gpx')).toBe('%E6%97%A5%E6%9C%AC.gpx')
+  })
+})
+
+describe('createMatcher', () => {
+  // The query is well-formed; the server just has no position to measure from.
+  // Distinct from a malformed radius, and reported differently.
+  it('signals an outage when a radius query has no self position', () => {
+    const params = validateParameters({ radius: '500' }, undefined)
+
+    expect(() => createMatcher(params, undefined)).toThrow(SelfPositionUnavailableError)
   })
 })

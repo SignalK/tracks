@@ -93,10 +93,12 @@ reviews:
         - `resetOnDisconnect: false` on the rxjs `connectable()`. The default
           would discard the accumulated track when the last subscriber leaves.
         - Coordinates held as `[lat, lng]` internally and flipped to `[lng, lat]`
-          only at the GeoJSON boundary, and a `bbox` query parameter that is
-          `lat,lon,lat,lon` rather than GeoJSON order. Both are deliberate and
-          documented; check which side of the boundary the code is on before
-          calling an order wrong.
+          only at the GeoJSON boundary. The `bbox` query parameter is
+          `west,south,east,north` — GeoJSON order, matching the output rather
+          than the internal one — and is swapped to `[lat, lng]` corners as it
+          is parsed. It was latitude-first up to 2.0.2; that is the old order,
+          not the contract. Check which side of the boundary the code is on
+          before calling an order wrong.
         - Tests that seed positions with `initialTrack` rather than
           `newPosition`. `throttleTime` thins against the wall clock, so a
           synchronous burst of `newPosition` calls yields a single point.

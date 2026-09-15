@@ -37,6 +37,7 @@ import type {
   TimeWindow,
   TimedTrackCollection,
   TrackCollection,
+  TrackParams,
 } from './types.js'
 import {
   historyRowPosition,
@@ -49,6 +50,8 @@ import {
   asciiFilename,
   rfc8187,
   unwrapString,
+  QueryParameterError,
+  SelfPositionUnavailableError,
 } from './utils.js'
 
 export interface ContextPosition {
@@ -1051,14 +1054,24 @@ export default function ThePlugin(app: App): Plugin {
           return
         }
         let query: TrackQuery
+        let params: TrackParams
         try {
           query = parseTrackQuery(req.query)
+          // Inside the try on purpose: a malformed bbox used to reach the
+          // matcher, throw there, and be caught by the result handler's
+          // `.catch()`, which answers 404 -- reporting a bad query as an empty
+          // one. Validating here lets it surface as the 400 it is.
+          params = validateParameters(req.query, undefined)
         } catch (err) {
           res.status(400)
-          res.json({ message: err instanceof TimeWindowError ? err.message : 'Invalid query parameters' })
+          res.json({
+            message:
+              err instanceof TimeWindowError || err instanceof QueryParameterError
+                ? err.message
+                : 'Invalid query parameters',
+          })
           return
         }
-        const params = validateParameters(req.query, undefined)
         const selfPosition = getVesselPosition()
 
         // Two paths on purpose. Without `times` the response keeps its
@@ -1096,7 +1109,15 @@ export default function ThePlugin(app: App): Plugin {
           .then((trks) => {
             res.json(trks)
           })
-          .catch(() => {
+          .catch((err: unknown) => {
+            // A radius query the server cannot measure is not a missing track.
+            // Reporting it as 404 said no vessel matched, which is the one
+            // thing an unanswerable query cannot establish.
+            if (err instanceof SelfPositionUnavailableError) {
+              res.status(503)
+              res.json({ message: 'No position for the own vessel, so radius cannot be measured' })
+              return
+            }
             res.status(404)
             res.json({ message: `No track available for vessels.` })
           })

@@ -82,6 +82,25 @@ function toFiniteNumber(value: string): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined
 }
 
+/**
+ * A query parameter was present but malformed.
+ *
+ * Distinct from absent: a filter nobody asked for is not an error, but one
+ * that cannot be honoured must not quietly widen the query. Carries its own
+ * message so the handler can hand it to the client, the way `TimeWindowError`
+ * already does for the time window.
+ */
+export class QueryParameterError extends Error {}
+
+/**
+ * A well-formed query the server cannot currently answer.
+ *
+ * `radius` measures from the own vessel, so it needs a self position. Not
+ * having one is an outage, not a client mistake -- the same distinction the
+ * single-vessel route already draws for a history provider it cannot read.
+ */
+export class SelfPositionUnavailableError extends Error {}
+
 export function validateParameters(params: QueryParameters, defaultMaxRadius: number | undefined): TrackParams {
   // Bounding box as west,south,east,north — GeoJSON coordinate order, the same
   // as the coordinates these endpoints return, the Resources API, and the v2
@@ -94,16 +113,37 @@ export function validateParameters(params: QueryParameters, defaultMaxRadius: nu
     // Every one of the four must have parsed; a `0` is a valid coordinate, so
     // test for undefined rather than truthiness.
     const [west, south, east, north] = b
-    if (b.length === 4 && west !== undefined && south !== undefined && east !== undefined && north !== undefined) {
-      bbox = { sw: [south, west], ne: [north, east] }
+    if (b.length !== 4 || west === undefined || south === undefined || east === undefined || north === undefined) {
+      // Thrown rather than dropped. Yielding `null` here would skip the filter
+      // and answer 200 with every track, so a typo'd bbox silently returns
+      // more than was asked for -- the opposite of what a filter is for.
+      throw new QueryParameterError('bbox must be four comma-separated numbers: west,south,east,north')
     }
+    if (south > north) {
+      // Wording follows the v2 Track API's own check, so the two surfaces
+      // reject the same query the same way.
+      throw new QueryParameterError(`bbox south (${south}) must not be greater than north (${north})`)
+    }
+    bbox = { sw: [south, west], ne: [north, east] }
   }
 
   let radius: number | null = null
   // radius in meters
   const rawRadius = firstValue(params.radius)
   if (rawRadius !== undefined) {
-    radius = toFiniteNumber(rawRadius) ?? null
+    const parsed = toFiniteNumber(rawRadius)
+    if (parsed === undefined) {
+      // Same reasoning as the bbox above: falling back to `null` here drops the
+      // filter and answers with every track, so a typo returns more than was
+      // asked for rather than failing.
+      throw new QueryParameterError(`radius must be a number in meters, got '${rawRadius}'`)
+    }
+    if (parsed < 0) {
+      // A negative radius matched nothing, silently -- an empty result for a
+      // query that cannot be satisfied by construction.
+      throw new QueryParameterError(`radius must not be negative, got ${parsed}`)
+    }
+    radius = parsed
   } else if (defaultMaxRadius) {
     radius = defaultMaxRadius
   }
@@ -171,7 +211,7 @@ export function createMatcher(
       : (track: LatLngTuple[]) => inBounds(lastPoint(track))
   } else if (params.radius !== null) {
     if (!selfPosition) {
-      throw new Error('No self position to calculate radius values')
+      throw new SelfPositionUnavailableError('No self position to calculate radius values')
     }
     const radius = params.radius
     const distanceFromSelf = createDistanceTo(selfPosition, debug)
