@@ -157,12 +157,41 @@ export class Tracks implements TrackStore {
     }, {})
   }
 
+  /**
+   * Remembered names, by context.
+   *
+   * In memory only: this store is the client-side accumulator, so there is no
+   * restart for a stored name to survive. It implements the same contract so
+   * the two stores stay interchangeable and the plugin needs no special case.
+   */
+  private readonly names = new Map<Context, { name: string; timestamp: number }>()
+
+  recordName(context: Context, name: string, timestamp: number = Date.now()): void {
+    const trimmed = name.trim()
+    if (trimmed === '') {
+      return
+    }
+    const seen = this.names.get(context)
+    if (seen && seen.timestamp > timestamp) {
+      return
+    }
+    this.names.set(context, { name: trimmed, timestamp })
+  }
+
+  nameFor(context: Context): string | undefined {
+    return this.names.get(context)?.name
+  }
+
   prune(maxAge: number, keep?: Context): void {
     const cutoff = Date.now() - maxAge
     const deleted: string[] = []
     Object.entries(this.tracks).forEach(([key, value]) => {
       if (key !== keep && value.latestLatLngTuple < cutoff) {
         delete this.tracks[key]
+        // The remembered name goes with the track. Left behind it would both
+        // grow unboundedly and, worse, hand a returning context its stale
+        // label back -- the very thing resolving live first avoids.
+        this.names.delete(key)
         deleted.push(key)
       }
     })

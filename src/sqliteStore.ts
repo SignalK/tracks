@@ -120,6 +120,8 @@ const DEFAULT_SEGMENT_GAP = 5 * 60 * 1000
 export class SqliteTrackStore implements TrackStore {
   private readonly db: DatabaseSync
   private readonly insert: StatementSync
+  private readonly insertName: StatementSync
+  private readonly selectName: StatementSync
   private readonly maxCells: number
   private readonly segmentGap: number
   private readonly retention: number
@@ -149,8 +151,24 @@ export class SqliteTrackStore implements TrackStore {
       );
       CREATE INDEX IF NOT EXISTS idx_s2cell ON positions(s2cell);
       CREATE INDEX IF NOT EXISTS idx_context_timestamp ON positions(context, timestamp);
+      -- A separate table rather than a column on positions: this store has no
+      -- migration mechanism, so a new table appears harmlessly on a database
+      -- written by an older version, where an ALTER TABLE would not.
+      CREATE TABLE IF NOT EXISTS names (
+        context   TEXT PRIMARY KEY,
+        name      TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
     `)
     this.insert = this.db.prepare('INSERT INTO positions (context, timestamp, lat, lon, s2cell) VALUES (?, ?, ?, ?, ?)')
+    // Newer wins: a corrected or changed name replaces what is stored, while
+    // an older observation arriving late leaves it alone.
+    this.insertName = this.db.prepare(
+      `INSERT INTO names (context, name, timestamp) VALUES (?, ?, ?)
+       ON CONFLICT(context) DO UPDATE SET name = excluded.name, timestamp = excluded.timestamp
+       WHERE excluded.timestamp >= names.timestamp`,
+    )
+    this.selectName = this.db.prepare('SELECT name FROM names WHERE context = ?')
   }
 
   newPosition(context: Context, position: LatLngTuple, timestamp: number = Date.now()): void {
@@ -359,6 +377,19 @@ export class SqliteTrackStore implements TrackStore {
     return result
   }
 
+  recordName(context: Context, name: string, timestamp: number = Date.now()): void {
+    const trimmed = name.trim()
+    if (trimmed === '') {
+      return
+    }
+    this.insertName.run(context, trimmed, timestamp)
+  }
+
+  nameFor(context: Context): string | undefined {
+    const row = this.selectName.get(context) as { name?: string } | undefined
+    return row?.name
+  }
+
   prune(maxAge: number, keep?: Context): void {
     const cutoff = Date.now() - maxAge
     // Drop whole contexts that have gone quiet, then apply the row-level
@@ -372,6 +403,11 @@ export class SqliteTrackStore implements TrackStore {
         'DELETE FROM positions WHERE context IN (SELECT context FROM positions GROUP BY context HAVING MAX(timestamp) < ?) AND context IS NOT ?',
       )
       .run(cutoff, keep ?? null)
+    // A vessel that has aged out takes its name with it, or this table grows
+    // for every target a harbour ever put past the receiver.
+    for (const { context } of dropped) {
+      this.db.prepare('DELETE FROM names WHERE context = ?').run(context)
+    }
     // The write-throttle map is keyed by context and nothing else clears it, so
     // without this every vessel that ever passed leaves an entry behind — an
     // unbounded map on a server watching a busy harbour.

@@ -256,7 +256,7 @@ export function trackLabel(
 }
 
 /** Accepts both a bare string and the `{value}` wrapper deltas arrive in. */
-function unwrapString(raw: unknown): string | undefined {
+export function unwrapString(raw: unknown): string | undefined {
   const value: unknown = raw && typeof raw === 'object' && 'value' in raw ? raw.value : raw
   if (typeof value !== 'string') {
     return undefined

@@ -48,6 +48,7 @@ import {
   gpxFilename,
   asciiFilename,
   rfc8187,
+  unwrapString,
 } from './utils.js'
 
 export interface ContextPosition {
@@ -570,6 +571,26 @@ const historyRowTimestamp = (row: unknown): number => {
 }
 
 export default function ThePlugin(app: App): Plugin {
+  /**
+   * The server's own lookup, falling back to what the store remembers.
+   *
+   * Live wins whenever the data model has an answer, which keeps the rule the
+   * resolvers were written for: an AIS static report arriving late must be
+   * able to correct or replace what was known. The stored value only covers
+   * the window where the model knows nothing -- after a restart, or for a
+   * vessel that has since sailed out of range.
+   */
+  const remembering =
+    (store: () => TrackStore | undefined) =>
+    (path: string): unknown => {
+      const live = app.getPath?.(path)
+      if (live !== undefined) {
+        return live
+      }
+      const match = /^(.*)\.name$/.exec(path)
+      return match ? store()?.nameFor(match[1] as Context) : undefined
+    }
+
   let onStop: (() => void)[] = []
   let tracks: TrackStore | undefined = undefined
   let segmentGap = 0
@@ -668,6 +689,23 @@ export default function ThePlugin(app: App): Plugin {
         app.streambundle.getBus('navigation.position').onValue((update: ContextPosition): void => {
           if (!update.value || update.value.latitude == null || update.value.longitude == null) return
           sourceWatch.add(update.context, update.$source)
+          // Captured here rather than by subscribing to `name`: the data model
+          // already holds it by the time a position arrives, and a vessel with
+          // no positions is not a track worth naming.
+          //
+          // Deliberately reads the model directly instead of going through
+          // contextName, which now falls back to this very store -- routing
+          // capture through it would re-date a months-old stored name as a
+          // fresh observation on every position, defeating the ordering.
+          //
+          // Unwrapped the same way the resolvers read this field: the model
+          // carries a bare string for some sources and the `{value}` wrapper
+          // for others. Accepting only one shape here would let a name render
+          // live and then vanish on restart, having never been captured.
+          const live = unwrapString(app.getPath?.(`${update.context}.name`))
+          if (live !== undefined) {
+            tracks?.recordName(update.context, live)
+          }
           // Prefer the delta's own timestamp so a replayed or delayed update is
           // filed at the time it was recorded, not the time it arrived.
           const recorded = update.timestamp === undefined ? undefined : Date.parse(update.timestamp)
@@ -739,7 +777,11 @@ export default function ThePlugin(app: App): Plugin {
           store: () => tracks,
           selfContext: () => app.selfContext,
           segmentGap: () => segmentGap,
-          contextName: (context: string) => contextName(context, (path: string) => app.getPath?.(path)),
+          contextName: (context: string) =>
+            contextName(
+              context,
+              remembering(() => tracks),
+            ),
           // The same reconciliation the v1 routes have done since #73. Without
           // it the plugin answers differently depending on which route a client
           // uses: the store alone through v2, the store enriched by a history
@@ -804,7 +846,12 @@ export default function ThePlugin(app: App): Plugin {
       // Resolved per request rather than cached: an AIS target's static report
       // can arrive long after its first position, so a track named from the
       // MMSI early on picks up the real name as soon as the server has it.
-      const nameOf = (context: string) => trackLabel(context, app.selfContext, (path: string) => app.getPath?.(path))
+      const nameOf = (context: string) =>
+        trackLabel(
+          context,
+          app.selfContext,
+          remembering(() => tracks),
+        )
 
       /**
        * The points of one context, reconciled with history and segmented.
