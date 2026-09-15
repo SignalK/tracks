@@ -366,6 +366,23 @@ describe('track names', () => {
     expect(res.body[OTHER_CONTEXT].name).toBe('AIS MIA')
   })
 
+  // The data model carries a bare string for some sources and the `{value}`
+  // wrapper for others -- contextName unwraps both. Capture has to agree, or a
+  // wrapped name renders live and is never stored, vanishing on restart.
+  it('remembers a name that arrives in the value wrapper', async () => {
+    const paths: Record<string, unknown> = { [`${OTHER_CONTEXT}.name`]: { value: 'MIA' } }
+    const h = (harness = createHarness({ selfPosition: [60, 24], paths }))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    delete paths[`${OTHER_CONTEXT}.name`]
+    h.stop()
+    h.restart()
+
+    const res = await request(h.app).get(`${API}/tracks`).expect(200)
+
+    expect(res.body[OTHER_CONTEXT].name).toBe('AIS MIA')
+  })
+
   // A remembered name is a stand-in, never an override: an AIS static report
   // can arrive long after the first position, and correcting the name is
   // exactly what it is for.

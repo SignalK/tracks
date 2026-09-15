@@ -48,6 +48,7 @@ import {
   gpxFilename,
   asciiFilename,
   rfc8187,
+  unwrapString,
 } from './utils.js'
 
 export interface ContextPosition {
@@ -696,8 +697,13 @@ export default function ThePlugin(app: App): Plugin {
           // contextName, which now falls back to this very store -- routing
           // capture through it would re-date a months-old stored name as a
           // fresh observation on every position, defeating the ordering.
-          const live = app.getPath?.(`${update.context}.name`)
-          if (typeof live === 'string') {
+          //
+          // Unwrapped the same way the resolvers read this field: the model
+          // carries a bare string for some sources and the `{value}` wrapper
+          // for others. Accepting only one shape here would let a name render
+          // live and then vanish on restart, having never been captured.
+          const live = unwrapString(app.getPath?.(`${update.context}.name`))
+          if (live !== undefined) {
             tracks?.recordName(update.context, live)
           }
           // Prefer the delta's own timestamp so a replayed or delayed update is
