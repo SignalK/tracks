@@ -5,6 +5,8 @@ import {
   toIsoTimes,
   validateParameters,
   QueryParameterError,
+  SelfPositionUnavailableError,
+  createMatcher,
   trackLabel,
   contextName,
   gpxFilename,
@@ -111,6 +113,20 @@ describe('validateParameters', () => {
 
   it('keeps an explicit radius of zero rather than the default', () => {
     expect(validateParameters({ radius: '0' }, 1000).radius).toBe(0)
+  })
+
+  // Thrown rather than dropped, for the same reason as the bbox: a radius that
+  // yields null skips the filter and answers with every track.
+  it('rejects a radius that is not a number', () => {
+    expect(() => validateParameters({ radius: 'abc' }, undefined)).toThrow(QueryParameterError)
+    expect(() => validateParameters({ radius: '' }, undefined)).toThrow(QueryParameterError)
+    expect(() => validateParameters({ radius: 'Infinity' }, undefined)).toThrow(QueryParameterError)
+  })
+
+  // A negative radius matched nothing at all -- an empty result for a query
+  // that cannot be satisfied, which reads as "no vessels near you".
+  it('rejects a negative radius', () => {
+    expect(() => validateParameters({ radius: '-5' }, undefined)).toThrow(/must not be negative/)
   })
 
   it('takes the first value when express repeats a query parameter', () => {
@@ -328,5 +344,15 @@ describe('rfc8187', () => {
 
   it('percent-encodes non-ASCII as UTF-8', () => {
     expect(rfc8187('日本.gpx')).toBe('%E6%97%A5%E6%9C%AC.gpx')
+  })
+})
+
+describe('createMatcher', () => {
+  // The query is well-formed; the server just has no position to measure from.
+  // Distinct from a malformed radius, and reported differently.
+  it('signals an outage when a radius query has no self position', () => {
+    const params = validateParameters({ radius: '500' }, undefined)
+
+    expect(() => createMatcher(params, undefined)).toThrow(SelfPositionUnavailableError)
   })
 })

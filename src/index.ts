@@ -51,6 +51,7 @@ import {
   rfc8187,
   unwrapString,
   QueryParameterError,
+  SelfPositionUnavailableError,
 } from './utils.js'
 
 export interface ContextPosition {
@@ -1108,7 +1109,15 @@ export default function ThePlugin(app: App): Plugin {
           .then((trks) => {
             res.json(trks)
           })
-          .catch(() => {
+          .catch((err: unknown) => {
+            // A radius query the server cannot measure is not a missing track.
+            // Reporting it as 404 said no vessel matched, which is the one
+            // thing an unanswerable query cannot establish.
+            if (err instanceof SelfPositionUnavailableError) {
+              res.status(503)
+              res.json({ message: 'No position for the own vessel, so radius cannot be measured' })
+              return
+            }
             res.status(404)
             res.json({ message: `No track available for vessels.` })
           })

@@ -360,6 +360,36 @@ describe('malformed bbox', () => {
   })
 })
 
+describe('malformed radius', () => {
+  it('answers 400 for a radius that is not a number', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/tracks?radius=abc`).expect(400)
+
+    expect(res.body.message).toMatch(/radius must be a number/)
+  })
+
+  it('answers 400 for a negative radius', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/tracks?radius=-5`).expect(400)
+
+    expect(res.body.message).toMatch(/must not be negative/)
+  })
+
+  // Not a 404: the query is fine, the server has nothing to measure from.
+  it('answers 503 for a radius query with no self position', async () => {
+    const h = (harness = createHarness({}))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/tracks?radius=1000`).expect(503)
+
+    expect(res.body.message).toMatch(/No position for the own vessel/)
+  })
+})
+
 describe('track names', () => {
   it('names the own vessel Own Ship', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
