@@ -327,6 +327,39 @@ describe('GET /tracks?times', () => {
 // A list of tracks is only usable if each one is labelled the way a plotter
 // labels it. TimeZero's exports name tracks `Own Ship` and `AIS <shipname>`,
 // never a serial number, and the management UI is built on this.
+describe('malformed bbox', () => {
+  // #80. The handler's catch turned the matcher's throw into 404 "No track
+  // available", so a bad query was indistinguishable from an empty result.
+  it('answers 400 for a bbox whose south exceeds its north', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/tracks?bbox=24,61,26,59`).expect(400)
+
+    expect(res.body.message).toMatch(/south \(61\) must not be greater than north \(59\)/)
+  })
+
+  // Worse than the inverted box: this one answered 200 with every track,
+  // because a null bbox skips the filter rather than failing it.
+  it('answers 400 for a bbox that is not four numbers', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/tracks?bbox=a,b,c,d`).expect(400)
+
+    expect(res.body.message).toMatch(/four comma-separated numbers/)
+  })
+
+  it('still answers unfiltered when no bbox is given', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/tracks`).expect(200)
+
+    expect(res.body[OTHER_CONTEXT]).toBeDefined()
+  })
+})
+
 describe('track names', () => {
   it('names the own vessel Own Ship', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])

@@ -4,6 +4,7 @@ import {
   resolveContext,
   toIsoTimes,
   validateParameters,
+  QueryParameterError,
   trackLabel,
   contextName,
   gpxFilename,
@@ -81,10 +82,25 @@ describe('validateParameters', () => {
     expect(inBounds([135, -34])).toBe(false) // the same point written lat-first
   })
 
+  // Thrown, not dropped: a bbox that yields null skips the filter entirely and
+  // answers with every track, so a typo silently returns more than was asked
+  // for. Absent stays absent -- no bbox is not an error.
   it('rejects a bbox that is not four finite numbers', () => {
-    expect(validateParameters({ bbox: '1,2,3' }, undefined).bbox).toBeNull()
-    expect(validateParameters({ bbox: '1,2,3,abc' }, undefined).bbox).toBeNull()
-    expect(validateParameters({ bbox: '' }, undefined).bbox).toBeNull()
+    expect(() => validateParameters({ bbox: '1,2,3' }, undefined)).toThrow(QueryParameterError)
+    expect(() => validateParameters({ bbox: '1,2,3,abc' }, undefined)).toThrow(QueryParameterError)
+    expect(() => validateParameters({ bbox: '' }, undefined)).toThrow(QueryParameterError)
+  })
+
+  // #80. createInBounds throws on an inverted box, which the route's catch
+  // reported as 404 -- a malformed query impersonating an empty result.
+  it('rejects a bbox whose south exceeds its north', () => {
+    expect(() => validateParameters({ bbox: '24,61,26,59' }, undefined)).toThrow(
+      /bbox south \(61\) must not be greater than north \(59\)/,
+    )
+  })
+
+  it('leaves an absent bbox unfiltered', () => {
+    expect(validateParameters({}, undefined).bbox).toBeNull()
   })
 
   it('parses radius and falls back to the configured default', () => {
