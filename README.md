@@ -106,6 +106,13 @@ _`timespan` and `timespanOffset` are also accepted for Freeboard-SK compatibilit
 `timespan=23h&timespanOffset=1` means "23 hours ending an hour ago". They are not part of
 the proposed track API and are expected to be superseded by `from`/`to`._
 
+_A parameter these routes do not read is rejected with `400` rather than ignored, so a
+typo such as `?duratoin=6h` fails rather than quietly returning the whole retained track.
+`bbox` and `radius` are **not** accepted here: they select which vessels to return and so
+belong to `/tracks` below. To ask whether one vessel's track passed through a box, use the
+v2 Track API, which matches any position in the window ([being designed in
+SignalK/signalk-server#2504](https://github.com/SignalK/signalk-server/issues/2504))._
+
 ---
 
 **Reduce the number of points returned:**

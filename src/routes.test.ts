@@ -390,6 +390,57 @@ describe('malformed radius', () => {
   })
 })
 
+describe('unknown query parameters', () => {
+  // Silently dropped before: the route answered 200 with the whole track, so a
+  // filter the caller believed in was never applied and nothing said so.
+  it('rejects bbox on the single-vessel route, which does not filter spatially', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+
+    const res = await request(h.app).get(`${API}/vessels/self/track?bbox=24,59,26,61`).expect(400)
+
+    expect(res.body.message).toMatch(/Unknown query parameter bbox/)
+  })
+
+  it('rejects a misspelled parameter rather than returning everything', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+
+    const res = await request(h.app).get(`${API}/self/track?duratoin=6h`).expect(400)
+
+    expect(res.body.message).toMatch(/duratoin/)
+  })
+
+  // The collection route does filter spatially, so the same key is valid there.
+  it('still accepts bbox and radius on the collection route', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    await request(h.app).get(`${API}/tracks?bbox=24,59,26,61`).expect(200)
+    await request(h.app).get(`${API}/tracks?radius=100000`).expect(200)
+  })
+
+  it('rejects an unknown parameter on the collection route too', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+
+    const res = await request(h.app).get(`${API}/tracks?wibble=7`).expect(400)
+
+    expect(res.body.message).toMatch(/wibble/)
+  })
+
+  // Freeboard-SK 3.1.1 builds /self/track? with exactly these three. Rejecting
+  // any of them would break the plugin's main consumer on upgrade.
+  it('accepts every parameter Freeboard-SK sends', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    await request(h.app).get(`${API}/self/track?timespan=23h&resolution=60&timespanOffset=1`).expect(200)
+  })
+
+  it('accepts the documented parameters on the gpx route', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    await request(h.app).get(`${API}/self/track.gpx?duration=6h`).expect(200)
+  })
+})
+
 describe('track names', () => {
   it('names the own vessel Own Ship', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
