@@ -426,12 +426,21 @@ describe('unknown query parameters', () => {
     expect(res.body.message).toMatch(/wibble/)
   })
 
-  // Freeboard-SK 3.1.1 builds /self/track? with exactly these three. Rejecting
-  // any of them would break the plugin's main consumer on upgrade.
-  it('accepts every parameter Freeboard-SK sends', async () => {
+  // Checked against Freeboard-SK 3.2.0-beta.1 source (skstream.worker.ts): the
+  // trail fetch builds `/self/track?` with exactly these three, and the AIS
+  // fetch calls `/tracks?radius=`. Rejecting any of them would break the
+  // plugin's main consumer on upgrade, so both call sites are pinned here.
+  it('accepts every parameter Freeboard-SK sends to the vessel trail', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
 
     await request(h.app).get(`${API}/self/track?timespan=23h&resolution=60&timespanOffset=1`).expect(200)
+    await request(h.app).get(`${API}/self/track?timespan=1h&resolution=10`).expect(200)
+  })
+
+  it('accepts the radius Freeboard-SK sends when fetching AIS tracks', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    await request(h.app).get(`${API}/tracks?radius=10000`).expect(200)
   })
 
   it('accepts the documented parameters on the gpx route', async () => {
