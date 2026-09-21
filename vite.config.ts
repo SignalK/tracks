@@ -1,6 +1,7 @@
 import { resolve } from 'node:path'
 import { defineConfig } from 'vitest/config'
 import dts from 'vite-plugin-dts'
+import checker from 'vite-plugin-checker'
 
 // The plugin is loaded by the Signal K server, not bundled into a browser app,
 // so everything outside src/ stays external and is resolved at runtime from
@@ -20,7 +21,19 @@ export default defineConfig({
     sourcemap: true,
     minify: false,
   },
-  plugins: [dts({ rollupTypes: true, tsconfigPath: './tsconfig.json' })],
+  // vite transpiles without typechecking, so `vite build` alone reports a
+  // successful build for source tsc rejects. checker runs tsc as part of the
+  // build and fails it on the first error, which is what makes `npm run build`
+  // mean the same thing as `npm run typecheck && npm run build` did by
+  // convention. It also surfaces errors while `vite` is serving.
+  //
+  // This config is vitest's too; the checker is skipped under test, where the
+  // suite is the thing being run and a type error in an unrelated file should
+  // not stop it.
+  plugins: [
+    dts({ rollupTypes: true, tsconfigPath: './tsconfig.json' }),
+    ...(process.env.VITEST ? [] : [checker({ typescript: true })]),
+  ],
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
