@@ -8,3 +8,6 @@ npm-debug.log*
 .npm
 
 .DS_Store
+
+# Written and removed by src/buildTypecheck.test.ts; only present mid-test.
+src/buildTypecheckProbe.generated.ts

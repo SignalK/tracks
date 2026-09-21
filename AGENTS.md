@@ -19,7 +19,7 @@ npm ci
 npm run build      # vite library build -> dist/index.js + rolled-up index.d.ts
 npm test           # vitest
 npm run test:e2e   # real signalk-server + real QuestDB; never in CI
-npm run typecheck  # tsc --noEmit (the build itself does not typecheck)
+npm run typecheck  # tsc --noEmit (also run inside the build, via vite-plugin-checker)
 npm run lint       # eslint flat config
 npm run format     # prettier --write
 ```
@@ -52,7 +52,11 @@ requires. `engines.node` is the field that says that.
 
 On top of the base, `tsconfig.json` is strict and then some — `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitReturns`, `noUnusedLocals`. Keep them on; they caught real bugs when they went in.
 
-Vite transpiles without type checking, so **`npm run build` passing does not mean the types are sound.** CI runs `typecheck` separately and so should you.
+Vite transpiles without type checking on its own, so the build runs `tsc` through
+`vite-plugin-checker` and fails on the first error — **`npm run build` passing does mean the
+types are sound.** `npm run typecheck` is still the quick way to check them without
+building, and CI runs it separately. The checker is skipped under vitest, where a type
+error in an unrelated file should not stop the suite.
 
 ## Architecture
 
