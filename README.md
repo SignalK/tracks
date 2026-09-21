@@ -6,6 +6,8 @@ Positions are recorded to a SQLite file in the plugin's data directory, at a con
 resolution, so tracks survive a restart with no other plugin required. The plugin is enabled on
 install and needs no configuration to start recording.
 
+Requires Signal K server >= 2.33.0 for the v2 Track API; older servers get the v1 routes only.
+
 | Setting                                        | Behaviour                                                                      |
 | ---------------------------------------------- | ------------------------------------------------------------------------------ |
 | Track resolution                               | Minimum spacing between recorded positions.                                    |
