@@ -109,7 +109,7 @@ describe('README ?times example', () => {
       expect(res.body.context).toBe(SELF_CONTEXT)
       expect(res.body.isSelf).toBe(true)
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 })

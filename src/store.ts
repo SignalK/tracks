@@ -120,5 +120,5 @@ export interface TrackStore {
    * store holding file handles must implement it and the plugin calls it from
    * `stop()`.
    */
-  close?(): void
+  close?(): void | Promise<void>
 }

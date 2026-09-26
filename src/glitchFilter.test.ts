@@ -161,7 +161,7 @@ describe('glitch filtering through the plugin', () => {
       expect(coordinates).toContainEqual([24.9, 60.1])
       expect(coordinates).not.toContainEqual([0, 0])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -173,7 +173,7 @@ describe('glitch filtering through the plugin', () => {
       expect(coordinates).toContainEqual([24.9, 60.1])
       expect(coordinates).toContainEqual([24.9, 60.11])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -192,7 +192,7 @@ describe('glitch filtering through the plugin', () => {
       expect(coordinates).toContainEqual([24.9, 60.1])
       expect(coordinates).toContainEqual([0, 0])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 })

@@ -62,8 +62,8 @@ const stand = (historyRows: unknown[] | null) => {
     // The v2 provider, so a test can ask the same question through both routes
     // and check the plugin gives one answer rather than two.
     provider: () => trackProvider,
-    stop: () => {
-      plugin.stop()
+    stop: async () => {
+      await plugin.stop()
       rmSync(dataDir, { recursive: true, force: true })
     },
   }
@@ -76,9 +76,9 @@ const iso = (minutesAgo: number) => new Date(Date.now() - minutesAgo * MINUTE).t
 
 const coords = (body: { coordinates: [number, number][][] }) => body.coordinates.flat()
 
-let stop: (() => void) | undefined
-afterEach(() => {
-  stop?.()
+let stop: (() => void | Promise<void>) | undefined
+afterEach(async () => {
+  await stop?.()
   stop = undefined
   vi.useRealTimers()
 })

@@ -11,9 +11,12 @@ export default defineConfig({
   build: {
     target: 'node20.19',
     lib: {
-      entry: resolve(import.meta.dirname, 'src/index.ts'),
+      entry: {
+        index: resolve(import.meta.dirname, 'src/index.ts'),
+        trackStoreWorker: resolve(import.meta.dirname, 'src/trackStoreWorker.ts'),
+      },
       formats: ['es'],
-      fileName: 'index',
+      fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
       external: [/^node:/, 'rxjs', 'rxjs/operators', 'express', /^typebox/, '@js-temporal/polyfill', '@xmldom/xmldom'],
@@ -53,5 +56,7 @@ export default defineConfig({
     // one would not have helped. The whole file still runs in about a second
     // locally.
     testTimeout: 45_000,
+    // Teardown now waits for worker startup/draining too, under the same CI contention.
+    hookTimeout: 45_000,
   },
 })
