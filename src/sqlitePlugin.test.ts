@@ -62,11 +62,11 @@ afterEach(() => {
 })
 
 describe('source: sqlite', () => {
-  it('writes a database file in the plugin data directory', () => {
+  it('writes a database file in the plugin data directory', async () => {
     const { app } = createApp(dir)
     const plugin = ThePlugin(app)
-    plugin.start({ resolution: 0 })
-    plugin.stop()
+    await plugin.start({ resolution: 0 })
+    await plugin.stop()
 
     expect(existsSync(join(dir, 'tracks.db'))).toBe(true)
   })
@@ -74,46 +74,46 @@ describe('source: sqlite', () => {
   it('keeps positions across a stop and start', async () => {
     const first = createApp(dir)
     const pluginA = ThePlugin(first.app)
-    pluginA.start({ resolution: 0 })
+    await pluginA.start({ resolution: 0 })
     first.emit(SELF_CONTEXT, [60.1, 24.9], 1000)
-    pluginA.stop()
+    await pluginA.stop()
 
     // A fresh plugin instance against the same directory, as a server restart
     // would produce. This is the whole point of recording to disk:
     // without it the track starts empty.
     const second = createApp(dir)
     const pluginB = ThePlugin(second.app)
-    pluginB.start({ resolution: 0 })
+    await pluginB.start({ resolution: 0 })
     await expect(pluginB.getTracks()?.get(SELF_CONTEXT as ContextPosition['context'])).resolves.toEqual([[60.1, 24.9]])
-    pluginB.stop()
+    await pluginB.stop()
   })
 
   // There is no in-memory fallback any more: a track recorder that forgets
   // everything on restart is not worth starting, so it says why and stops.
   // Every server that can load this plugin provides a data directory.
-  it('reports and does not start when the server has no data directory', () => {
+  it('reports and does not start when the server has no data directory', async () => {
     const { app, emit, errors } = createApp(undefined)
     const plugin = ThePlugin(app)
-    plugin.start({ resolution: 0 })
+    await plugin.start({ resolution: 0 })
     emit(SELF_CONTEXT, [60.1, 24.9], 1000)
 
     expect(plugin.getTracks()).toBeUndefined()
     expect(errors.flat().join(' ')).toMatch(/data directory/)
-    plugin.stop()
+    await plugin.stop()
   })
 
   it('does not reuse a closed store after a restart', async () => {
     const { app, emit } = createApp(dir)
     const plugin = ThePlugin(app)
-    plugin.start({ resolution: 0 })
-    plugin.stop()
+    await plugin.start({ resolution: 0 })
+    await plugin.stop()
 
     // stop() closes the handle. Starting again must build a new store rather
     // than keep the closed one, which would throw on the next write.
-    plugin.start({ resolution: 0 })
+    await plugin.start({ resolution: 0 })
     emit(SELF_CONTEXT, [61, 25], 2000)
     await expect(plugin.getTracks()?.get(SELF_CONTEXT as ContextPosition['context'])).resolves.toEqual([[61, 25]])
-    plugin.stop()
+    await plugin.stop()
   })
 })
 
@@ -121,19 +121,19 @@ describe('source: sqlite', () => {
 // directory throws — and an uncaught throw out of start() takes down more than
 // this plugin.
 describe('an unusable data directory', () => {
-  it('reports the failure and does not start', () => {
+  it('reports the failure and does not start', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-ro-'))
     // A directory where the database file should be: sqlite cannot open it.
     mkdirSync(join(dir, 'tracks.db'))
     const { app, errors } = createApp(dir)
     const plugin = ThePlugin(app)
     try {
-      plugin.start({ resolution: 0 })
+      await plugin.start({ resolution: 0 })
 
       expect(plugin.getTracks()).toBeUndefined()
       expect(errors.flat().join(' ')).toMatch(/track database/)
     } finally {
-      plugin.stop()
+      await plugin.stop()
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -143,7 +143,7 @@ describe('an unusable data directory', () => {
   // directory that has become unusable in between fails the second start. If
   // stop() left the closed handle in place, the failed start reports itself
   // correctly and every query still goes to a database that is closed.
-  it('does not serve the closed store when a restart fails', () => {
+  it('does not serve the closed store when a restart fails', async () => {
     const good = mkdtempSync(join(tmpdir(), 'sk-tracks-restart-'))
     const bad = mkdtempSync(join(tmpdir(), 'sk-tracks-restart-bad-'))
     mkdirSync(join(bad, 'tracks.db'))
@@ -154,17 +154,17 @@ describe('an unusable data directory', () => {
     app.getDataDirPath = () => dataDir
     const plugin = ThePlugin(app)
     try {
-      plugin.start({ resolution: 0 })
+      await plugin.start({ resolution: 0 })
       expect(plugin.getTracks()).toBeDefined()
 
-      plugin.stop()
+      await plugin.stop()
       dataDir = bad
-      plugin.start({ resolution: 0 })
+      await plugin.start({ resolution: 0 })
 
       expect(errors.flat().join(' ')).toMatch(/track database/)
       expect(plugin.getTracks()).toBeUndefined()
     } finally {
-      plugin.stop()
+      await plugin.stop()
       rmSync(good, { recursive: true, force: true })
       rmSync(bad, { recursive: true, force: true })
     }
@@ -181,7 +181,7 @@ describe('own vessel retention', () => {
     const { app, emit } = createApp(dir)
     const plugin = ThePlugin(app)
     try {
-      plugin.start({ resolution: 0, aisRetentionDays: 1 })
+      await plugin.start({ resolution: 0, aisRetentionDays: 1 })
       const self = SELF_CONTEXT as ContextPosition['context']
       const other = 'vessels.urn:mrn:imo:mmsi:987654321' as ContextPosition['context']
       const ancient = Date.now() - 3 * 24 * 60 * 60 * 1000
@@ -197,7 +197,7 @@ describe('own vessel retention', () => {
       // The other vessel, silent for three days, is gone.
       await expect(plugin.getTracks()?.get(other)).rejects.toThrow()
     } finally {
-      plugin.stop()
+      await plugin.stop()
       vi.useRealTimers()
       rmSync(dir, { recursive: true, force: true })
     }

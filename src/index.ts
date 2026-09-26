@@ -18,7 +18,7 @@ import type { Request, RequestHandler, Response, Router } from 'express'
 import { join } from 'node:path'
 import { createTrackProvider } from './trackProvider.js'
 import type { TrackApi } from './trackApi.js'
-import { SqliteTrackStore } from './sqliteStore.js'
+import { AsyncTrackStore } from './asyncTrackStore.js'
 import type { TrackStore } from './store.js'
 import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
 import { reconcile } from './reconcile.js'
@@ -172,10 +172,10 @@ interface App {
 }
 
 interface Plugin {
-  start: (c: TracksPluginConfig) => void
+  start: (c: TracksPluginConfig) => void | Promise<void>
   /** Enable on install, without waiting for a visit to the plugin config page. */
   enabledByDefault: boolean
-  stop: () => void
+  stop: () => Promise<void>
   signalKApiRoutes: (r: Router) => Router
   id: string
   name: string
@@ -604,6 +604,7 @@ export default function ThePlugin(app: App): Plugin {
    * two sources land on the same grid when a query names no resolution of its
    * own.
    */
+  let storageError: string | undefined
   let storeResolution = DEFAULT_RESOLUTION
   const sourceWatch = new SourceWatch()
   let glitchFilter = new GlitchFilter({ maxSpeedKnots: DEFAULT_MAX_SPEED_KNOTS })
@@ -639,6 +640,7 @@ export default function ThePlugin(app: App): Plugin {
 
   return {
     start: function (config: TracksPluginConfig) {
+      storageError = undefined
       const { resolution } = config
       storeResolution = toNumber(config.resolution) ?? DEFAULT_RESOLUTION
       const segmentGapMinutes = toNumber(config.segmentGapMinutes) ?? DEFAULT_SEGMENT_GAP_MINUTES
@@ -671,8 +673,9 @@ export default function ThePlugin(app: App): Plugin {
       // Guarded because opening a database touches the filesystem: a read-only
       // or full data directory throws here, and an uncaught throw out of
       // start() takes down more than this plugin.
+      let starting: AsyncTrackStore
       try {
-        tracks = new SqliteTrackStore(
+        starting = new AsyncTrackStore(
           {
             file: join(dataDir, 'tracks.db'),
             resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
@@ -683,7 +686,14 @@ export default function ThePlugin(app: App): Plugin {
             segmentGap,
           },
           app.debug,
+          (error) => {
+            if (tracks !== starting) return
+            storageError = `Could not use track database: ${errorDetail(error)}`
+            app.error(storageError)
+            app.setPluginStatus?.(storageError)
+          },
         )
+        tracks = starting
       } catch (err) {
         app.error(`Could not open the track database in ${dataDir}: ${errorDetail(err)}`)
         return
@@ -759,7 +769,7 @@ export default function ThePlugin(app: App): Plugin {
         const status = stateGate.status() ?? sourceWatch.warning(app.selfContext) ?? 'Recording tracks'
         if (status !== lastStatus) {
           lastStatus = status
-          app.setPluginStatus?.(status)
+          app.setPluginStatus?.(storageError ?? status)
         }
       }, SOURCE_STATUS_INTERVAL_MS)
       onStop.push(() => {
@@ -805,9 +815,14 @@ export default function ThePlugin(app: App): Plugin {
           },
         }),
       )
+      return starting.ready.catch(async () => {
+        // A failed start must release the worker before callers remove the data directory.
+        await starting.close().catch(() => {})
+        if (tracks === starting) tracks = undefined
+      })
     },
 
-    stop: function () {
+    stop: async function () {
       onStop.forEach((f) => {
         try {
           f()
@@ -832,16 +847,12 @@ export default function ThePlugin(app: App): Plugin {
       // handle and checkpoints the WAL, so the routes answer 404 until the next
       // start() builds a fresh store. They stay mounted and degrade rather than
       // throw, because the server calls stop() on a config save.
+      const closing = tracks
+      tracks = undefined
       try {
-        tracks?.close?.()
+        await closing?.close?.()
       } catch (err) {
         app.error(err)
-      } finally {
-        // Cleared even when close() throws: a closed store is worse than none.
-        // The next start() can fail — an unusable data directory, say — and
-        // without this getTracks() and the registered provider keep handing out
-        // a handle that rejects every query with "database is closed".
-        tracks = undefined
       }
     },
 

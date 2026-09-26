@@ -44,7 +44,7 @@ export interface TestHarness {
   setSelfPosition: (position: LatLngTuple | undefined) => void
   /** The own vessel's navigation.state, as reported by `getSelfPath`. */
   setSelfState: (state: string | undefined) => void
-  stop: () => void
+  stop: () => Promise<void>
   /**
    * Start the same plugin instance again, with the config it was built with.
    *

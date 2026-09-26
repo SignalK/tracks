@@ -140,7 +140,7 @@ export class SqliteTrackStore implements TrackStore {
     this.db = new DatabaseSync(config.file)
     // WAL keeps a reader from blocking the writer, which matters because
     // positions arrive continuously while a query is being served.
-    this.db.exec('PRAGMA journal_mode = WAL')
+    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000')
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS positions (
         context   TEXT    NOT NULL,
@@ -425,6 +425,27 @@ export class SqliteTrackStore implements TrackStore {
       } else {
         this.db.prepare('DELETE FROM positions WHERE timestamp < ? AND context IS ?').run(oldest, keep)
       }
+    }
+  }
+
+  /** Worker startup snapshot; queries and name lookups must not open a second database. */
+  storedNames(): { context: string; name: string; timestamp: number }[] {
+    return this.db.prepare('SELECT context, name, timestamp FROM names').all() as unknown as {
+      context: string
+      name: string
+      timestamp: number
+    }[]
+  }
+
+  /** A failed batch is fatal to its worker, including its write-throttle state. */
+  transaction(write: () => void): void {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      write()
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
     }
   }
 

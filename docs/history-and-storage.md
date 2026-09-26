@@ -21,6 +21,39 @@ is what remains of everything older. The interval and the retention are both
 settings on the plugin's configuration page, which is where their current
 defaults are shown.
 
+## Storage responsiveness and shutdown
+
+SQLite runs in a dedicated worker, including opening the database, queries,
+pruning and WAL checkpointing. A slow storage operation therefore does not block
+the Signal K server's event loop. This does not make slow storage faster: a track
+query can still wait behind earlier writes, while unrelated server requests can
+continue.
+
+Positions retain their arrival timestamp (or the supplied observation timestamp)
+and coordinates are copied when accepted. Operations are ordered, with one batch
+in flight; adjacent waiting mutations commit in one transaction. There is no
+extra batching delay or change to the configured recording resolution, spatial
+filters or schema. SQLite uses WAL with `synchronous=FULL`. Persisted vessel names are cached from
+worker-acknowledged writes; the live data model still takes precedence.
+
+Pending operations are bounded to 10,000 items / 8 MiB of serialized arguments,
+including the batch in flight. If recording exceeds either limit, a plugin error
+pauses further recording while accepted work drains. Restart the plugin after
+storage recovers. Database/worker failures also report an error and stop recording;
+uncertain writes are not retried. These errors remain visible instead of being
+replaced by the periodic healthy status.
+
+Stopping unsubscribes input immediately, then returns a Promise that resolves
+only after accepted work drains, SQLite closes and the worker exits. Plugin
+lifecycle callers must await `stop()` before restarting or removing its data
+directory. `start()` returns the initialization Promise; track requests submitted
+during initialization wait behind it.
+
+Accepted but uncommitted data is still in RAM. Abrupt power loss or forced process
+termination can lose pending samples; worker isolation does not promise zero data
+loss. The durability of committed records is unchanged. Rollback of plugin code
+must never replace the database with an older copy over newly recorded tracks.
+
 ## What you get with no history provider
 
 Everything comes from the plugin's own store, at whatever interval it is
