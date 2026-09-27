@@ -37,8 +37,11 @@ jobs:
   # Every commit in the push is checked, so a merge commit's PR commits count
   # through their own subjects. A breaking change counts whatever its type, a
   # dependency bump when it is a runtime one (dependabot scopes those `deps`,
-  # dev ones `deps-dev`), a revert because what it undoes has shipped, and a
-  # `Release-As:` footer because it asks for a release on any subject. The
+  # dev ones `deps-dev`), a `revert:` because what it undoes has shipped, and
+  # a `Release-As:` footer — matched in any case, as release-please does —
+  # because it asks for a release on any subject. GitHub's own `Revert "…"`
+  # subject is not conventional, so release-please ignores it and it is not
+  # let through here either. The
   # last alternative is the release PR's own title — pull-request-title-pattern
   # in release-please-config.json — and must change with it, or the release
   # PR's merge is judged non-releasable and no tag is ever created. The
@@ -56,14 +59,14 @@ jobs:
         env:
           DISPATCHED: ${{ github.event_name == 'workflow_dispatch' }}
           MESSAGES: ${{ toJSON(github.event.commits.*.message) }}
-          RELEASABLE: '^((feat|fix|perf|revert)(\([^)]*\))?!?: |[a-z]+(\([^)]*\))?!: |build\(deps\): |Revert |chore\(release\): v?[0-9])'
+          RELEASABLE: '^((feat|fix|perf|revert)(\([^)]*\))?!?: |[a-z]+(\([^)]*\))?!: |build\(deps\): |chore\(release\): v?[0-9])'
         run: |
           if [ "$DISPATCHED" = true ]; then
             echo "releasable=true" >> "$GITHUB_OUTPUT"
             echo "Run requested manually; release-please not gated."
             exit 0
           fi
-          if jq -e --arg re "$RELEASABLE" '(length >= 2048) or ([.[] | (split("\n")[0] | test($re)) or test("\nBREAKING[- ]CHANGE: ") or test("\nRelease-As: ")] | any)' <<< "$MESSAGES" > /dev/null; then
+          if jq -e --arg re "$RELEASABLE" '(length >= 2048) or ([.[] | (split("\n")[0] | test($re)) or test("\nBREAKING[- ]CHANGE: ") or test("\nrelease-as: "; "i")] | any)' <<< "$MESSAGES" > /dev/null; then
             echo "releasable=true" >> "$GITHUB_OUTPUT"
           else
             echo "releasable=false" >> "$GITHUB_OUTPUT"
