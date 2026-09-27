@@ -888,9 +888,15 @@ describe('simplify in v2', () => {
       expect(res.features[0]!.properties.epsilon).toBeCloseTo(boxDiagonal(bbox) / 1000, 6)
     })
 
-    it('uses a finer tolerance for a smaller box', async () => {
+    it('keeps more of the shape in a smaller box', async () => {
       const h = createHarness()
-      seed(h, leg)
+      // Zigzag of about 16 m either side of the line: between the close box's
+      // ~1.6 m tolerance and the wide box's ~56 m, so only the close view keeps it.
+      const zigzagLeg: [number, number][] = Array.from(
+        { length: 200 },
+        (_, i) => [60 + i * 0.001 + (i % 2 ? 0.0002 : 0), 24 + i * 0.002] as [number, number],
+      )
+      seed(h, zigzagLeg)
       const wide: [number, number, number, number] = [23.9, 59.9, 24.5, 60.3]
       const close: [number, number, number, number] = [24.1, 60.05, 24.12, 60.06]
 
@@ -898,7 +904,7 @@ describe('simplify in v2', () => {
       const zoomed = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true, bbox: close })
 
       expect(zoomed.features[0]!.properties.epsilon!).toBeLessThan(out.features[0]!.properties.epsilon!)
-      expect(zoomed.features[0]!.properties.pointCount).toBeGreaterThanOrEqual(out.features[0]!.properties.pointCount)
+      expect(zoomed.features[0]!.properties.pointCount).toBeGreaterThan(out.features[0]!.properties.pointCount)
     })
 
     // A box crossing the antimeridian is written west > east. Measured the
