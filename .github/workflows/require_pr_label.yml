@@ -28,7 +28,15 @@ jobs:
     # Dependabot applies `dependencies` itself, but not before this first runs
     # on `opened`, so the check would fail and then pass on the relabel. Skip
     # it: those PRs are categorised by author in release.yml regardless.
-    if: github.actor != 'dependabot[bot]'
+    # release-please's release PR is labelled `autorelease: pending` and
+    # excluded from the notes it produces, so it has no category to need. It
+    # is recognised by who opened it and from where, not by its branch name
+    # alone, which any contributor could choose.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      !(github.event.pull_request.user.login == 'github-actions[bot]' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        startsWith(github.head_ref, 'release-please--'))
     steps:
       - uses: mheap/github-action-required-labels@v5
         with:
