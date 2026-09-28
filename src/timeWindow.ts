@@ -16,13 +16,6 @@ import type { TimedPosition, TimeWindow } from './types.js'
  * `resolution` is shared by both and expresses the minimum spacing between
  * returned points, thinning the track for wide time ranges.
  */
-/**
- * The query keys these routes read. Kept beside the schema so the two cannot
- * drift: a key added to one without the other either fails validation or is
- * rejected as unknown.
- */
-const QUERY_KEYS = ['from', 'to', 'duration', 'timespan', 'timespanOffset', 'resolution', 'times'] as const
-
 const QuerySchema = Type.Object({
   from: Type.Optional(Type.String()),
   to: Type.Optional(Type.String()),
@@ -32,6 +25,8 @@ const QuerySchema = Type.Object({
   resolution: Type.Optional(Type.String()),
   times: Type.Optional(Type.String()),
 })
+
+const QUERY_KEYS: readonly string[] = Object.keys(QuerySchema.properties)
 
 export class TimeWindowError extends Error {}
 
@@ -130,24 +125,14 @@ export function parseTrackQuery(
   //
   // Spelled per route rather than globally: /tracks genuinely takes bbox and
   // radius, the single-vessel routes genuinely do not.
-  const unknown = Object.keys(query).filter(
-    (key) => !QUERY_KEYS.includes(key as (typeof QUERY_KEYS)[number]) && !alsoAllowed.includes(key),
-  )
+  const unknown = Object.keys(query).filter((key) => !QUERY_KEYS.includes(key) && !alsoAllowed.includes(key))
   if (unknown.length > 0) {
     const allowed = [...QUERY_KEYS, ...alsoAllowed].join(', ')
     throw new TimeWindowError(
       `Unknown query parameter${unknown.length > 1 ? 's' : ''} ${unknown.join(', ')}; accepted: ${allowed}`,
     )
   }
-  const raw = {
-    from: firstString(query.from),
-    to: firstString(query.to),
-    duration: firstString(query.duration),
-    timespan: firstString(query.timespan),
-    timespanOffset: firstString(query.timespanOffset),
-    resolution: firstString(query.resolution),
-    times: firstString(query.times),
-  }
+  const raw = Object.fromEntries(QUERY_KEYS.map((key) => [key, firstString(query[key])]))
 
   if (!Value.Check(QuerySchema, raw)) {
     throw new TimeWindowError('Invalid track query parameters')
