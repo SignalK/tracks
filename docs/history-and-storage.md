@@ -13,8 +13,8 @@ Neither is simply better than the other, which is why both are used.
 
 The plugin writes its positions to a SQLite file in its data directory, so they
 survive a restart. A power cut can still lose the most recent ones, because
-they are not forced onto the storage one at a time (on an SD card that would
-stall the whole server), but it cannot damage the file. How long they are kept
+they are not forced onto the storage one at a time (on an SD card each such
+write can take seconds), but it cannot damage the file. How long they are kept
 depends on two settings: the own vessel's track is kept indefinitely by
 default, and another vessel is dropped 30 days after its last fix.
 
@@ -41,7 +41,9 @@ bounded by the same queue byte/item limits (no 128-operation drain cap). Positio
 inside a context's resolution window are discarded before cloning/admission;
 the worker also retains the store's throttle as a consistency guard. There is no
 extra batching delay or change to the configured recording resolution, spatial
-filters or schema. SQLite uses WAL with `synchronous=FULL`. Persisted vessel names are cached from
+filters or schema. SQLite uses WAL with `synchronous=NORMAL`, so a commit does
+not sync; the only syncs are the checkpoints, which run in the worker too.
+Persisted vessel names are cached from
 worker-acknowledged writes; the live data model still takes precedence.
 
 Pending operations are bounded to 10,000 items / 8 MiB of serialized arguments,
