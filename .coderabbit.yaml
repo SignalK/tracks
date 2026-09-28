@@ -17,9 +17,8 @@ reviews:
         `AGENTS.md` in the repository root is the contributor guide, and it is
         written for human and AI contributors alike. Read it before reviewing and
         treat it as authoritative on this repository's conventions: the commit
-        format, the one-logical-change-per-PR rule, the release-notes label
-        requirement, the architecture, and — most importantly — the "Traps worth
-        knowing" section.
+        format, the one-logical-change-per-PR rule, the architecture, and — most
+        importantly — the "Traps worth knowing" section.
 
         Those traps are hard-won and counter-intuitive. Several of them look like
         bugs to a reviewer who has not read them, so check that section before
