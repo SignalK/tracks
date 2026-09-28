@@ -86,8 +86,9 @@ jobs:
       matrix:
         signalk-server: ['2.33.0', 'latest']
     services:
-      # The image signalk-questdb runs for its users. The plugin is
-      # configured not to manage a container, only to reach this one.
+      # `latest` is what signalk-questdb runs for its users unless they pin
+      # a version. The plugin is configured not to manage a container, only
+      # to reach this one.
       questdb:
         image: questdb/questdb:latest
         ports:
@@ -115,9 +116,12 @@ jobs:
           node -p "'signalk-server ' + require('./node_modules/signalk-server/package.json').version"
 
       # The service is up before the steps start, but QuestDB takes a few
-      # seconds more to answer queries.
+      # seconds more to answer queries. The build is logged because the image
+      # tag floats: a failure after a QuestDB release names the one it ran.
       - name: Wait for QuestDB
-        run: curl --silent --fail --retry 30 --retry-delay 2 --retry-all-errors --output /dev/null 'http://localhost:9000/exec?query=select%201'
+        run: |
+          curl --silent --fail --retry 30 --retry-delay 2 --retry-all-errors --output /dev/null 'http://localhost:9000/exec?query=select%201'
+          curl --silent --fail 'http://localhost:9000/exec?query=select%20build()' | jq -r '.dataset[0][0]'
 
       - name: Run the e2e suite
         env:
