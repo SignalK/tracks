@@ -29,15 +29,14 @@ SQLite runs in a dedicated worker, including opening the database, queries,
 pruning and WAL checkpointing. A slow storage operation therefore does not block
 the Signal K server's event loop. This does not make slow storage faster: a track
 query can still wait behind earlier writes, while unrelated server requests can
-continue. Large query results still arrive via structured cloning and their
-materialization/HTTP serialization consumes main-thread time. Transferable
-columnar buffers are a separate follow-up; this change does not eliminate that
-cost or all sources of server latency.
+continue. Large query results still arrive via structured cloning, and their
+materialization and HTTP serialization take main-thread time, so the worker
+does not remove every source of server latency.
 
 Positions retain their arrival timestamp (or the supplied observation timestamp)
 and coordinates are copied when accepted. Operations are ordered, with one batch
 in flight; the entire adjacent waiting mutation run commits in one transaction,
-bounded by the same queue byte/item limits (no 128-operation drain cap). Positions
+bounded by the same queue byte/item limits. Positions
 inside a context's resolution window are discarded before cloning/admission;
 the worker also retains the store's throttle as a consistency guard. There is no
 extra batching delay or change to the configured recording resolution, spatial
