@@ -3,7 +3,7 @@ import prettier from 'eslint-config-prettier'
 import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
-  { ignores: ['dist', 'coverage'] },
+  { ignores: ['dist', '.vitest-worker', 'coverage'] },
   eslint.configs.recommended,
   tseslint.configs.recommendedTypeChecked,
   {

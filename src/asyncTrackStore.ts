@@ -31,6 +31,13 @@ export class AsyncTrackStore implements TrackStore {
   private closing: boolean
   private failed: boolean
   private statusError: string | undefined
+  private overloaded = false
+  private dropped = 0
+  private gapStarted = 0
+  private writeFailed = false
+  private readonly admitted = new Map<Context, number>()
+  private readonly resolution: number
+  private readonly onResume: (message: string) => void
   readonly ready: Promise<void>
   private resolveReady!: () => void
   private rejectReady!: (error: Error) => void
@@ -45,7 +52,10 @@ export class AsyncTrackStore implements TrackStore {
     debug: Debug,
     onError: (error: Error) => void = () => {},
     limits: Limits = {},
+    onResume: (message: string) => void = () => {},
   ) {
+    this.resolution = config.resolution ?? 0
+    this.onResume = onResume
     this.queue = []
     this.active = []
     this.names = new Map()
@@ -65,8 +75,11 @@ export class AsyncTrackStore implements TrackStore {
     })
     // A startup failure must be reported even if nobody is awaiting a query.
     this.ready.catch(() => {})
-    // Tests run the same built worker that the published package ships.
-    const workerUrl = new URL(/* @vite-ignore */ '../dist/trackStoreWorker.js', import.meta.url)
+    // Tests rebuild this entry before every run, including watch reruns.
+    const workerUrl = new URL(
+      /* @vite-ignore */ process.env.VITEST ? '../.vitest-worker/trackStoreWorker.js' : '../dist/trackStoreWorker.js',
+      import.meta.url,
+    )
     this.worker = new Worker(workerUrl, {
       workerData: { config, debugEnabled: Boolean(debug?.enabled) },
     })
@@ -88,9 +101,20 @@ export class AsyncTrackStore implements TrackStore {
     }
   }
 
+  private resumeIfDrained(): void {
+    if (!this.overloaded || this.failed || this.writeFailed || this.closing) return
+    if (this.queue.length + this.active.length > this.maxItems / 2 || this.pendingBytes > this.maxBytes / 2) return
+    this.overloaded = false
+    this.statusError = undefined
+    const message = `Track recording resumed; ${this.dropped} operations dropped during capacity gap starting ${new Date(this.gapStarted).toISOString()}`
+    this.dropped = 0
+    this.onResume(message)
+  }
+
   private fail(error: Error): void {
     if (this.failed) return
     this.failed = true
+    this.statusError = undefined
     this.report(error)
     this.rejectReady(error)
     for (const item of [...this.active, ...this.queue]) item.reject?.(error)
@@ -104,7 +128,9 @@ export class AsyncTrackStore implements TrackStore {
     args: Parameters<SqliteTrackStore[K]>,
     write = false,
   ): Promise<Awaited<ReturnType<SqliteTrackStore[K]>>> {
+    this.resumeIfDrained()
     if (this.failed || (this.closing && method !== 'close') || (write && this.statusError)) {
+      if (write && this.overloaded) this.dropped++
       const error = new Error(this.statusError ?? 'Track store is closing')
       return write ? Promise.resolve(undefined as Awaited<ReturnType<SqliteTrackStore[K]>>) : Promise.reject(error)
     }
@@ -126,9 +152,14 @@ export class AsyncTrackStore implements TrackStore {
       (this.queue.length + this.active.length >= this.maxItems || this.pendingBytes + bytes > this.maxBytes)
     ) {
       const error = new Error(
-        'Track queue capacity exceeded; recording paused. Accepted writes will drain; restart the plugin after storage recovers.',
+        'Track queue capacity exceeded; recording paused until accepted work drains below half capacity.',
       )
-      if (write) this.report(error)
+      if (write) {
+        this.overloaded = true
+        this.gapStarted = Date.now()
+        this.dropped++
+        this.report(error)
+      }
       return write ? Promise.resolve(undefined as Awaited<ReturnType<SqliteTrackStore[K]>>) : Promise.reject(error)
     }
     const item: Pending = { operation: { id: ++this.sequence, method, args: copy } as Operation, bytes }
@@ -152,7 +183,13 @@ export class AsyncTrackStore implements TrackStore {
 
   private pump(): void {
     if (this.failed || this.active.length || !this.queue.length) return
-    this.active = this.queue.splice(0, 128)
+    // Admission already bounds the run to maxBytes/maxItems. Drain the entire
+    // adjacent write run in one commit, preserving query barriers and FIFO.
+    const isWrite = (item: Pending) =>
+      ['newPosition', 'recordName', 'initialTrack', 'prune'].includes(item.operation.method)
+    let count = 1
+    if (isWrite(this.queue[0]!)) while (count < this.queue.length && isWrite(this.queue[count]!)) count++
+    this.active = this.queue.splice(0, count)
     try {
       this.worker.postMessage({ operations: this.active.map(({ operation }) => operation) })
     } catch (error) {
@@ -193,11 +230,16 @@ export class AsyncTrackStore implements TrackStore {
         result = message.results[i]
       this.pendingBytes -= item.bytes
       if (!result) continue
-      if (result.error)
+      if (result.error) {
+        if (result.writeFailed && !this.writeFailed) {
+          this.writeFailed = true
+          this.statusError = undefined
+          this.report(new Error(result.error))
+        }
         item.reject?.(
           result.selfPositionUnavailable ? new SelfPositionUnavailableError(result.error) : new Error(result.error),
         )
-      else {
+      } else {
         if (item.operation.method === 'prune') {
           const remaining = new Set(result.names ?? [])
           for (const context of this.names.keys()) if (!remaining.has(context)) this.names.delete(context)
@@ -210,11 +252,17 @@ export class AsyncTrackStore implements TrackStore {
         item.resolve?.(result.value)
       }
     }
+    this.resumeIfDrained()
     this.schedule()
   }
 
   newPosition(context: Context, position: LatLngTuple, timestamp = Date.now()): void {
+    const previous = this.admitted.get(context)
+    if (this.resolution > 0 && previous !== undefined && timestamp - previous < this.resolution) return
+    const sequence = this.sequence
     void this.enqueue('newPosition', [context, position, timestamp], true)
+    // Dropped positions must not suppress the first fix after recovery.
+    if (this.sequence !== sequence && this.resolution > 0) this.admitted.set(context, timestamp)
   }
   recordName(context: Context, name: string, timestamp = Date.now()): void {
     void this.enqueue('recordName', [context, name, timestamp], true)
@@ -223,10 +271,19 @@ export class AsyncTrackStore implements TrackStore {
     return this.names.get(context)
   }
   initialTrack(context: Context, track: LatLngTuple[], timestamps?: number[]): void {
+    const sequence = this.sequence
     void this.enqueue('initialTrack', [context, track, timestamps], true)
+    if (this.sequence !== sequence) this.admitted.delete(context)
   }
   prune(maxAge: number, keep?: Context): void {
-    void this.enqueue('prune', [maxAge, keep], true)
+    const now = Date.now()
+    const sequence = this.sequence
+    void this.enqueue('prune', [maxAge, keep, now], true)
+    if (this.sequence !== sequence) {
+      for (const [context, timestamp] of this.admitted) {
+        if (context !== keep && timestamp < now - maxAge) this.admitted.delete(context)
+      }
+    }
   }
   get(context: Context, window?: TimeWindow) {
     return this.enqueue('get', [context, window])

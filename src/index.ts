@@ -692,6 +692,13 @@ export default function ThePlugin(app: App): Plugin {
             app.error(storageError)
             app.setPluginStatus?.(storageError)
           },
+          {},
+          (message) => {
+            if (tracks !== starting) return
+            storageError = undefined
+            app.error(message) // Keep a visible record of the recording gap.
+            app.setPluginStatus?.(stateGate.status() ?? sourceWatch.warning(app.selfContext) ?? 'Recording tracks')
+          },
         )
         tracks = starting
       } catch (err) {

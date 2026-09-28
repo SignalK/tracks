@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createServer } from 'node:http'
 import type { Worker } from 'node:worker_threads'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AsyncTrackStore } from './asyncTrackStore.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import type { Debug, LatLngTuple } from './types.js'
@@ -149,13 +149,15 @@ describe('worker-owned SQLite', () => {
     await expect(create().get('self')).rejects.toThrow('No track')
   })
 
-  it('rolls back a failed write batch and rejects queued reads', async () => {
+  it('rolls back a failed write batch and stops further writes', async () => {
     const errors: Error[] = []
     const store = create((error) => errors.push(error))
     store.newPosition('self', [60, 24], 100)
     store.newPosition('self', [NaN, 24], 200)
     await expect(store.get('self')).rejects.toThrow()
-    await expect(store.close()).rejects.toThrow()
+    store.newPosition('later', [60, 24], 300)
+    await expect(store.get('later')).rejects.toThrow('No track')
+    await expect(store.close()).resolves.toBeUndefined()
     expect(errors).toHaveLength(1)
     await expect(create().get('self')).rejects.toThrow('No track')
   })
@@ -195,5 +197,90 @@ describe('worker-owned SQLite', () => {
     const reopened = create()
     await reopened.ready
     expect(reopened.nameFor('old')).toBe('New name')
+  })
+  it('resumes below the low-water mark and reports dropped operations', async () => {
+    const errors: Error[] = []
+    const resumed: string[] = []
+    const store = new AsyncTrackStore(
+      { file: join(dir, 'tracks.db'), resolution: 100 },
+      debug,
+      (error) => errors.push(error),
+      { maxItems: 2 },
+      (message) => resumed.push(message),
+    )
+    open.push(store)
+    store.newPosition('self', [60, 24], 100)
+    store.newPosition('self', [61, 25], 200)
+    store.newPosition('self', [62, 26], 300)
+    store.newPosition('self', [63, 27], 400)
+    expect(errors).toHaveLength(1)
+    await vi.waitFor(() => expect(resumed).toHaveLength(1))
+    expect(resumed[0]).toContain('2 operations dropped')
+    store.newPosition('self', [64, 28], 401)
+    expect(await store.get('self')).toEqual([
+      [60, 24],
+      [61, 25],
+      [64, 28],
+    ])
+  })
+
+  it('rejects an oversized import without permanently disabling recording', async () => {
+    const store = create(() => {}, { maxBytes: 128 })
+    store.initialTrack(
+      'self',
+      Array.from({ length: 100 }, () => [60, 24] as LatLngTuple),
+    )
+    store.newPosition('self', [61, 25], 100)
+    expect(await store.get('self')).toEqual([[61, 25]])
+  })
+
+  it('thins before admission without losing per-context leading-edge semantics', async () => {
+    const errors: Error[] = []
+    const store = new AsyncTrackStore(
+      { file: join(dir, 'tracks.db'), resolution: 60000 },
+      debug,
+      (error) => errors.push(error),
+      { maxItems: 4 },
+    )
+    open.push(store)
+    for (let time = 0; time < 60000; time += 100) store.newPosition('self', [60, 24], time)
+    store.newPosition('other', [61, 25], 500)
+    store.newPosition('self', [62, 26], 60000)
+    expect(await store.get('self')).toEqual([
+      [60, 24],
+      [62, 26],
+    ])
+    expect(await store.get('other')).toEqual([[61, 25]])
+    expect(errors).toHaveLength(0)
+  })
+
+  it('commits a pending run larger than 128 atomically and preserves earlier reads', async () => {
+    const errors: Error[] = []
+    const store = create((error) => errors.push(error))
+    store.newPosition('persisted', [60, 24], 1)
+    expect(await store.get('persisted')).toEqual([[60, 24]])
+    for (let i = 0; i < 300; i++) store.newPosition('batch', [60, 24], i)
+    store.newPosition('batch', [NaN, 24], 301)
+    await expect(store.get('batch')).rejects.toThrow('No track')
+    expect(await store.get('persisted')).toEqual([[60, 24]])
+    expect(await store.getAllTracks()).toHaveLength(1)
+    expect(errors).toHaveLength(1)
+    await store.close()
+  })
+  it('preserves throttle boundaries for retained contexts when pruning', async () => {
+    const store = new AsyncTrackStore({ file: join(dir, 'tracks.db'), resolution: 1000 }, debug)
+    open.push(store)
+    const now = Date.now()
+    store.newPosition('self', [60, 24], now)
+    store.newPosition('old', [60, 24], now - 10000)
+    store.prune(5000, 'self')
+    store.newPosition('self', [61, 25], now + 100)
+    store.newPosition('self', [62, 26], now + 1000)
+    store.newPosition('old', [63, 27], now - 9999)
+    expect(await store.get('self')).toEqual([
+      [60, 24],
+      [62, 26],
+    ])
+    expect(await store.get('old')).toEqual([[63, 27]])
   })
 })

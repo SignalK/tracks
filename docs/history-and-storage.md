@@ -27,27 +27,43 @@ SQLite runs in a dedicated worker, including opening the database, queries,
 pruning and WAL checkpointing. A slow storage operation therefore does not block
 the Signal K server's event loop. This does not make slow storage faster: a track
 query can still wait behind earlier writes, while unrelated server requests can
-continue.
+continue. Large query results still arrive via structured cloning and their
+materialization/HTTP serialization consumes main-thread time. Transferable
+columnar buffers are a separate follow-up; this change does not eliminate that
+cost or all sources of server latency.
 
 Positions retain their arrival timestamp (or the supplied observation timestamp)
 and coordinates are copied when accepted. Operations are ordered, with one batch
-in flight; adjacent waiting mutations commit in one transaction. There is no
+in flight; the entire adjacent waiting mutation run commits in one transaction,
+bounded by the same queue byte/item limits (no 128-operation drain cap). Positions
+inside a context's resolution window are discarded before cloning/admission;
+the worker also retains the store's throttle as a consistency guard. There is no
 extra batching delay or change to the configured recording resolution, spatial
 filters or schema. SQLite uses WAL with `synchronous=FULL`. Persisted vessel names are cached from
 worker-acknowledged writes; the live data model still takes precedence.
 
 Pending operations are bounded to 10,000 items / 8 MiB of serialized arguments,
 including the batch in flight. If recording exceeds either limit, a plugin error
-pauses further recording while accepted work drains. Restart the plugin after
-storage recovers. Database/worker failures also report an error and stop recording;
-uncertain writes are not retried. These errors remain visible instead of being
-replaced by the periodic healthy status.
+pauses further recording while accepted work drains. Recording automatically
+resumes once both item and byte usage reach at most half capacity. The plugin
+logs the gap's start time and dropped operation count (operations include names
+and maintenance, not just positions). Dropped samples are not replayed.
+
+A failed write transaction stops subsequent writes until a plugin restart;
+uncertain writes are never retried. A successful rollback leaves the database
+open, so History and v1 queries can still read committed tracks, including when
+storage is full. Startup, worker exit or an uncertain rollback fail the whole
+store. These errors remain visible instead of being replaced by healthy status.
 
 Stopping unsubscribes input immediately, then returns a Promise that resolves
 only after accepted work drains, SQLite closes and the worker exits. Plugin
 lifecycle callers must await `stop()` before restarting or removing its data
 directory. `start()` returns the initialization Promise; track requests submitted
-during initialization wait behind it.
+during initialization wait behind it. This drain covers callers that actually
+invoke and await `stop()`, such as a settings change or disabling the plugin.
+The current server shutdown path does not guarantee that: a server restart can
+lose accepted queued samples even on an otherwise orderly process shutdown.
+Do not assume the plugin's async stop promise is awaited by the server.
 
 Accepted but uncommitted data is still in RAM. Abrupt power loss or forced process
 termination can lose pending samples; worker isolation does not promise zero data

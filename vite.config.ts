@@ -39,6 +39,14 @@ export default defineConfig({
   ],
   test: {
     environment: 'node',
+    globalSetup: ['src/workerTestSetup.ts'],
+    forceRerunTriggers: [
+      'src/sqliteStore.ts',
+      'src/trackStoreWorker.ts',
+      'src/trackStoreProtocol.ts',
+      'src/utils.ts',
+      'src/timeWindow.ts',
+    ],
     include: ['src/**/*.test.ts'],
     // e2e runs against a real Signal K server and a real QuestDB, neither of
     // which exists in CI. `npm run test:e2e` opts in.

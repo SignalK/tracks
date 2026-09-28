@@ -1,6 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads'
 import { SelfPositionUnavailableError } from './utils.js'
-import { SqliteTrackStore } from './sqliteStore.js'
+import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
 import type { SqliteStoreConfig } from './sqliteStore.js'
 import type { Debug } from './types.js'
 import type { Operation, WorkerMessage } from './trackStoreProtocol.js'
@@ -18,6 +18,7 @@ const debug: Debug = Object.assign(
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 let store: SqliteTrackStore | undefined
 let processing = false
+let writeFailure: string | undefined
 function fatal(error: unknown): void {
   try {
     store?.close()
@@ -66,20 +67,32 @@ if (store) {
       for (let i = 0; i < operations.length;) {
         const operation = operations[i]!
         if (isWrite(operation)) {
-          // Commit adjacent waiting writes together, without delaying admission or thinning samples.
-          target.transaction(() => {
-            while (i < operations.length && isWrite(operations[i]!)) {
-              const next = operations[i++]!
-              mutate(next, target)
-              results.push({
-                id: next.id,
-                ...(next.method === 'recordName'
-                  ? { name: { context: next.args[0], value: target.nameFor(next.args[0]) } }
-                  : {}),
-                ...(next.method === 'prune' ? { names: target.storedNames().map((row) => row.context) } : {}),
-              })
-            }
-          })
+          const first = i
+          while (i < operations.length && isWrite(operations[i]!)) i++
+          const writes = operations.slice(first, i)
+          const acknowledgements: typeof results = []
+          try {
+            if (writeFailure) throw new Error(writeFailure)
+            target.transaction(() => {
+              for (const next of writes) {
+                mutate(next, target)
+                acknowledgements.push({
+                  id: next.id,
+                  ...(next.method === 'recordName'
+                    ? { name: { context: next.args[0], value: target.nameFor(next.args[0]) } }
+                    : {}),
+                  ...(next.method === 'prune' ? { names: target.storedNames().map((row) => row.context) } : {}),
+                })
+              }
+            })
+            results.push(...acknowledgements)
+          } catch (error) {
+            if (error instanceof TransactionStateError) throw error
+            // Never retry uncertain writes. Keep the database open for reads,
+            // which can still succeed on e.g. a full filesystem.
+            writeFailure = errorText(error)
+            for (const next of writes) results.push({ id: next.id, error: writeFailure, writeFailed: true })
+          }
         } else {
           i++
           if (operation.method === 'close') {

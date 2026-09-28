@@ -17,6 +17,8 @@ import type {
   TrackParams,
 } from './types.js'
 
+export class TransactionStateError extends Error {}
+
 /**
  * S2 cell ids are unsigned 64-bit; SQLite's INTEGER is signed 64-bit, and
  * node:sqlite refuses to bind a bigint above INT64_MAX outright:
@@ -406,8 +408,8 @@ export class SqliteTrackStore implements TrackStore {
     return row?.name
   }
 
-  prune(maxAge: number, keep?: Context): void {
-    const cutoff = Date.now() - maxAge
+  prune(maxAge: number, keep?: Context, now = Date.now()): void {
+    const cutoff = now - maxAge
     // Drop whole contexts that have gone quiet, then apply the row-level
     // retention if one is configured. `keep` — the own vessel — is excluded:
     // its track has to survive a winter on a mooring.
@@ -438,7 +440,7 @@ export class SqliteTrackStore implements TrackStore {
     // would truncate an AIS vessel's track on a setting that does not name it.
     // Unscoped without a `keep`, which is how a standalone store behaves.
     if (this.retention > 0) {
-      const oldest = Date.now() - this.retention
+      const oldest = now - this.retention
       if (keep === undefined) {
         this.db.prepare('DELETE FROM positions WHERE timestamp < ?').run(oldest)
       } else {
@@ -456,14 +458,21 @@ export class SqliteTrackStore implements TrackStore {
     }[]
   }
 
-  /** A failed batch is fatal to its worker, including its write-throttle state. */
+  /** A failed batch stops writes in its worker; reads remain available. */
   transaction(write: () => void): void {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       write()
       this.db.exec('COMMIT')
     } catch (error) {
-      this.db.exec('ROLLBACK')
+      try {
+        this.db.exec('ROLLBACK')
+      } catch (rollbackError) {
+        // SQLITE_FULL/IOERR may already have rolled back automatically.
+        if (!(rollbackError instanceof Error) || !rollbackError.message.includes('no transaction is active')) {
+          throw new TransactionStateError('Track transaction rollback failed', { cause: rollbackError })
+        }
+      }
       throw error
     }
   }
