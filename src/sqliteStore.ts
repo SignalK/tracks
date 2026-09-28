@@ -479,7 +479,12 @@ export class SqliteTrackStore implements TrackStore {
       } catch (rollbackError) {
         // SQLITE_FULL/IOERR may already have rolled back automatically.
         if (!(rollbackError instanceof Error) || !rollbackError.message.includes('no transaction is active')) {
-          throw new TransactionStateError('Track transaction rollback failed', { cause: rollbackError })
+          // Only the message crosses the worker boundary, so it carries both.
+          const text = (e: unknown) => (e instanceof Error ? e.message : String(e))
+          throw new TransactionStateError(
+            `Track transaction rollback failed (${text(rollbackError)}) after: ${text(error)}`,
+            { cause: error },
+          )
         }
       }
       throw error
