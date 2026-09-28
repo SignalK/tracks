@@ -126,7 +126,7 @@ describe('SourceWatch', () => {
 // The watcher wired into the plugin: positions arrive on the bus and the
 // warning reaches the server dashboard.
 describe('source warning through the plugin', () => {
-  it('warns on the dashboard when the own vessel has two position sources', () => {
+  it('warns on the dashboard when the own vessel has two position sources', async () => {
     vi.useFakeTimers()
     const h = createHarness({ selfPosition: [60, 24] })
     try {
@@ -141,12 +141,12 @@ describe('source warning through the plugin', () => {
       expect(h.statuses[0]).toContain('gps.0')
       expect(h.statuses[0]).toContain('n2k.1')
     } finally {
-      h.stop()
+      await h.stop()
       vi.useRealTimers()
     }
   })
 
-  it('stays quiet with a single source', () => {
+  it('stays quiet with a single source', async () => {
     vi.useFakeTimers()
     const h = createHarness({ selfPosition: [60, 24] })
     try {
@@ -158,18 +158,18 @@ describe('source warning through the plugin', () => {
       // warns about sources.
       expect(h.statuses.some((s) => s.includes('navigation.position'))).toBe(false)
     } finally {
-      h.stop()
+      await h.stop()
       vi.useRealTimers()
     }
   })
 
-  it('stops reporting once the plugin is stopped', () => {
+  it('stops reporting once the plugin is stopped', async () => {
     vi.useFakeTimers()
     const h = createHarness({ selfPosition: [60, 24] })
     try {
       h.emit(SELF, [60.1, 24.9], undefined, 'gps.0')
       h.emit(SELF, [60.1, 24.91], undefined, 'n2k.1')
-      h.stop()
+      await h.stop()
       vi.advanceTimersByTime(120_000)
 
       expect(h.statuses).toEqual([])

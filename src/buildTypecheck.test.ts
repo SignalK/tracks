@@ -1,5 +1,7 @@
 import { spawnSync } from 'node:child_process'
-import { rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
@@ -20,11 +22,17 @@ function buildWithoutVitest() {
   // The vite CLI is run through node rather than npx: `npx` is npx.cmd on
   // Windows, which spawnSync cannot execute without a shell, and CI runs this
   // suite there.
-  return spawnSync(process.execPath, [fileURLToPath(VITE_CLI), 'build'], {
-    cwd: fileURLToPath(new URL('..', import.meta.url)),
-    env,
-    encoding: 'utf8',
-  })
+  // Do not delete the shipped worker while other tests are using it.
+  const output = mkdtempSync(join(tmpdir(), 'tracks-build-probe-'))
+  try {
+    return spawnSync(process.execPath, [fileURLToPath(VITE_CLI), 'build', '--outDir', output], {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      env,
+      encoding: 'utf8',
+    })
+  } finally {
+    rmSync(output, { recursive: true, force: true })
+  }
 }
 
 describe('the build', () => {

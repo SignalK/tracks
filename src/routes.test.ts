@@ -9,8 +9,8 @@ const SELF_ID = SELF_CONTEXT.replace('vessels.', '')
 
 let harness: TestHarness | undefined
 
-afterEach(() => {
-  harness?.stop()
+afterEach(async () => {
+  await harness?.stop()
   harness = undefined
 })
 
@@ -101,7 +101,7 @@ describe('when the plugin has been stopped', () => {
   // than a stack trace.
   it('answers without throwing once the store is closed', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
-    h.stop()
+    await h.stop()
 
     await request(h.app).get(`${API}/tracks`).expect(404)
   })
@@ -109,10 +109,10 @@ describe('when the plugin has been stopped', () => {
   // The store is unreadable once stopped, so this checks the subscription
   // rather than the result: a position emitted after stop() must not reach the
   // store, which is observable through the plugin's own accessor.
-  it('stops accumulating new positions', () => {
+  it('stops accumulating new positions', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
     const before = h.emitted()
-    h.stop()
+    await h.stop()
     h.emit(SELF_CONTEXT, [61, 25])
 
     expect(h.emitted()).toBe(before)
@@ -481,7 +481,7 @@ describe('track names', () => {
 
     // The vessel goes out of range: the server forgets it, then restarts.
     delete paths[`${OTHER_CONTEXT}.name`]
-    h.stop()
+    await h.stop()
     h.restart()
 
     const res = await request(h.app).get(`${API}/tracks`).expect(200)
@@ -498,7 +498,7 @@ describe('track names', () => {
     h.emit(OTHER_CONTEXT, [60.2, 24.8])
 
     delete paths[`${OTHER_CONTEXT}.name`]
-    h.stop()
+    await h.stop()
     h.restart()
 
     const res = await request(h.app).get(`${API}/tracks`).expect(200)
@@ -750,6 +750,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     let calls = 0
     const gate = deferred()
     const allArrived = deferred()
+    const probeStarted = deferred()
     let arrived = 0
     const h = (harness = createHarness({
       selfPosition: [60, 24],
@@ -768,6 +769,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
           release: gate.release,
           get wait() {
             calls += 1
+            probeStarted.release()
             return gate.wait
           },
         },
@@ -783,6 +785,8 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     // Waited on rather than slept through: the gate opens when the last of the
     // eight has reached the store, so "all in flight" is observed, not timed.
     await arrivals
+    // The worker read can still be pending after history arrivals; observe the probe itself.
+    await probeStarted.wait
     expect(calls).toBe(1)
 
     gate.release()
@@ -955,7 +959,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     // The provider now knows the vessel. Without the restart the cached list
     // would keep answering 404 for the rest of the window.
     known = [OTHER_CONTEXT]
-    h.stop()
+    await h.stop()
     h.restart()
 
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)

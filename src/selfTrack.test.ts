@@ -9,8 +9,8 @@ const HOUR = 60 * 60 * 1000
 
 let harness: TestHarness | undefined
 
-afterEach(() => {
-  harness?.stop()
+afterEach(async () => {
+  await harness?.stop()
   harness = undefined
 })
 

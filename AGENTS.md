@@ -16,13 +16,20 @@ The package is **ESM only** (`"type": "module"`) and ships `dist/` plus the weba
 
 ```bash
 npm ci
-npm run build      # vite library build -> dist/index.js + rolled-up index.d.ts
-npm test           # vitest
+npm run build      # vite library build -> dist/index.js, trackStoreWorker.js + index.d.ts
+npm test           # vitest; global setup builds the worker entry first
+npm run test:watch # rebuilds the worker before each rerun
 npm run test:e2e   # real signalk-server + real QuestDB; its own CI job
 npm run typecheck  # tsc --noEmit (also run inside the build, via vite-plugin-checker)
 npm run lint       # eslint flat config
 npm run format     # prettier --write
 ```
+
+The unit runner builds the production worker entry into ignored `.vitest-worker/`
+before a run and before watch reruns, without the full declaration/typecheck
+build. Worker dependencies trigger a full rerun because Vitest cannot see across
+the thread boundary. Direct `vitest` invocation also runs this setup. Production
+packaging still uses `npm run build` and must be smoke-tested from the tarball.
 
 **`npm run test:e2e` needs a `signalk-server` to boot.** It packs the plugin with
 `npm pack`, installs the tarball into a throwaway config dir, boots a real server against it,
@@ -62,7 +69,7 @@ error in an unrelated file should not stop the suite.
 
 ## Architecture
 
-- **Storage is always SQLite.** `start()` builds a `SqliteTrackStore` in the plugin's data directory, so tracks survive a restart with no other plugin involved; without a data directory it reports why and does not start. There is no in-memory alternative and no `source` setting — a track recorder that forgets everything on restart is not worth starting. `TrackAccumulator` remains as the exported client-side helper, not as plugin storage.
+- **Storage is always SQLite.** `start()` builds an `AsyncTrackStore`; its worker owns a `SqliteTrackStore` in the plugin's data directory, so tracks survive a restart with no other plugin involved; without a data directory it reports why and does not start. There is no in-memory alternative and no `source` setting — a track recorder that forgets everything on restart is not worth starting. `TrackAccumulator` remains as the exported client-side helper, not as plugin storage.
 - **A history provider enriches a query, it does not replace the store.** Every query reconciles the two through `historyPositions()`: the provider answers for buckets where it has data, the store answers everywhere else. This is best-effort and per query — there is no startup pre-fill. **The plugin must stay fully functional with no history provider installed**; see `docs/history-and-storage.md`.
 - **v1 and v2 are different purposes, not old and new.** Both are current, and neither supersedes the other.
   - **v1 `/signalk/v1/api/tracks`** is a **spatial query**: `radius` and `bbox` filter by the vessel's _last_ position — "which vessels are near me now". Situational awareness and collision avoidance; this is what Freeboard uses. It is the one thing the core v2 History API cannot answer, since that has no spatial predicate, and it's the reason this plugin exists as more than a cache.

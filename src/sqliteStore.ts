@@ -17,6 +17,8 @@ import type {
   TrackParams,
 } from './types.js'
 
+export class TransactionStateError extends Error {}
+
 /**
  * S2 cell ids are unsigned 64-bit; SQLite's INTEGER is signed 64-bit, and
  * node:sqlite refuses to bind a bigint above INT64_MAX outright:
@@ -148,11 +150,14 @@ export class SqliteTrackStore implements TrackStore {
     // positions arrive continuously while a query is being served.
     this.db.exec('PRAGMA journal_mode = WAL')
     // node:sqlite defaults to FULL, an fsync on every commit, and on an SD
-    // card each one can stall the server's event loop for seconds. NORMAL
-    // syncs only at checkpoints. A power cut can then lose the most recent
-    // commits but never corrupts the database, and a process crash loses
-    // nothing. It is a per-connection setting, so it is set on every open.
+    // card each one can take seconds. NORMAL syncs only at checkpoints. A
+    // power cut can then lose the most recent commits but never corrupts the
+    // database, and a process crash loses nothing. It is a per-connection
+    // setting, so it is set on every open.
     this.db.exec('PRAGMA synchronous = NORMAL')
+    // A lock held by another connection, a backup or an sqlite3 shell say, is
+    // waited out rather than failing the write at once.
+    this.db.exec('PRAGMA busy_timeout = 5000')
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS positions (
         context   TEXT    NOT NULL,
@@ -412,8 +417,8 @@ export class SqliteTrackStore implements TrackStore {
     return row?.name
   }
 
-  prune(maxAge: number, keep?: Context): void {
-    const cutoff = Date.now() - maxAge
+  prune(maxAge: number, keep?: Context, now = Date.now()): void {
+    const cutoff = now - maxAge
     // Drop whole contexts that have gone quiet, then apply the row-level
     // retention if one is configured. `keep` — the own vessel — is excluded:
     // its track has to survive a winter on a mooring.
@@ -444,12 +449,45 @@ export class SqliteTrackStore implements TrackStore {
     // would truncate an AIS vessel's track on a setting that does not name it.
     // Unscoped without a `keep`, which is how a standalone store behaves.
     if (this.retention > 0) {
-      const oldest = Date.now() - this.retention
+      const oldest = now - this.retention
       if (keep === undefined) {
         this.db.prepare('DELETE FROM positions WHERE timestamp < ?').run(oldest)
       } else {
         this.db.prepare('DELETE FROM positions WHERE timestamp < ? AND context IS ?').run(oldest, keep)
       }
+    }
+  }
+
+  /** Worker startup snapshot; queries and name lookups must not open a second database. */
+  storedNames(): { context: string; name: string; timestamp: number }[] {
+    return this.db.prepare('SELECT context, name, timestamp FROM names').all() as unknown as {
+      context: string
+      name: string
+      timestamp: number
+    }[]
+  }
+
+  /** A failed batch stops writes in its worker; reads remain available. */
+  transaction(write: () => void): void {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      write()
+      this.db.exec('COMMIT')
+    } catch (error) {
+      try {
+        this.db.exec('ROLLBACK')
+      } catch (rollbackError) {
+        // SQLITE_FULL/IOERR may already have rolled back automatically.
+        if (!(rollbackError instanceof Error) || !rollbackError.message.includes('no transaction is active')) {
+          // Only the message crosses the worker boundary, so it carries both.
+          const text = (e: unknown) => (e instanceof Error ? e.message : String(e))
+          throw new TransactionStateError(
+            `Track transaction rollback failed (${text(rollbackError)}) after: ${text(error)}`,
+            { cause: error },
+          )
+        }
+      }
+      throw error
     }
   }
 

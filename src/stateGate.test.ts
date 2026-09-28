@@ -189,7 +189,7 @@ describe('state gating through the plugin', () => {
       expect(coordinates).toContainEqual([24.9, 60.1])
       expect(coordinates).not.toContainEqual([24.9, 60.11])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -205,7 +205,7 @@ describe('state gating through the plugin', () => {
       expect(coordinates).toContainEqual([24.9, 60.1])
       expect(coordinates).toContainEqual([24.9, 60.11])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -220,7 +220,7 @@ describe('state gating through the plugin', () => {
 
       expect(coordinates).toContainEqual([24.9, 60.11])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -238,7 +238,7 @@ describe('state gating through the plugin', () => {
       expect(coordinates).toContainEqual([24.9, 60.1])
       expect(coordinates).not.toContainEqual([24.9, 60.11])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -256,7 +256,7 @@ describe('state gating through the plugin', () => {
       expect(coordinates).toContainEqual([24.9, 60.1])
       expect(coordinates).toContainEqual([24.9, 60.11])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -280,7 +280,7 @@ describe('state gating through the plugin', () => {
 
       expect(h.statuses.at(-1)).not.toContain('moored')
     } finally {
-      h.stop()
+      await h.stop()
       vi.useRealTimers()
     }
   })
@@ -298,7 +298,7 @@ describe('state gating through the plugin', () => {
 
       expect(h.statuses.some((s) => s.includes('moored'))).toBe(true)
     } finally {
-      h.stop()
+      await h.stop()
       vi.useRealTimers()
     }
   })

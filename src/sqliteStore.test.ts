@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it } from 'vitest'
 import { s2 } from 's2js'
-import { SqliteTrackStore } from './sqliteStore.js'
+import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
 import { splitAtAntimeridian } from './utils.js'
 import type { Context, GeoBounds, LatLngTuple } from './types.js'
 
@@ -443,5 +443,23 @@ describe('the connection', () => {
       store.close()
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('a transaction whose rollback fails', () => {
+  it('reports the write error, not only that the rollback failed', () => {
+    const store = newStore()
+    let thrown: unknown
+    try {
+      store.transaction(() => {
+        // Closing the connection mid-transaction makes the ROLLBACK fail too.
+        store['db'].close()
+        throw new Error('disk I/O error')
+      })
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(TransactionStateError)
+    expect(thrown).toMatchObject({ message: expect.stringContaining('disk I/O error') })
   })
 })

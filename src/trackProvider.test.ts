@@ -22,26 +22,26 @@ const providerOf = (h: { trackProvider: () => TrackApi | undefined }): TrackApi 
 }
 
 describe('track provider registration', () => {
-  it('registers a provider on a server that offers the v2 Track API', () => {
+  it('registers a provider on a server that offers the v2 Track API', async () => {
     const h = createHarness()
     try {
       expect(h.registrations()).toBe(1)
       expect(typeof providerOf(h).getTracks).toBe('function')
       expect(typeof providerOf(h).getTrackContexts).toBe('function')
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
   // Older servers have no registerTrackApiProvider. The optional call must not
   // throw, or the plugin fails to start there at all.
-  it('starts on a server without the Track API', () => {
+  it('starts on a server without the Track API', async () => {
     const h = createHarness({ withoutTrackApi: true })
     try {
       expect(h.trackProvider()).toBeUndefined()
       expect(h.errors).toEqual([])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 })
@@ -85,7 +85,7 @@ describe('getTracks', () => {
       // bbox is west,south,east,north — GeoJSON order, like the coordinates.
       expect(feature!.properties.bbox).toEqual([24.9, 60.1, 25.0, 60.2])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -100,7 +100,7 @@ describe('getTracks', () => {
 
       expect(feature!.properties.isSelf).toBe(false)
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -119,7 +119,7 @@ describe('getTracks', () => {
         expect(res.features.map((f) => f.properties.context)).toEqual([SELF_CONTEXT])
       }
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -136,7 +136,7 @@ describe('getTracks', () => {
       const one = await providerOf(h).getTracks({ contexts: [OTHER_CONTEXT] })
       expect(one.features.map((f) => f.properties.context)).toEqual([OTHER_CONTEXT])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -165,7 +165,7 @@ describe('getTracks', () => {
         coordinates: [[[25.0, 60.2]]],
       })
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -196,7 +196,7 @@ describe('getTracks', () => {
       expect(res.features[0]!.properties.pointCount).toBe(1)
       expect(res.features[0]!.properties.from).toBe(new Date(t0 + 90_000).toISOString())
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -213,7 +213,7 @@ describe('getTracks', () => {
 
       expect(res.features[0]!.properties.pointCount).toBe(1)
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -249,7 +249,7 @@ describe('getTracks', () => {
         new Date(t0 + 60_000).toISOString(),
       ])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -282,7 +282,7 @@ describe('getTracks', () => {
         vi.useRealTimers()
       }
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -303,7 +303,7 @@ describe('getTracks', () => {
 
       expect(providerBbox(await providerOf(h).getTracks({}))).toEqual([179, 0, -179, 0])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -322,7 +322,7 @@ describe('getTracks', () => {
 
       expect(providerBbox(await providerOf(h).getTracks({}))).toEqual([24.9, 60.1, 25.1, 60.2])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -351,7 +351,7 @@ describe('getTracks', () => {
       // stretches outside the box.
       expect(res.features[0]!.properties.pointCount).toBe(3)
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -372,7 +372,7 @@ describe('getTracks', () => {
 
       expect(res.features).toEqual([])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -405,7 +405,7 @@ describe('getTracks', () => {
       // tidier value would get a different count than the budget it asked for.
       expect(props.resolution).toBe('PT6.103S')
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -427,7 +427,7 @@ describe('getTracks', () => {
       expect(res.features[0]!.properties.pointCount).toBe(2)
       expect(res.features[0]!.properties.resolution).toBeUndefined()
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -447,7 +447,7 @@ describe('getTracks', () => {
       const swapped = await providerOf(h).getTracks({ bbox: [59, 24, 61, 26] })
       expect(swapped.features.map((f) => f.properties.context)).not.toContain(SELF_CONTEXT)
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -463,7 +463,7 @@ describe('getTracks', () => {
       expect(res.features[0]!.properties.pointCount).toBe(1)
       expect(res.features[0]!.properties.bbox).toEqual([24.9, 60.1, 24.9, 60.1])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -491,7 +491,7 @@ describe('getTracks', () => {
         (res.features[0]!.geometry as { coordinates: [number, number][][] }).coordinates[0]!.length,
       )
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -520,7 +520,7 @@ describe('getTracks', () => {
       expect(thinned.features[0]!.properties.pointCount).toBe(2)
       expect(thinned.features[0]!.properties.resolution).toBe('PT30S')
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -546,7 +546,7 @@ describe('getTracks', () => {
         expect(res.features[0]!.properties.resolution, unit).toBe(unit)
       }
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -586,7 +586,7 @@ describe('getTracks', () => {
         expect(res.features[0]!.properties.resolution).toBe(expected)
       }
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -636,7 +636,7 @@ describe('getTracks', () => {
         ])
       }
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -655,7 +655,7 @@ describe('getTracks', () => {
 
       expect(res.features[0]!.properties.pointCount).toBe(1)
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -681,7 +681,7 @@ describe('getTracks', () => {
       expect(coordinates[1]).toHaveLength(1)
       expect(res.features[0]!.properties.coordTimes).toHaveLength(2)
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -693,7 +693,7 @@ describe('getTracks', () => {
         features: [],
       })
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 })
@@ -720,7 +720,7 @@ describe('getTrackContexts', () => {
       expect(features).toEqual([])
       expect(contexts).toEqual([])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 
@@ -736,7 +736,7 @@ describe('getTrackContexts', () => {
       )
       await expect(providerOf(h).getTrackContexts({ bbox: [24, 59, 26, 61] })).resolves.toEqual([SELF_CONTEXT])
     } finally {
-      h.stop()
+      await h.stop()
     }
   })
 })
