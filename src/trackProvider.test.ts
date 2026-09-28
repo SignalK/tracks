@@ -862,6 +862,94 @@ describe('simplify in v2', () => {
     expect(props.pointCount).toBeLessThan(200)
   })
 
+  // "With a bounding box and no explicit epsilon, the provider chooses a
+  // tolerance suited to the size of the box." A viewer's box is its view, so
+  // this is what makes detail follow the zoom.
+  describe('with a bounding box', () => {
+    // A long leg with jitter on it, as above: a passage that covers ground.
+    const leg: [number, number][] = Array.from(
+      { length: 200 },
+      (_, i) => [60 + i * 0.001 + (i % 2 ? 0.000005 : 0), 24 + i * 0.002] as [number, number],
+    )
+    const boxDiagonal = ([west, south, east, north]: [number, number, number, number]) => {
+      const lngSpan = east >= west ? east - west : east + 360 - west
+      const height = (north - south) * 111_320
+      const width = lngSpan * 111_320 * Math.cos((((south + north) / 2) * Math.PI) / 180)
+      return Math.hypot(width, height)
+    }
+
+    it('sizes the tolerance to the box rather than the track', async () => {
+      const h = createHarness()
+      seed(h, leg)
+      const bbox: [number, number, number, number] = [24.1, 60.05, 24.2, 60.1]
+
+      const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true, bbox })
+
+      expect(res.features[0]!.properties.epsilon).toBeCloseTo(boxDiagonal(bbox) / 1000, 6)
+    })
+
+    it('keeps more of the shape in a smaller box', async () => {
+      const h = createHarness()
+      // Zigzag of about 16 m either side of the line: between the close box's
+      // ~1.6 m tolerance and the wide box's ~56 m, so only the close view keeps it.
+      const zigzagLeg: [number, number][] = Array.from(
+        { length: 200 },
+        (_, i) => [60 + i * 0.001 + (i % 2 ? 0.0002 : 0), 24 + i * 0.002] as [number, number],
+      )
+      seed(h, zigzagLeg)
+      const wide: [number, number, number, number] = [23.9, 59.9, 24.5, 60.3]
+      const close: [number, number, number, number] = [24.1, 60.05, 24.12, 60.06]
+
+      const out = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true, bbox: wide })
+      const zoomed = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true, bbox: close })
+
+      expect(zoomed.features[0]!.properties.epsilon!).toBeLessThan(out.features[0]!.properties.epsilon!)
+      expect(zoomed.features[0]!.properties.pointCount).toBeGreaterThan(out.features[0]!.properties.pointCount)
+    })
+
+    // A box crossing the antimeridian is written west > east. Measured the
+    // long way round it would be ~360 degrees wide, and the tolerance would
+    // erase the track.
+    it('measures a box crossing the antimeridian the short way round', async () => {
+      const h = createHarness()
+      const crossing: [number, number][] = Array.from(
+        { length: 60 },
+        (_, i) => [10 + (i % 2 ? 0.00002 : 0), 179.97 + i * 0.001] as [number, number],
+      ).map(([lat, lng]) => [lat, lng > 180 ? lng - 360 : lng] as [number, number])
+      seed(h, crossing)
+      const bbox: [number, number, number, number] = [179.9, 9.9, -179.9, 10.1]
+
+      const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], simplify: true, bbox })
+
+      expect(res.features[0]!.properties.epsilon).toBeCloseTo(boxDiagonal(bbox) / 1000, 6)
+      expect(res.features[0]!.properties.epsilon).toBeLessThan(100)
+    })
+
+    it('still honours an explicit epsilon', async () => {
+      const h = createHarness()
+      seed(h, leg)
+
+      const res = await providerOf(h).getTracks({
+        contexts: [SELF_CONTEXT],
+        simplify: true,
+        epsilon: 7,
+        bbox: [24.1, 60.05, 24.2, 60.1],
+      })
+
+      expect(res.features[0]!.properties.epsilon).toBe(7)
+    })
+
+    it('does not simplify on a bounding box alone', async () => {
+      const h = createHarness()
+      seed(h, leg)
+
+      const res = await providerOf(h).getTracks({ contexts: [SELF_CONTEXT], bbox: [24.1, 60.05, 24.2, 60.1] })
+
+      expect(res.features[0]!.properties).not.toHaveProperty('epsilon')
+      expect(res.features[0]!.properties.pointCount).toBe(200)
+    })
+  })
+
   // pointCount, from/to and bbox must describe what was returned, not what was
   // read from the store — a client drawing the bbox of an unsimplified track
   // around a simplified one would draw the wrong box.
