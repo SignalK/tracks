@@ -129,6 +129,12 @@ export class SqliteTrackStore implements TrackStore {
   private readonly debug: Debug
   /** Timestamp of the last position stored per context, for throttling. */
   private readonly lastStored = new Map<string, number>()
+  /**
+   * The stored name per context, dated by its newest report. A name arrives
+   * with every position, so a repeat is answered here instead of committing a
+   * row that has not changed.
+   */
+  private readonly lastName = new Map<string, { name: string; timestamp: number }>()
 
   constructor(config: SqliteStoreConfig, debug: Debug) {
     this.maxCells = config.maxCells ?? DEFAULT_MAX_CELLS
@@ -382,7 +388,17 @@ export class SqliteTrackStore implements TrackStore {
     if (trimmed === '') {
       return
     }
-    this.insertName.run(context, trimmed, timestamp)
+    const seen = this.lastName.get(context)
+    if (seen && seen.timestamp > timestamp) {
+      return
+    }
+    if (seen?.name === trimmed) {
+      seen.timestamp = timestamp
+      return
+    }
+    if (Number(this.insertName.run(context, trimmed, timestamp).changes) > 0) {
+      this.lastName.set(context, { name: trimmed, timestamp })
+    }
   }
 
   nameFor(context: Context): string | undefined {
@@ -404,9 +420,12 @@ export class SqliteTrackStore implements TrackStore {
       )
       .run(cutoff, keep ?? null)
     // A vessel that has aged out takes its name with it, or this table grows
-    // for every target a harbour ever put past the receiver.
+    // for every target a harbour ever put past the receiver. The remembered
+    // copy goes too, or a vessel returning under the same name would be taken
+    // as already stored and never written again.
     for (const { context } of dropped) {
       this.db.prepare('DELETE FROM names WHERE context = ?').run(context)
+      this.lastName.delete(context)
     }
     // The write-throttle map is keyed by context and nothing else clears it, so
     // without this every vessel that ever passed leaves an entry behind — an
@@ -429,7 +448,19 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   close(): void {
-    this.db.close()
+    // Repeats of a stored name are dated in memory only. Writing the newest
+    // dates back here, in one transaction, lets a reopened store rank a late
+    // report against the newest one rather than against the first.
+    try {
+      const redate = this.db.prepare('UPDATE names SET timestamp = ? WHERE context = ? AND name = ? AND timestamp < ?')
+      this.db.exec('BEGIN')
+      for (const [context, { name, timestamp }] of this.lastName) {
+        redate.run(timestamp, context, name, timestamp)
+      }
+      this.db.exec('COMMIT')
+    } finally {
+      this.db.close()
+    }
   }
 
   /** Unsigned round-trip check, used by the tests. */
