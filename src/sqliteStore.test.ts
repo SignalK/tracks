@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it } from 'vitest'
 import { s2 } from 's2js'
 import { SqliteTrackStore } from './sqliteStore.js'
@@ -332,6 +333,66 @@ describe('remembered names', () => {
     store.close()
   })
 
+  it('commits nothing when a vessel repeats its stored name', () => {
+    // The name arrives with every position, and each commit is an fsync.
+    // data_version on a second connection changes whenever another connection
+    // commits, so it sees exactly what reached the database.
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-name-'))
+    const file = join(dir, 'tracks.db')
+    const store = new SqliteTrackStore({ file }, debug)
+    const observer = new DatabaseSync(file)
+    const dataVersion = (): unknown => observer.prepare('PRAGMA data_version').get()?.data_version
+    try {
+      store.recordName(ctx, 'Ariadne', 1000)
+      const before = dataVersion()
+
+      for (let t = 2000; t <= 60_000; t += 1000) {
+        store.recordName(ctx, 'Ariadne', t)
+      }
+      expect(dataVersion()).toBe(before)
+
+      // A change still commits, which also shows the observer can see one.
+      store.recordName(ctx, 'Ariadne II', 61_000)
+      expect(dataVersion()).not.toBe(before)
+    } finally {
+      observer.close()
+      store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('dates a repeated name by its newest report', () => {
+    // A repeat is not written, but it still outranks an older observation of
+    // a different name arriving late.
+    const store = newStore()
+
+    store.recordName(ctx, 'Current', 1000)
+    store.recordName(ctx, 'Current', 3000)
+    store.recordName(ctx, 'Stale', 2000)
+
+    expect(store.nameFor(ctx)).toBe('Current')
+    store.close()
+  })
+
+  it('keeps that newest date across a restart', () => {
+    // The plugin closes and reopens the store on every settings save.
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-name-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const first = new SqliteTrackStore({ file }, debug)
+      first.recordName(ctx, 'Current', 1000)
+      first.recordName(ctx, 'Current', 3000)
+      first.close()
+
+      const reopened = new SqliteTrackStore({ file }, debug)
+      reopened.recordName(ctx, 'Stale', 2000)
+      expect(reopened.nameFor(ctx)).toBe('Current')
+      reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('forgets the name of a vessel that ages out', () => {
     // Otherwise this table grows for every target a harbour puts past the
     // receiver, long after the positions themselves are gone.
@@ -344,6 +405,18 @@ describe('remembered names', () => {
     store.prune(24 * 60 * 60 * 1000, ctx)
 
     expect(store.nameFor(other)).toBeUndefined()
+    store.close()
+  })
+
+  it('stores the name again for a vessel that returns after aging out', () => {
+    const store = newStore()
+
+    store.newPosition(other, [60, 24], Date.now() - 10 * 24 * 60 * 60 * 1000)
+    store.recordName(other, 'Returning')
+    store.prune(24 * 60 * 60 * 1000, ctx)
+    store.recordName(other, 'Returning')
+
+    expect(store.nameFor(other)).toBe('Returning')
     store.close()
   })
 
