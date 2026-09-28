@@ -2,7 +2,7 @@ import { Temporal } from '@js-temporal/polyfill'
 import { M_PER_DEG, simplify } from './simplify.js'
 import { segment, thinToBudget } from './timeWindow.js'
 import type { TrackStore } from './store.js'
-import type { TrackApi, TrackFeature, TracksRequest, TracksResponse } from './trackApi.js'
+import type { TrackApi, TrackBoundingBox, TrackFeature, TracksRequest, TracksResponse } from './trackApi.js'
 import type { GeoBounds, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
 import { toIsoTimes } from './utils.js'
 
@@ -268,10 +268,8 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
         // shape budget on points that are about to be dropped anyway.
         //
         // `epsilon` implies `simplify`, per the spec. With `simplify` and no
-        // epsilon the tolerance is chosen from the track's own extent, which
-        // is the spec's "a tolerance suited to the size of the box" — derived
-        // from what was actually returned rather than from the query, so a
-        // bbox-less request still gets a sensible one.
+        // epsilon the tolerance is sized to the query's box, or to the track
+        // itself when there is none; see chooseEpsilon.
         //
         // Segmenting comes first and each segment is simplified on its own.
         // The simplifier has no notion of a time gap, so given the whole track
@@ -332,15 +330,16 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
  *
  * `epsilon` implies `simplify=true`, so an explicit tolerance is honoured
  * whether or not the flag came with it. `simplify` alone leaves the tolerance
- * to the provider: the spec says "a tolerance suited to the size of the box",
- * and the extent of the track *as thinning left it* is the honest basis for
- * that — a query bbox may be absent, and when present it is what the client
- * searched in rather than what came back. It cannot be the simplified extent,
- * since that is the thing being computed.
+ * to the provider, and the spec asks for one "suited to the size of the box":
+ * with a `bbox` it is sized to that box, which for a chart viewer is its view,
+ * so detail follows the zoom. With no box the choice is the provider's, and
+ * the extent of the track *as thinning left it* stands in -- not the
+ * simplified extent, since that is the thing being computed. A `bbox` without
+ * `simplify` simplifies nothing.
  *
- * Chosen from the whole track rather than per segment, so every leg of one
- * track is simplified to the same tolerance and the single reported `epsilon`
- * describes all of them.
+ * Chosen once per track rather than per segment, so every leg of one track is
+ * simplified to the same tolerance and the single reported `epsilon` describes
+ * all of them.
  *
  * A non-positive `epsilon` is not reachable through the API — the schema
  * declares `exclusiveMinimum: 0`, so the server rejects it — and is treated
@@ -353,17 +352,25 @@ function chooseEpsilon(points: TimedPosition[], query: TracksRequest): number | 
   if (explicit !== undefined && explicit > 0) {
     return explicit
   }
-  return query.simplify === true ? autoEpsilon(points) : undefined
+  if (query.simplify !== true) {
+    return undefined
+  }
+  if (query.bbox) {
+    return extentEpsilon(query.bbox)
+  }
+  const bounds = boundsOf(points)
+  return bounds ? extentEpsilon(bounds) : undefined
 }
 
 /**
- * How much of a track's own extent the automatic tolerance may deviate by.
+ * How much of an extent -- the query box, or the track without one -- the
+ * automatic tolerance may deviate by.
  *
- * One part in a thousand. Provisional while the v2 API is designed in
- * SignalK/signalk-server#2504: it is only a provider-chosen default for
- * `simplify` without an explicit epsilon, and a client that calibrates against
- * the exact ratio rather than reading the reported `epsilon` back would make
- * it expensive to change.
+ * One part in a thousand: across a view that is roughly one screen pixel.
+ * Provisional while the v2 API is designed in SignalK/signalk-server#2504: it
+ * is only a provider-chosen default for `simplify` without an explicit
+ * epsilon, and a client that calibrates against the exact ratio rather than
+ * reading the reported `epsilon` back would make it expensive to change.
  */
 const AUTO_EPSILON_DIVISOR = 1000
 
@@ -377,23 +384,19 @@ const AUTO_EPSILON_DIVISOR = 1000
 const MIN_AUTO_EPSILON = 1
 
 /**
- * A tolerance scaled to how much ground a track covers.
+ * A tolerance scaled to how much ground an extent covers.
  *
- * One part in a thousand of the track's diagonal: enough to drop the jitter of
- * a boat holding station while keeping every turn a passage is made of. A
- * fixed metre value cannot do both — 10 m erases nothing on an ocean crossing
- * and erases a marina approach entirely.
+ * One part in a thousand of its diagonal. For a track that drops the jitter of
+ * a boat holding station while keeping every turn a passage is made of; for a
+ * view it keeps what a pixel can show. A fixed metre value cannot do either —
+ * 10 m erases nothing on an ocean crossing and erases a marina approach
+ * entirely.
  */
-function autoEpsilon(points: TimedPosition[]): number | undefined {
-  const bounds = boundsOf(points)
-  if (!bounds) {
-    return undefined
-  }
-  const [west, south, east, north] = bounds
+function extentEpsilon([west, south, east, north]: TrackBoundingBox): number {
   const midLat = (south + north) / 2
   const height = (north - south) * M_PER_DEG
-  // boundsOf writes an antimeridian-crossing box as west > east (RFC 7946), so
-  // a plain subtraction turns a tenth of a degree into -359.8 and the derived
+  // A box crossing the antimeridian is written west > east (RFC 7946), so a
+  // plain subtraction turns a tenth of a degree into -359.8 and the derived
   // tolerance into something that would erase the whole track.
   const lngSpan = east >= west ? east - west : east + 360 - west
   const width = lngSpan * M_PER_DEG * Math.cos((midLat * Math.PI) / 180)

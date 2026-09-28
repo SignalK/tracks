@@ -1,6 +1,8 @@
 # Categories for the release notes GitHub generates at tag time, so the
 # changelog comes from merged PRs rather than a hand-maintained file that goes
-# stale. See .github/workflows/release_on_tag.yml.
+# stale. release-please asks GitHub for these notes (changelog-type: github in
+# release-please-config.json), and so does release_on_tag.yml for a pre-release
+# tag pushed by hand.
 #
 # A PR lands in the first category it matches, so order matters: dependencies
 # are listed before the catch-all, and the catch-all is last.
@@ -12,6 +14,10 @@ changelog:
   exclude:
     labels:
       - skip-changelog
+      # release-please's own release PR, merged right before each tag —
+      # it would otherwise list itself.
+      - 'autorelease: pending'
+      - 'autorelease: tagged'
   categories:
     - title: 🚀 Features
       labels:

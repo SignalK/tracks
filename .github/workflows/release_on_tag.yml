@@ -1,12 +1,15 @@
 # ─────────────────────────────────────────────────────────────
 # Release and publish on tag
 #
-# Turns a pushed v* tag into a GitHub Release whose notes are
-# generated from the PR titles merged since the previous tag —
-# so release notes come from the commit history rather than a
-# hand-maintained CHANGELOG file — and then publishes that same
-# commit to npm.
+# Publishes the tag it runs on to npm. Release tags come from
+# release-please: merging its release PR creates the tag and the
+# GitHub Release, then release-please.yml dispatches this workflow
+# on the tag. Pre-release tags (-beta., -rc., -alpha.) are pushed by
+# hand, and only a pushed tag gets its GitHub Release created here.
 #
+# Either way the notes are generated from the PR titles merged since
+# the previous tag, so release notes come from the commit history
+# rather than a hand-maintained CHANGELOG file.
 # .github/release.yml groups those titles into sections by PR label.
 #
 # Publishing from the tag is what keeps the npm version and the
@@ -25,13 +28,19 @@ on:
   push:
     tags:
       - 'v*'
+  # How release-please.yml starts this on a tag it created: that tag, pushed
+  # with GITHUB_TOKEN, raises no push event.
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  # A dispatched run is on a tag release-please made, and release-please made
+  # its Release too; creating one here would be a second for the same tag.
   release:
+    if: ${{ github.event_name == 'push' }}
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -49,6 +58,10 @@ jobs:
 
   publish:
     needs: release
+    # Runs after the Release on a pushed tag, and without it on a dispatched
+    # one, where that job is skipped. A dispatch can name any ref; only a
+    # release tag is published.
+    if: ${{ !cancelled() && needs.release.result != 'failure' && startsWith(github.ref, 'refs/tags/v') }}
     permissions:
       # Trusted publishing: npm exchanges this token for publish rights, so no
       # NPM_TOKEN secret is needed and the tarball carries a provenance
