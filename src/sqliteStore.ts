@@ -147,6 +147,12 @@ export class SqliteTrackStore implements TrackStore {
     // WAL keeps a reader from blocking the writer, which matters because
     // positions arrive continuously while a query is being served.
     this.db.exec('PRAGMA journal_mode = WAL')
+    // node:sqlite defaults to FULL, an fsync on every commit, and on an SD
+    // card each one can stall the server's event loop for seconds. NORMAL
+    // syncs only at checkpoints. A power cut can then lose the most recent
+    // commits but never corrupts the database, and a process crash loses
+    // nothing. It is a per-connection setting, so it is set on every open.
+    this.db.exec('PRAGMA synchronous = NORMAL')
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS positions (
         context   TEXT    NOT NULL,

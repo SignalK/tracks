@@ -429,3 +429,19 @@ describe('remembered names', () => {
     store.close()
   })
 })
+
+describe('the connection', () => {
+  it('syncs at checkpoints rather than on every commit', () => {
+    // A per-connection setting that node:sqlite opens at FULL, so this reads
+    // the store's own connection rather than opening another.
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-sync-'))
+    const store = new SqliteTrackStore({ file: join(dir, 'tracks.db') }, debug)
+    try {
+      // 1 is NORMAL; FULL would be 2.
+      expect(store['db'].prepare('PRAGMA synchronous').get()).toEqual({ synchronous: 1 })
+    } finally {
+      store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
