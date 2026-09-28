@@ -184,8 +184,37 @@ export function parseTrackQuery(
 }
 
 /**
+ * The time between two points that no history bucket either side can account
+ * for.
+ *
+ * Providers disagree on whether a bucket's timestamp marks its start or its
+ * end, so a bucket may cover up to its width on either side of it. Two
+ * buckets, however, cover the time between their timestamps once between
+ * them, so one width is taken off, the wider of the two: exact between
+ * buckets under either convention, and between a fix and a bucket never more
+ * than the pause could be.
+ */
+export function uncoveredBetween(previous: TimedPosition, point: TimedPosition): number {
+  return point.timestamp - previous.timestamp - Math.max(previous.span ?? 0, point.span ?? 0)
+}
+
+/**
+ * The pause in the recording between two consecutive points: where thinning
+ * dropped the points between them, the longest pause among those it recorded,
+ * and otherwise whatever of the time between them no bucket accounts for.
+ */
+export function pauseBetween(previous: TimedPosition, point: TimedPosition): number {
+  return point.pauseBefore ?? uncoveredBetween(previous, point)
+}
+
+/**
  * Drop points closer together than `resolution` milliseconds, always keeping
  * the first and last so the track keeps its extent.
+ *
+ * A point kept after dropped ones records the longest pause among them as
+ * `pauseBefore`: the kept points are further apart than anything recorded
+ * between them, so without it `segment()` would read the spacing thinning
+ * made as a stop in the recording.
  */
 export function thin(points: TimedPosition[], resolution: number | undefined): TimedPosition[] {
   if (!resolution || points.length <= 2) {
@@ -193,15 +222,25 @@ export function thin(points: TimedPosition[], resolution: number | undefined): T
   }
   const result: TimedPosition[] = []
   let lastKept = Number.NEGATIVE_INFINITY
+  let previous: TimedPosition | undefined
+  // The longest pause since the last kept point, while points are being dropped.
+  let droppedPause: number | undefined
+  let keptLast = false
   for (const point of points) {
-    if (point.timestamp - lastKept >= resolution) {
-      result.push(point)
+    const pause = previous ? pauseBetween(previous, point) : 0
+    keptLast = point.timestamp - lastKept >= resolution
+    if (keptLast) {
+      result.push(droppedPause === undefined ? point : { ...point, pauseBefore: Math.max(droppedPause, pause) })
       lastKept = point.timestamp
+      droppedPause = undefined
+    } else {
+      droppedPause = Math.max(droppedPause ?? pause, pause)
     }
+    previous = point
   }
   const last = points[points.length - 1]
-  if (last && result[result.length - 1] !== last) {
-    result.push(last)
+  if (last && !keptLast) {
+    result.push({ ...last, pauseBefore: droppedPause ?? 0 })
   }
   return result
 }
@@ -262,9 +301,10 @@ export function thinToBudget(
  * over an anchorage it actually sat still in.
  *
  * Operates on timestamped points rather than inside a store, so both the
- * in-memory and sqlite stores segment identically, and so it composes with
- * `thin()` — thinning first, then segmenting, keeps a thinned-away gap from
- * being invented as a join.
+ * in-memory and sqlite stores segment identically. A gap is a pause in the
+ * recording, not in the points given: see `pauseBetween`, which lets a
+ * thinned track, or one reconciled with history buckets, segment exactly as
+ * the recording would.
  *
  * `gap` of 0 or undefined returns a single segment, preserving the old shape.
  * An empty input returns no segments rather than one empty one, so a caller can
@@ -279,14 +319,14 @@ export function segment(points: TimedPosition[], gap: number | undefined): Timed
   }
   const segments: TimedPosition[][] = []
   let current: TimedPosition[] = []
-  let previous: number | undefined
+  let previous: TimedPosition | undefined
   for (const point of points) {
-    if (previous !== undefined && point.timestamp - previous > gap) {
+    if (previous !== undefined && pauseBetween(previous, point) > gap) {
       segments.push(current)
       current = []
     }
     current.push(point)
-    previous = point.timestamp
+    previous = point
   }
   if (current.length > 0) {
     segments.push(current)

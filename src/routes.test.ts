@@ -1089,3 +1089,76 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     ).toEqual(fromJson)
   })
 })
+
+// Thinning spaces points further apart than the gap, so a thinned track must
+// not be segmented at the gap alone (#133).
+describe('segment gaps on a thinned track', () => {
+  const MINUTE = 60_000
+  // One fix a minute, fifteen minutes long, gap setting two minutes: any split
+  // in this stretch is one that thinning invented.
+  const seedContinuous = (h: TestHarness, start: number, minutes = 15) =>
+    h.seedTrack(
+      SELF_CONTEXT,
+      Array.from({ length: minutes }, (_, i): [number, number] => [60 + i * 0.001, 24]),
+      Array.from({ length: minutes }, (_, i) => start + i * MINUTE),
+    )
+
+  it('keeps a continuous track in one segment at a resolution wider than the gap', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24], config: { segmentGapMinutes: 2 } }))
+    seedContinuous(h, Date.now() - 30 * MINUTE)
+
+    const res = await request(h.app).get(`${API}/vessels/self/track?duration=1h&resolution=3m`).expect(200)
+
+    expect(res.body.coordinates).toHaveLength(1)
+    // A segment of one point draws nothing, which is what the bug looked like.
+    expect(res.body.coordinates[0].length).toBeGreaterThan(1)
+  })
+
+  it('does the same for /tracks?times', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24], config: { segmentGapMinutes: 2 } }))
+    seedContinuous(h, Date.now() - 30 * MINUTE)
+
+    const res = await request(h.app).get(`${API}/tracks?duration=1h&resolution=3m&times`).expect(200)
+
+    expect(res.body[SELF_CONTEXT].coordinates).toHaveLength(1)
+    expect(res.body[SELF_CONTEXT].times).toHaveLength(1)
+  })
+
+  it('breaks /tracks?times exactly at a short stop the store thinned around', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24], config: { segmentGapMinutes: 2 } }))
+    const start = Date.now() - 50 * MINUTE
+    // Ten minutes, a five-minute stop, ten more: longer than the gap, but
+    // shorter than the spacing the store thins these points to.
+    const minutes = [...Array.from({ length: 10 }, (_, i) => i), ...Array.from({ length: 10 }, (_, i) => 14 + i)]
+    h.seedTrack(
+      SELF_CONTEXT,
+      minutes.map((m): [number, number] => [60 + m * 0.001, 24]),
+      minutes.map((m) => start + m * MINUTE),
+    )
+
+    const res = await request(h.app).get(`${API}/tracks?duration=1h&resolution=3m&times`).expect(200)
+
+    expect(res.body[SELF_CONTEXT].coordinates).toHaveLength(2)
+  })
+
+  it('still breaks where the recording actually stopped', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24], config: { segmentGapMinutes: 2 } }))
+    const start = Date.now() - 50 * MINUTE
+    // An hour-long stop is far beyond the gap plus twice the spacing.
+    h.seedTrack(
+      SELF_CONTEXT,
+      [
+        [60, 24],
+        [60.001, 24],
+        [60.002, 24],
+        [60.1, 24],
+        [60.101, 24],
+      ],
+      [start, start + MINUTE, start + 2 * MINUTE, start + 40 * MINUTE, start + 41 * MINUTE],
+    )
+
+    const res = await request(h.app).get(`${API}/vessels/self/track?duration=1h&resolution=3m`).expect(200)
+
+    expect(res.body.coordinates).toHaveLength(2)
+  })
+})

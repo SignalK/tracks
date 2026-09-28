@@ -1,3 +1,4 @@
+import { uncoveredBetween } from './timeWindow.js'
 import type { TimedPosition } from './types.js'
 
 /**
@@ -83,10 +84,27 @@ export function reconcile(history: TimedPosition[], stored: TimedPosition[], res
 
   positions.sort((a, b) => a.timestamp - b.timestamp)
   return {
-    positions,
+    positions: measuredFromHistory(positions, history),
     fromHistory,
     fromStore: positions.length - fromHistory,
   }
+}
+
+/**
+ * A stored point's `pauseBefore` was measured over the stored points thinning
+ * dropped before it. Where a history point now comes right before it, history
+ * covered part of that time, so the pause is at most the time since that
+ * bucket, and at most the longest step the store recorded, whichever is less.
+ */
+function measuredFromHistory(positions: TimedPosition[], history: TimedPosition[]): TimedPosition[] {
+  const fromHistory = new Set(history)
+  return positions.map((point, i) => {
+    const before = positions[i - 1]
+    if (point.pauseBefore === undefined || before === undefined || !fromHistory.has(before)) {
+      return point
+    }
+    return { ...point, pauseBefore: Math.min(point.pauseBefore, uncoveredBetween(before, point)) }
+  })
 }
 
 /**
@@ -112,7 +130,7 @@ function reconcileByExtent(history: TimedPosition[], stored: TimedPosition[]): R
   const outside = stored.filter((p) => p.timestamp < first || p.timestamp > last)
   const positions = [...history, ...outside].sort((a, b) => a.timestamp - b.timestamp)
   return {
-    positions,
+    positions: measuredFromHistory(positions, history),
     fromHistory: history.length,
     fromStore: outside.length,
   }

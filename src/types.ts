@@ -13,6 +13,18 @@ export type LngLatTuple = [number, number]
 export interface TimedPosition {
   position: LatLngTuple
   timestamp: number
+  /**
+   * The longest pause in the recording between the point before this one and
+   * this one, set where thinning dropped the points in between. Without it,
+   * the time between the two is itself the recorded step.
+   */
+  pauseBefore?: number
+  /**
+   * The stretch of time this point stands for, when it is a history
+   * provider's bucket rather than a fix. The fixes it summarises can lie
+   * anywhere in that stretch.
+   */
+  span?: number
 }
 
 /**
