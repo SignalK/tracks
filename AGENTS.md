@@ -18,28 +18,30 @@ The package is **ESM only** (`"type": "module"`) and ships `dist/` plus the weba
 npm ci
 npm run build      # vite library build -> dist/index.js + rolled-up index.d.ts
 npm test           # vitest
-npm run test:e2e   # real signalk-server + real QuestDB; never in CI
+npm run test:e2e   # real signalk-server + real QuestDB; its own CI job
 npm run typecheck  # tsc --noEmit (also run inside the build, via vite-plugin-checker)
 npm run lint       # eslint flat config
 npm run format     # prettier --write
 ```
 
-**`npm run test:e2e` needs a built `signalk-server` checkout.** It packs the plugin with
+**`npm run test:e2e` needs a `signalk-server` to boot.** It packs the plugin with
 `npm pack`, installs the tarball into a throwaway config dir, boots a real server against it,
 and feeds positions as deltas over the WebSocket API. That covers what the unit suite mocks:
 that the server can resolve and load the package at all (the `main`-vs-`exports` trap above),
 that `signalKApiRoutes` mounts where it should, and that deltas reach the plugin through the
 real streambundle.
 
-Point it at a checkout with `SIGNALK_SERVER_DIR`, default `~/dev/xxx_signalk-server`; build
-that checkout first with `npm run build:all`.
+Point `SIGNALK_SERVER_DIR` at a checkout, default `~/dev/xxx_signalk-server`, built first with
+`npm run build:all`, or at an installed package's `node_modules/signalk-server`. CI does the
+latter, against the oldest release with the v2 Track API and the newest.
 
 The second tier installs **signalk-questdb** into that server and exercises the query-time
 reconciliation through `getHistoryApi()` for real. Test the History API contract, not a provider's storage: how
 questdb, influx or anything else keeps its rows is its own business, and a test asserting that
 would fail on a provider change that this plugin is unaffected by. It skips itself when nothing
 answers at `QUESTDB_URL` (default `http://localhost:9000`), so the server tier still runs
-without it.
+without it. A skipped test there counts as passed, so `QUESTDB_REQUIRED` makes a missing
+QuestDB fail the run instead; CI sets it and runs QuestDB as a service container.
 
 `tsconfig.json` extends `@tsconfig/node24`, the same base `signalk-server` uses, so both agree on
 which built-ins exist rather than drifting apart. Two options are overridden deliberately: that base
@@ -92,7 +94,7 @@ error in an unrelated file should not stop the suite.
 - **PR titles become release notes.** release-please asks GitHub to generate the notes from merged PR titles and their authors, so write the title as the line you'd want a user to read in the changelog. There is no CHANGELOG file to maintain.
 - **Labels only group the release notes, and they are optional.** `.github/release.yml` maps labels to sections and is the list to pick from. An unlabelled PR still appears, under Other. `skip-changelog` leaves a PR out entirely, for changes with nothing to tell a user such as most `ci:` and `chore:` work. Labelling a PR takes triage access or above, which outside contributors do not have, so it is for a maintainer to do before merging; nothing enforces it, and the version never depends on it.
 - **Branch from latest `main`.** Hyphens in branch names, not slashes.
-- **CI must be green.** `.github/workflows/signalk-ci.yml` calls the canonical `SignalK/signalk-server` reusable workflow across Linux x64/arm64, macOS and Windows on Node 22 and 24.
+- **CI must be green.** `.github/workflows/signalk-ci.yml` calls the canonical `SignalK/signalk-server` reusable workflow across Linux x64/arm64, macOS and Windows on Node 22 and 24, and its `e2e` job runs `npm run test:e2e` against signalk-server from npm.
 - **This file is the review baseline too.** `.coderabbit.yaml` points CodeRabbit here rather than restating the conventions, so a rule added below applies to automated review as well. If a review comment contradicts this file, the review is wrong — or this file is out of date, which is itself worth fixing.
 
 ## Traps worth knowing

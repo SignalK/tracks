@@ -53,6 +53,11 @@ async function eventually<T>(probe: () => Promise<T | undefined>, timeoutMs = 30
 beforeAll(async () => {
   available = await questdbAvailable()
   if (!available) {
+    // Each test below returns early without QuestDB and so counts as passed.
+    // CI provides one and sets this, so losing it there fails the run.
+    if (process.env.QUESTDB_REQUIRED) {
+      throw new Error(`No QuestDB listening at ${QUESTDB_URL}, and QUESTDB_REQUIRED is set`)
+    }
     console.warn(`No QuestDB listening at ${QUESTDB_URL}; history provider tests skipped`)
     return
   }
@@ -94,7 +99,17 @@ describe('bootstrap through a real history provider', () => {
     //
     // Registration is not instant: signalk-questdb POSTs itself to
     // _providers/_default a few seconds after start, so this polls.
+    //
+    // A fresh QuestDB holds nothing, and the list stays empty until the
+    // provider records something, so give it an own-vessel fix to record.
+    // Older than, and at the same spot as, what the later tests feed: the
+    // plugin drops a fix older than the last one it stored, and the glitch
+    // filter a jump it could not have sailed.
+    const seededAt = Date.now() - 10 * MINUTE
     const contexts = await eventually(async () => {
+      // Sent on every attempt, because a fix that arrives before the provider
+      // is recording is lost. Repeats share a timestamp, so the plugin keeps one.
+      await server!.feed(server!.selfContext, [60.1, 24.9], seededAt)
       const res = await fetch(`${server!.url}/signalk/v2/api/history/contexts?from=2026-01-01T00:00:00Z`)
       const body = (await res.json()) as string[]
       return body.length > 0 ? body : undefined
