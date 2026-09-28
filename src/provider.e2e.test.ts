@@ -53,6 +53,11 @@ async function eventually<T>(probe: () => Promise<T | undefined>, timeoutMs = 30
 beforeAll(async () => {
   available = await questdbAvailable()
   if (!available) {
+    // Each test below returns early without QuestDB and so counts as passed.
+    // CI provides one and sets this, so losing it there fails the run.
+    if (process.env.QUESTDB_REQUIRED) {
+      throw new Error(`No QuestDB listening at ${QUESTDB_URL}, and QUESTDB_REQUIRED is set`)
+    }
     console.warn(`No QuestDB listening at ${QUESTDB_URL}; history provider tests skipped`)
     return
   }

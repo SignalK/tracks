@@ -217,10 +217,13 @@ npm run format     # prettier --write
 
 `npm run test:e2e` packs the plugin, installs it into a throwaway config directory, boots a real
 Signal K server against it and feeds positions as deltas — so it covers plugin loading, route
-mounting and the delta path, none of which the unit suite can. It needs a built server checkout;
-set `SIGNALK_SERVER_DIR` if yours is not at `~/dev/xxx_signalk-server`. A second tier installs a
-real history provider (signalk-questdb) into that server and exercises the reconciliation through
-it; it skips itself if no QuestDB is reachable at `QUESTDB_URL`. Neither tier runs in CI.
+mounting and the delta path, none of which the unit suite can. It needs a server to boot: a built
+checkout, by default at `~/dev/xxx_signalk-server`, or an installed package's
+`node_modules/signalk-server`, named with `SIGNALK_SERVER_DIR`. A second tier installs a real
+history provider (signalk-questdb) into that server and exercises the reconciliation through it; it
+skips itself if no QuestDB is reachable at `QUESTDB_URL`, unless `QUESTDB_REQUIRED` is set. CI runs
+both tiers against the oldest supported signalk-server release and the latest, with QuestDB as a
+service container.
 
 The package is ESM only and targets Node >= 22.5.0, the release that added `node:sqlite`. ESM alone
 would only need 20.19, the first release in which the Signal K server's `require()`-based plugin
