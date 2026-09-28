@@ -3,11 +3,11 @@
 #
 # Calls the shared SignalK reusable workflow, which builds and
 # tests this plugin across Linux x64, Linux arm64, macOS and
-# Windows. The plugin is a plain Node module plus an Express
-# router, so the integration slot (which starts a server and
-# installs the plugin into it) stays off — `npm test` already
-# covers the pure logic, and the plugin's own start()/stop()
-# path is exercised by the Signal K plugin registry.
+# Windows. Its integration slot (which starts one server and
+# checks the plugin loads) stays off, because the e2e job below
+# covers more: it runs this repo's own suite, which boots real
+# servers, installs the packed plugin as a user would, and adds
+# a real history provider backed by QuestDB.
 # ─────────────────────────────────────────────────────────────
 
 name: SignalK Plugin CI
@@ -70,3 +70,62 @@ jobs:
       node-versions: ${{ inputs.node-versions }}
       enable-armv7: ${{ inputs.enable-armv7 }}
       enable-signalk-integration: ${{ inputs.enable-signalk-integration }}
+
+  # ── End-to-end suite against a published server ───────────
+  # `npm run test:e2e` against signalk-server from npm: the oldest
+  # release with the v2 Track API, which the README names as the
+  # minimum, and the newest.
+  e2e:
+    name: e2e / signalk-server ${{ matrix.signalk-server }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        signalk-server: ['2.33.0', 'latest']
+    services:
+      # `latest` is what signalk-questdb runs for its users unless they pin
+      # a version. The plugin is configured not to manage a container, only
+      # to reach this one.
+      questdb:
+        image: questdb/questdb:latest
+        ports:
+          - 9000:9000
+          - 9009:9009
+          - 8812:8812
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install signalk-server ${{ matrix.signalk-server }}
+        env:
+          SIGNALK_SERVER_VERSION: ${{ matrix.signalk-server }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/signalk"
+          cd "$RUNNER_TEMP/signalk"
+          npm init -y > /dev/null
+          npm install "signalk-server@$SIGNALK_SERVER_VERSION"
+          node -p "'signalk-server ' + require('./node_modules/signalk-server/package.json').version"
+
+      # The service is up before the steps start, but QuestDB takes a few
+      # seconds more to answer queries. The build is logged because the image
+      # tag floats: a failure after a QuestDB release names the one it ran.
+      - name: Wait for QuestDB
+        run: |
+          curl --silent --fail --retry 30 --retry-delay 2 --retry-all-errors --output /dev/null 'http://localhost:9000/exec?query=select%201'
+          curl --silent --fail 'http://localhost:9000/exec?query=select%20build()' | jq -r '.dataset[0][0]'
+
+      - name: Run the e2e suite
+        env:
+          SIGNALK_SERVER_DIR: ${{ runner.temp }}/signalk/node_modules/signalk-server
+          QUESTDB_URL: http://localhost:9000
+          QUESTDB_REQUIRED: 'true'
+        run: npm run test:e2e

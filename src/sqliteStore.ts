@@ -148,7 +148,16 @@ export class SqliteTrackStore implements TrackStore {
     this.db = new DatabaseSync(config.file)
     // WAL keeps a reader from blocking the writer, which matters because
     // positions arrive continuously while a query is being served.
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000')
+    this.db.exec('PRAGMA journal_mode = WAL')
+    // node:sqlite defaults to FULL, an fsync on every commit, and on an SD
+    // card each one can take seconds. NORMAL syncs only at checkpoints. A
+    // power cut can then lose the most recent commits but never corrupts the
+    // database, and a process crash loses nothing. It is a per-connection
+    // setting, so it is set on every open.
+    this.db.exec('PRAGMA synchronous = NORMAL')
+    // A lock held by another connection, a backup or an sqlite3 shell say, is
+    // waited out rather than failing the write at once.
+    this.db.exec('PRAGMA busy_timeout = 5000')
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS positions (
         context   TEXT    NOT NULL,

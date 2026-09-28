@@ -14,11 +14,14 @@ import { join } from 'node:path'
  * `signalKApiRoutes` actually mounts under /signalk/v1/api, and that positions
  * arriving as deltas reach the plugin through the real streambundle.
  *
- * Deliberately not in CI. It needs a built server checkout and, for the
- * history-provider tests, a running QuestDB.
+ * It needs a server to boot and, for the history-provider tests, a running
+ * QuestDB, so it has its own CI job that provides both.
  */
 
-/** Where the signalk-server checkout lives. Override with SIGNALK_SERVER_DIR. */
+/**
+ * A built signalk-server checkout, or an installed package's
+ * `node_modules/signalk-server`. Override with SIGNALK_SERVER_DIR.
+ */
 const SERVER_DIR = process.env.SIGNALK_SERVER_DIR ?? join(process.env.HOME ?? '', 'dev/xxx_signalk-server')
 
 /** QuestDB endpoint used by the history-provider tier. */

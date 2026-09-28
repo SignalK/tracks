@@ -19,7 +19,7 @@ npm ci
 npm run build      # vite library build -> dist/index.js, trackStoreWorker.js + index.d.ts
 npm test           # vitest; global setup builds the worker entry first
 npm run test:watch # rebuilds the worker before each rerun
-npm run test:e2e   # real signalk-server + real QuestDB; never in CI
+npm run test:e2e   # real signalk-server + real QuestDB; its own CI job
 npm run typecheck  # tsc --noEmit (also run inside the build, via vite-plugin-checker)
 npm run lint       # eslint flat config
 npm run format     # prettier --write
@@ -31,22 +31,24 @@ build. Worker dependencies trigger a full rerun because Vitest cannot see across
 the thread boundary. Direct `vitest` invocation also runs this setup. Production
 packaging still uses `npm run build` and must be smoke-tested from the tarball.
 
-**`npm run test:e2e` needs a built `signalk-server` checkout.** It packs the plugin with
+**`npm run test:e2e` needs a `signalk-server` to boot.** It packs the plugin with
 `npm pack`, installs the tarball into a throwaway config dir, boots a real server against it,
 and feeds positions as deltas over the WebSocket API. That covers what the unit suite mocks:
 that the server can resolve and load the package at all (the `main`-vs-`exports` trap above),
 that `signalKApiRoutes` mounts where it should, and that deltas reach the plugin through the
 real streambundle.
 
-Point it at a checkout with `SIGNALK_SERVER_DIR`, default `~/dev/xxx_signalk-server`; build
-that checkout first with `npm run build:all`.
+Point `SIGNALK_SERVER_DIR` at a checkout, default `~/dev/xxx_signalk-server`, built first with
+`npm run build:all`, or at an installed package's `node_modules/signalk-server`. CI does the
+latter, against the oldest release with the v2 Track API and the newest.
 
 The second tier installs **signalk-questdb** into that server and exercises the query-time
 reconciliation through `getHistoryApi()` for real. Test the History API contract, not a provider's storage: how
 questdb, influx or anything else keeps its rows is its own business, and a test asserting that
 would fail on a provider change that this plugin is unaffected by. It skips itself when nothing
 answers at `QUESTDB_URL` (default `http://localhost:9000`), so the server tier still runs
-without it.
+without it. A skipped test there counts as passed, so `QUESTDB_REQUIRED` makes a missing
+QuestDB fail the run instead; CI sets it and runs QuestDB as a service container.
 
 `tsconfig.json` extends `@tsconfig/node24`, the same base `signalk-server` uses, so both agree on
 which built-ins exist rather than drifting apart. Two options are overridden deliberately: that base
@@ -97,9 +99,9 @@ error in an unrelated file should not stop the suite.
 - **Releases are cut by release-please.** Every releasable push to `main` updates a standing release PR titled `chore(release): X.Y.Z`; merging it bumps `package.json`, creates the tag and the GitHub Release, and `.github/workflows/release-please.yml` then dispatches `release_on_tag.yml` on the tag to publish to npm. The version follows the commits: `feat` → minor, `fix` and other releasable types → patch, `!` or a `BREAKING CHANGE:` footer → major; a `Release-As: X.Y.Z` footer overrides it. Do not bump the version in an ordinary PR. Pre-releases (`-beta.N`, `-rc.N`) are still tagged by hand, and `release_on_tag.yml` creates their Release itself.
 - **A push with nothing releasable does not touch the release PR.** A gate in `.github/workflows/release-please.yml` decides what counts; its comment lists the cases. Two rules follow from it: revert with a conventional `revert:` subject, since release-please ignores GitHub's `Revert "…"`, and change the gate's last alternative together with `pull-request-title-pattern` in `release-please-config.json`, or the release PR's merge never creates a tag. Dependabot scopes its commits (`build(deps)`, `build(deps-dev)`, `ci(deps)`) so the gate can tell a runtime bump from the rest.
 - **PR titles become release notes.** release-please asks GitHub to generate the notes from merged PR titles and their authors, so write the title as the line you'd want a user to read in the changelog. There is no CHANGELOG file to maintain.
-- **Every PR needs exactly one release-notes label**, enforced by `.github/workflows/require_pr_label.yml`. `.github/release.yml` groups the notes: `feature`/`enhancement` → 🚀 Features, `bug`/`fix` → 🐛 Fixes, `documentation` → 📖 Documentation, `dependencies` → 📦 Dependencies. `skip-changelog` omits the PR entirely — for changes with nothing to tell a user. The two files list the same labels on purpose: adding one to the gate without a matching category in `release.yml` puts the PR back in the uncategorised "Other" bucket the gate exists to prevent.
+- **Labels only group the release notes, and they are optional.** `.github/release.yml` maps labels to sections and is the list to pick from. An unlabelled PR still appears, under Other. `skip-changelog` leaves a PR out entirely, for changes with nothing to tell a user such as most `ci:` and `chore:` work. Labelling a PR takes triage access or above, which outside contributors do not have, so it is for a maintainer to do before merging; nothing enforces it, and the version never depends on it.
 - **Branch from latest `main`.** Hyphens in branch names, not slashes.
-- **CI must be green.** `.github/workflows/signalk-ci.yml` calls the canonical `SignalK/signalk-server` reusable workflow across Linux x64/arm64, macOS and Windows on Node 22 and 24.
+- **CI must be green.** `.github/workflows/signalk-ci.yml` calls the canonical `SignalK/signalk-server` reusable workflow across Linux x64/arm64, macOS and Windows on Node 22 and 24, and its `e2e` job runs `npm run test:e2e` against signalk-server from npm.
 - **This file is the review baseline too.** `.coderabbit.yaml` points CodeRabbit here rather than restating the conventions, so a rule added below applies to automated review as well. If a review comment contradicts this file, the review is wrong — or this file is out of date, which is itself worth fixing.
 
 ## Traps worth knowing

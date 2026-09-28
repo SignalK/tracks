@@ -12,9 +12,11 @@ Neither is simply better than the other, which is why both are used.
 | Size                         | small                              | far larger, which is why retention exists        |
 
 The plugin writes its positions to a SQLite file in its data directory, so they
-survive a restart. How long they are kept depends on two settings: the own
-vessel's track is kept indefinitely by default, and another vessel is dropped
-30 days after its last fix.
+survive a restart. A power cut can still lose the most recent ones, because
+they are not forced onto the storage one at a time (on an SD card that would
+stall the whole server), but it cannot damage the file. How long they are kept
+depends on two settings: the own vessel's track is kept indefinitely by
+default, and another vessel is dropped 30 days after its last fix.
 
 So the provider is the finer record of the recent past, and the plugin's store
 is what remains of everything older. The interval and the retention are both

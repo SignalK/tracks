@@ -9,8 +9,6 @@ import type { E2EServer } from './e2e.test-utils.js'
  * that depend on packaging: that `public/` survives the `files` allowlist,
  * that the `signalk-webapp` keyword gets it mounted at all, and that it is
  * mounted where the page's own relative URLs expect.
- *
- * Deliberately not in CI, like the rest of the e2e tier.
  */
 describe('the webapp is served by a real server', () => {
   let server: E2EServer
