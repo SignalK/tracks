@@ -1,6 +1,7 @@
 import { Temporal } from '@js-temporal/polyfill'
 import { describe, expect, it, vi } from 'vitest'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
+import type { TestHarness } from './harness.test-utils.js'
 import type { TrackApi } from './trackApi.js'
 
 /**
@@ -1168,5 +1169,49 @@ describe('simplify in v2', () => {
 
     expect(cut.features[0]!.properties.from).toBe(full.features[0]!.properties.from)
     expect(cut.features[0]!.properties.to).toBe(full.features[0]!.properties.to)
+  })
+})
+
+// #133 through the v2 provider, where maxPoints can also widen the spacing.
+describe('segment gaps on a thinned track', () => {
+  const MINUTE = 60_000
+  // One fix a minute for fifteen minutes with a two-minute gap setting: any
+  // split in this stretch is one that thinning invented.
+  const seedContinuous = (h: TestHarness) => {
+    const start = Date.UTC(2026, 7, 14, 9, 0, 0)
+    h.seedTrack(
+      SELF_CONTEXT,
+      Array.from({ length: 15 }, (_, i): [number, number] => [60 + i * 0.001, 24]),
+      Array.from({ length: 15 }, (_, i) => start + i * MINUTE),
+    )
+  }
+  const segmentsOf = (res: Awaited<ReturnType<TrackApi['getTracks']>>) =>
+    (res.features[0]!.geometry as { coordinates: [number, number][][] }).coordinates
+
+  it('keeps one segment at a resolution wider than the gap', async () => {
+    const h = createHarness({ config: { segmentGapMinutes: 2 } })
+    try {
+      seedContinuous(h)
+
+      const res = await providerOf(h).getTracks({ resolution: Temporal.Duration.from({ minutes: 3 }) })
+
+      expect(segmentsOf(res)).toHaveLength(1)
+    } finally {
+      await h.stop()
+    }
+  })
+
+  it('keeps one segment when maxPoints widens the spacing past the gap', async () => {
+    const h = createHarness({ config: { segmentGapMinutes: 2 } })
+    try {
+      seedContinuous(h)
+
+      const res = await providerOf(h).getTracks({ maxPoints: 4 })
+
+      expect(segmentsOf(res)).toHaveLength(1)
+      expect(res.features[0]!.properties.pointCount).toBeLessThanOrEqual(4)
+    } finally {
+      await h.stop()
+    }
   })
 })

@@ -274,3 +274,85 @@ describe('thinToBudget', () => {
     expect(result.resolution!).toBeGreaterThanOrEqual(5000)
   })
 })
+
+describe('segmenting a thinned track', () => {
+  const at = (timestamp: number, span?: number): TimedPosition => ({
+    position: [60, 24],
+    timestamp,
+    ...(span === undefined ? {} : { span }),
+  })
+
+  it('keeps a stretch recorded without a break whole when thinned wider than the gap', () => {
+    const recorded = Array.from({ length: 15 }, (_, i) => at(i * MINUTE))
+
+    expect(segment(thin(recorded, 3 * MINUTE), 2 * MINUTE)).toHaveLength(1)
+  })
+
+  it('still splits at a recorded stop that thinning left nothing to drop around', () => {
+    const recorded = [at(0), at(6 * MINUTE)]
+
+    expect(segment(thin(recorded, 3 * MINUTE), 2 * MINUTE)).toHaveLength(2)
+  })
+
+  it('splits exactly where the recording stopped, however it was thinned', () => {
+    // Seeded, so a failure reproduces.
+    let seed = 133
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2 ** 31
+      return seed / 2 ** 31
+    }
+    for (let run = 0; run < 300; run++) {
+      const gap = (1 + Math.floor(random() * 5)) * MINUTE
+      // Fixes at most `gap` apart, with the occasional real stop well beyond it.
+      const recorded: TimedPosition[] = []
+      const stretchOf = new Map<number, number>()
+      let t = 0
+      let stretch = 0
+      for (let i = 0; i < 150; i++) {
+        recorded.push(at(t))
+        stretchOf.set(t, stretch)
+        if (random() < 0.05) {
+          t += gap + 1 + Math.floor(random() * 3 * gap)
+          stretch++
+        } else {
+          t += 1 + Math.floor(random() * gap)
+        }
+      }
+      const spacing = 1 + Math.floor(random() * 3 * gap)
+      const wider = spacing + Math.floor(random() * 3 * gap)
+
+      // Thinned once, and twice as the store's pass followed by a budget.
+      for (const thinned of [thin(recorded, spacing), thin(thin(recorded, spacing), wider)]) {
+        const segments = segment(thinned, gap)
+        for (const [i, s] of segments.entries()) {
+          // Nothing split that the recording did not.
+          expect(new Set(s.map((p) => stretchOf.get(p.timestamp))).size).toBe(1)
+          // Nothing joined that the recording split.
+          const next = segments[i + 1]
+          if (next) {
+            expect(stretchOf.get(next[0]!.timestamp)).not.toBe(stretchOf.get(s[s.length - 1]!.timestamp))
+          }
+        }
+      }
+    }
+  })
+
+  it('reads adjacent history buckets as continuous, even wider apart than the gap', () => {
+    const buckets = [0, 5, 10, 15].map((m) => at(m * MINUTE, 5 * MINUTE))
+
+    expect(segment(buckets, 2 * MINUTE)).toHaveLength(1)
+  })
+
+  it('splits history buckets where a single one is missing', () => {
+    // Minutes 10 to 15 have no bucket, and two minutes is the gap.
+    const buckets = [0, 5, 15, 20].map((m) => at(m * MINUTE, 5 * MINUTE))
+
+    expect(segment(buckets, 2 * MINUTE)).toHaveLength(2)
+  })
+
+  it('splits history buckets where several in a row are missing', () => {
+    const buckets = [0, 5, 30, 35].map((m) => at(m * MINUTE, 5 * MINUTE))
+
+    expect(segment(buckets, 2 * MINUTE)).toHaveLength(2)
+  })
+})

@@ -543,7 +543,9 @@ async function historyPositions(
         // that duplicate from the provider side.
         const withinEnd = window.inclusiveEnd ? timestamp <= window.to : timestamp < window.to
         if (timestamp >= window.from && withinEnd) {
-          points.push({ position, timestamp })
+          // A bucket, not a fix: its width keeps segment() from reading the
+          // spacing between buckets as a stop in the recording.
+          points.push({ position, timestamp, span: applied })
         }
       }
     }

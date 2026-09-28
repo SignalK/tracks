@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { reconcile } from './reconcile.js'
+import { segment, thin } from './timeWindow.js'
 import type { TimedPosition } from './types.js'
 
 const MINUTE = 60_000
@@ -115,5 +116,39 @@ describe('reconcile', () => {
       const r = reconcile([], [stored(1)], 0)
       expect(r.fromStore).toBe(1)
     })
+  })
+})
+
+describe('reconciling a thinned store with history', () => {
+  it('does not split where history covered a stop in the store', () => {
+    // The plugin was off from minute 10 to 40, but the history provider kept
+    // recording. Thinned, the store's first fix after the stop carries that
+    // 30-minute pause; history covers the half hour up to the bucket before
+    // it, so that fix survives reconciliation and sits right after history.
+    const stored = [...Array.from({ length: 11 }, (_, i) => at(i)), ...Array.from({ length: 11 }, (_, i) => at(40 + i))]
+    const history = Array.from({ length: 9 }, (_, i) => ({ ...bucket(12 + 3 * i), span: 3 * MINUTE }))
+
+    const { positions } = reconcile(history, thin(stored, 3 * MINUTE), 3 * MINUTE)
+
+    expect(segment(positions, 5 * MINUTE)).toHaveLength(1)
+  })
+
+  it('does not split after a history bucket in the middle of a continuous store', () => {
+    // Fixes every minute from minute 4, thinned to five minutes; history has
+    // one bucket, minutes 15 to 20. The first stored fix after it is at 24.
+    const stored = Array.from({ length: 40 }, (_, i) => at(4 + i))
+    const history = [{ ...bucket(15), span: 5 * MINUTE }]
+
+    const { positions } = reconcile(history, thin(stored, 5 * MINUTE), 5 * MINUTE)
+
+    expect(segment(positions, 2 * MINUTE)).toHaveLength(1)
+  })
+
+  it('still splits where neither source has anything', () => {
+    const stored = [...Array.from({ length: 11 }, (_, i) => at(i)), ...Array.from({ length: 11 }, (_, i) => at(40 + i))]
+
+    const { positions } = reconcile([], thin(stored, 3 * MINUTE), 3 * MINUTE)
+
+    expect(segment(positions, 5 * MINUTE)).toHaveLength(2)
   })
 })
