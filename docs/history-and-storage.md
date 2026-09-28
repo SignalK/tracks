@@ -70,7 +70,8 @@ Do not assume the plugin's async stop promise is awaited by the server.
 
 Accepted but uncommitted data is still in RAM. Abrupt power loss or forced process
 termination can lose pending samples; worker isolation does not promise zero data
-loss. The durability of committed records is unchanged. Rollback of plugin code
+loss. Committed records are not synced one by one either, so a power cut can
+also lose the most recent of them, though never damage the file. Rollback of plugin code
 must never replace the database with an older copy over newly recorded tracks.
 
 ## What you get with no history provider
