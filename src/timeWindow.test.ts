@@ -29,6 +29,12 @@ describe('parseTrackQuery', () => {
     expect(parseTrackQuery({}, NOW).window).toBeUndefined()
   })
 
+  it('accepts exactly the parameters its schema declares, and names them when rejecting another', () => {
+    expect(() => parseTrackQuery({ duratoin: '6h' }, NOW)).toThrow(
+      'Unknown query parameter duratoin; accepted: from, to, duration, timespan, timespanOffset, resolution, times',
+    )
+  })
+
   it('resolves from/to', () => {
     const { window } = parseTrackQuery({ from: '2026-08-09T10:00:00Z', to: '2026-08-09T11:00:00Z' }, NOW)
     expect(window).toEqual({ from: NOW - 2 * HOUR, to: NOW - HOUR, inclusiveEnd: false })
