@@ -75,9 +75,13 @@ export class AsyncTrackStore implements TrackStore {
     })
     // A startup failure must be reported even if nobody is awaiting a query.
     this.ready.catch(() => {})
-    // Tests rebuild this entry before every run, including watch reruns.
+    // Only the unit suite runs this module from source, and it builds the worker
+    // into .vitest-worker before every run, watch reruns included. Decided by
+    // this module's own location, not the environment: a server started from
+    // a test run inherits VITEST, yet loads the published bundle.
+    const fromSource = import.meta.url.endsWith('.ts')
     const workerUrl = new URL(
-      /* @vite-ignore */ process.env.VITEST ? '../.vitest-worker/trackStoreWorker.js' : '../dist/trackStoreWorker.js',
+      /* @vite-ignore */ fromSource ? '../.vitest-worker/trackStoreWorker.js' : '../dist/trackStoreWorker.js',
       import.meta.url,
     )
     this.worker = new Worker(workerUrl, {
