@@ -1,0 +1,88 @@
+# Labels each pull request from its Conventional Commit title, because
+# .github/release.yml sorts the release notes by label and a pull request
+# opened from the command line carries none. feat and perf go under
+# Features, fix and revert under Fixes, docs under Documentation, a runtime
+# dependency bump under Dependencies; ci, test, chore, refactor, style and
+# dev dependency bumps stay out of the notes. GitHub's own `Revert "..."`
+# title counts as revert. Any other type lands under Other.
+#
+# pull_request_target so that a pull request from a fork is labelled too.
+# Only the title, labels and author are read, with no checkout and nothing from the pull request
+# run here, which is what makes that trigger safe.
+name: label-by-title
+
+on:
+  pull_request_target:
+    types: [opened, edited]
+
+permissions: {}
+
+jobs:
+  label:
+    # `edited` also fires for a description or base-branch change, which
+    # leaves the labels alone.
+    if: github.event.action != 'edited' || github.event.changes.title
+    # One run per pull request at a time: two overlapping runs would each read
+    # the labels, then each edit, and could leave two managed labels behind.
+    # Set on the job, after the condition above, so that a run the condition
+    # skips cannot cancel one that edits.
+    concurrency:
+      group: label-by-title-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Read now rather than from the event, so a re-run of an older run
+          # labels by the title the pull request has today.
+          pr=$(gh pr view "$NUMBER" --repo "$REPO" --json title,author,labels)
+          TITLE=$(jq -r .title <<< "$pr")
+          author=$(jq -r .author.login <<< "$pr")
+          current=$(jq -r '[.labels[].name] | join(" ")' <<< "$pr")
+
+          # The labels this workflow owns, one of them at a time, so a title
+          # edited from feat to fix swaps the label rather than adding one.
+          # `dependencies` is dependabot's and stays on its pull requests; on
+          # one opened by hand it follows a `build(deps)` title. A dev bump
+          # keeps it and gets skip-changelog on top -- release.yml's exclude
+          # wins over its categories.
+          managed="enhancement bug documentation skip-changelog"
+          conventional='^([a-z]+)(\(([^)]*)\))?!?: '
+          type=""; scope=""
+          if [[ "$TITLE" =~ $conventional ]]; then
+            type="${BASH_REMATCH[1]}"; scope="${BASH_REMATCH[3]}"
+          elif [[ "$TITLE" == 'Revert "'* ]]; then
+            type=revert
+          fi
+          case "$type" in
+            feat|perf) wanted=enhancement ;;
+            fix|revert) wanted=bug ;;
+            docs) wanted=documentation ;;
+            ci|test|chore|refactor|style) wanted=skip-changelog ;;
+            build) [ "$scope" = deps-dev ] && wanted=skip-changelog || wanted="" ;;
+            *) wanted="" ;;
+          esac
+          args=()
+          for label in $managed; do
+            case " $current " in *" $label "*) has=1 ;; *) has=0 ;; esac
+            if [ "$label" = "$wanted" ] && [ "$has" = 0 ]; then args+=(--add-label "$label"); fi
+            if [ "$label" != "$wanted" ] && [ "$has" = 1 ]; then args+=(--remove-label "$label"); fi
+          done
+          case " $current " in *" dependencies "*) has_deps=1 ;; *) has_deps=0 ;; esac
+          if [ "$type" = build ] && [ "$scope" = deps ]; then
+            if [ "$has_deps" = 0 ]; then args+=(--add-label dependencies); fi
+          elif [ "$has_deps" = 1 ] && [ "$author" != app/dependabot ]; then
+            args+=(--remove-label dependencies)
+          fi
+          if [ "${#args[@]}" = 0 ]; then
+            echo "#$NUMBER '$TITLE': nothing to change (${wanted:-no managed label})"
+          else
+            gh pr edit "$NUMBER" --repo "$REPO" "${args[@]}"
+            echo "#$NUMBER '$TITLE': ${args[*]}"
+          fi
