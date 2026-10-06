@@ -35,6 +35,12 @@ export interface TracksRequest {
   to?: Temporal.Instant
   duration?: Temporal.Duration
   bbox?: TrackBoundingBox
+  /**
+   * Cut each track to `bbox`. The server resolves the default, so a provider
+   * sees an explicit value; absent means a server that predates the
+   * parameter, which returned whole tracks.
+   */
+  clip?: boolean
   resolution?: Temporal.Duration
   maxPoints?: number
   simplify?: boolean

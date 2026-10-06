@@ -1,10 +1,10 @@
 import { Temporal } from '@js-temporal/polyfill'
 import { M_PER_DEG, simplify } from './simplify.js'
-import { segment, thinToBudget } from './timeWindow.js'
+import { segment, thin, thinToBudget } from './timeWindow.js'
 import type { TrackStore } from './store.js'
 import type { TrackApi, TrackBoundingBox, TrackFeature, TracksRequest, TracksResponse } from './trackApi.js'
 import type { GeoBounds, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
-import { toIsoTimes } from './utils.js'
+import { clipToBounds, toIsoTimes } from './utils.js'
 
 /**
  * Serves the v2 Track API from this plugin's store.
@@ -201,6 +201,9 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     const wanted = query.contexts?.length
       ? [...new Set(query.contexts.map(resolveSelf(deps.selfContext())))]
       : undefined
+    const bounds = toGeoBounds(query.bbox)
+    // Without a box there is nothing to clip to, whatever `clip` says.
+    const clipTo = query.clip === true ? bounds : null
 
     // Thinning is handed to the store rather than applied to the result: it is
     // the same `thin()` either way, and asking twice is both wasted work and a
@@ -215,12 +218,20 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
       // box an hour ago and has since left still matches". The v1 routes keep
       // the last-position rule, which is the right answer to their own
       // question.
-      { bbox: toGeoBounds(query.bbox), radius: null, intersects: true, ...(wanted ? { contexts: wanted } : {}) },
+      {
+        bbox: bounds,
+        radius: null,
+        intersects: true,
+        ...(wanted ? { contexts: wanted } : {}),
+        ...(clipTo ? { clip: true } : {}),
+      },
       undefined,
       undefined,
       {
         ...(window ? { window } : {}),
-        ...(resolution === undefined ? {} : { resolution }),
+        // A clipped track is thinned after clipping, below, so the points that
+        // carry it to the box edge are kept.
+        ...(resolution === undefined || clipTo ? {} : { resolution }),
       },
     )
 
@@ -234,7 +245,10 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
           [context, await deps.reconcileWithHistory(context, stored, window, resolution)] as const,
       ),
     )
-    for (const [context, points] of reconciled) {
+    for (const [context, reconciledPoints] of reconciled) {
+      // Clipped after reconciling, because history positions come for the
+      // whole window and the box has to cut those too.
+      const points = clipTo ? thin(clipToBounds(reconciledPoints, clipTo), resolution) : reconciledPoints
       // Dropped here rather than in getTracks, so both entry points agree on
       // what matched. A store filters on the *last* position, so a context can
       // match spatially and still have no point inside the time window;

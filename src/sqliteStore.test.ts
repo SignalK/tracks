@@ -5,8 +5,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it, vi } from 'vitest'
 import { s2 } from 's2js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
-import { splitAtAntimeridian } from './utils.js'
-import type { Context, GeoBounds, LatLngTuple } from './types.js'
+import { clipToBounds, splitAtAntimeridian } from './utils.js'
+import type { Context, GeoBounds, LatLngTuple, TimedPosition } from './types.js'
 
 const debug = Object.assign(() => {}, { enabled: false })
 const ctx = 'vessels.urn:mrn:signalk:uuid:test' as Context
@@ -130,6 +130,67 @@ describe('requested contexts', () => {
 
     const tracks = await store.getFilteredTimedTracks({ bbox: null, radius: null })
     expect(Object.keys(tracks).sort()).toEqual([ctx, other, third].sort())
+    store.close()
+  })
+})
+
+describe('clip reads', () => {
+  const MINUTE = 60_000
+  const box: GeoBounds = { sw: [60, 24], ne: [61, 25] }
+  const inside: LatLngTuple = [60.5, 24.5]
+  const outside: LatLngTuple = [59, 20]
+
+  /** A day outside, an hour inside, a day outside, an hour inside, an hour outside; one fix a minute. */
+  const seeded = (): { store: SqliteTrackStore; all: TimedPosition[] } => {
+    const store = newStore()
+    const legs: [LatLngTuple, number][] = [
+      [outside, 24 * 60],
+      [inside, 60],
+      [outside, 24 * 60],
+      [inside, 60],
+      [outside, 60],
+    ]
+    const all: TimedPosition[] = []
+    for (const [position, minutes] of legs) {
+      for (let i = 0; i < minutes; i++) {
+        all.push({ position, timestamp: all.length * MINUTE })
+      }
+    }
+    store.initialTrack(
+      ctx,
+      all.map(({ position }) => position),
+      all.map(({ timestamp }) => timestamp),
+    )
+    store.newPosition(other, outside, 0)
+    return { store, all }
+  }
+
+  it('reads only the stretches inside the box and the point either side of each', async () => {
+    const { store, all } = seeded()
+    const getTimed = vi.spyOn(store, 'getTimed')
+
+    const tracks = await store.getFilteredTimedTracks({ bbox: box, radius: null, intersects: true, clip: true })
+    expect(Object.keys(tracks)).toEqual([ctx])
+    expect(getTimed).not.toHaveBeenCalled()
+    expect(tracks[ctx]).toHaveLength(2 * (60 + 2))
+    // Narrowing the read changes nothing the clip keeps.
+    expect(clipToBounds(tracks[ctx]!, box)).toEqual(clipToBounds(all, box))
+    store.close()
+  })
+
+  it('keeps the edge points inside the time window', async () => {
+    const { store } = seeded()
+    const enter = 24 * 60 * MINUTE
+
+    const tracks = await store.getFilteredTimedTracks(
+      { bbox: box, radius: null, intersects: true, clip: true },
+      undefined,
+      undefined,
+      { window: { from: enter, to: enter + 30 * MINUTE } },
+    )
+    expect(tracks[ctx]!.map(({ timestamp }) => timestamp)).toEqual(
+      Array.from({ length: 30 }, (_, i) => enter + i * MINUTE),
+    )
     store.close()
   })
 })

@@ -715,6 +715,82 @@ describe('getTracks', () => {
   })
 })
 
+describe('clip in v2', () => {
+  const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+  const MINUTE = 60_000
+  const bbox: [number, number, number, number] = [24, 60, 25, 61]
+
+  /** Out, in, in, out, in, in, out: the box is crossed twice, after `lead` more points outside. */
+  const seed = (h: TestHarness, lead = 0) => {
+    const positions: [number, number][] = [
+      ...Array.from({ length: lead }, (): [number, number] => [58, 22]),
+      [59, 23],
+      [60.2, 24.2],
+      [60.3, 24.3],
+      [62, 26],
+      [60.5, 24.5],
+      [60.6, 24.6],
+      [59, 23],
+    ]
+    h.seedTrack(
+      SELF_CONTEXT,
+      positions,
+      positions.map((_, i) => t0 + i * MINUTE),
+    )
+  }
+
+  it('cuts the track to the box, one segment per crossing', async () => {
+    const h = createHarness()
+    try {
+      seed(h)
+      const res = await providerOf(h).getTracks({ bbox, clip: true })
+      expect(res.features[0]!.geometry!.coordinates).toEqual([
+        [
+          [23, 59],
+          [24.2, 60.2],
+          [24.3, 60.3],
+          [26, 62],
+        ],
+        [
+          [26, 62],
+          [24.5, 60.5],
+          [24.6, 60.6],
+          [23, 59],
+        ],
+      ])
+    } finally {
+      await h.stop()
+    }
+  })
+
+  it('returns whole tracks when clip is off or there is no box', async () => {
+    const h = createHarness()
+    try {
+      seed(h)
+      for (const query of [{ bbox, clip: false }, { bbox }, { clip: true }]) {
+        const res = await providerOf(h).getTracks(query)
+        expect(res.features[0]!.properties.pointCount).toBe(7)
+        expect(res.features[0]!.geometry!.coordinates).toHaveLength(1)
+      }
+    } finally {
+      await h.stop()
+    }
+  })
+
+  it('clips before applying a point budget', async () => {
+    const h = createHarness()
+    try {
+      // Budgeted first, the hundred points outside would thin the crossings away.
+      seed(h, 100)
+      const res = await providerOf(h).getTracks({ bbox, clip: true, maxPoints: 8 })
+      expect(res.features[0]!.properties.pointCount).toBe(8)
+      expect(res.features[0]!.properties.resolution).toBeUndefined()
+    } finally {
+      await h.stop()
+    }
+  })
+})
+
 describe('getTrackContexts', () => {
   // A store matches on the *last* position, so a context can pass the spatial
   // filter and still have nothing inside the time window. Listing it while
