@@ -322,9 +322,15 @@ export class SqliteTrackStore implements TrackStore {
   ): Promise<TimedTrackCollection> {
     const candidates = params.bbox ? this.contextsInBounds(params.bbox) : undefined
     const matcher = createMatcher(params, selfPosition, debug)
+    const requested = params.contexts ? new Set(params.contexts) : undefined
 
+    // Narrowed before reading: rows of a context that cannot be returned are
+    // not worth fetching.
+    const contexts = this.contexts().filter(
+      (context) => (!candidates || candidates.has(context)) && (!requested || requested.has(context)),
+    )
     const tracks = await Promise.all(
-      this.contexts().map((context) =>
+      contexts.map((context) =>
         this.getTimed(context, query?.window).then((points) => ({
           context,
           points: thin(points, query?.resolution),
@@ -332,7 +338,7 @@ export class SqliteTrackStore implements TrackStore {
       ),
     )
     return tracks.reduce<TimedTrackCollection>((acc, { context, points }) => {
-      if ((!candidates || candidates.has(context)) && matcher(points.map(({ position }) => position))) {
+      if (matcher(points.map(({ position }) => position))) {
         acc[context] = points
       }
       return acc
