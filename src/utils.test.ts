@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  clipToBounds,
   createInBounds,
   resolveContext,
   toIsoTimes,
@@ -13,6 +14,7 @@ import {
   asciiFilename,
   rfc8187,
 } from './utils.js'
+import type { LatLngTuple, TimedPosition } from './types.js'
 
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
 
@@ -50,6 +52,50 @@ describe('inBounds', () => {
     expect(inBounds([+9, -174])).toBe(false)
     expect(inBounds([+9, -176])).toBe(true)
     expect(inBounds([+11, -176])).toBe(false)
+  })
+})
+
+describe('clipToBounds', () => {
+  const track = (...positions: LatLngTuple[]): TimedPosition[] =>
+    positions.map((position, i) => ({ position, timestamp: i * 60_000 }))
+  const shape = (points: TimedPosition[]) => points.map(({ position, breakBefore }) => [position, !!breakBefore])
+  const box = { sw: [60, 24], ne: [61, 25] } as const
+
+  it('keeps the stretch inside and the one point either side of it', () => {
+    const points = track([59, 23], [59.5, 23.5], [60.2, 24.2], [60.5, 24.5], [61.5, 25.5], [62, 26])
+    expect(shape(clipToBounds(points, { sw: [...box.sw], ne: [...box.ne] }))).toEqual([
+      [[59.5, 23.5], false],
+      [[60.2, 24.2], false],
+      [[60.5, 24.5], false],
+      [[61.5, 25.5], false],
+    ])
+  })
+
+  it('starts a new stretch on each re-entry, sharing the outside point between them', () => {
+    const points = track([60.2, 24.2], [62, 26], [60.5, 24.5], [60.6, 24.6])
+    expect(shape(clipToBounds(points, { sw: [...box.sw], ne: [...box.ne] }))).toEqual([
+      [[60.2, 24.2], false],
+      [[62, 26], false],
+      [[62, 26], true],
+      [[60.5, 24.5], false],
+      [[60.6, 24.6], false],
+    ])
+  })
+
+  it('clips to a box crossing the antimeridian', () => {
+    const points = track([0, 170], [0, 179.5], [0, -179.5], [0, -170])
+    expect(shape(clipToBounds(points, { sw: [-1, 179], ne: [1, -179] }))).toEqual([
+      [[0, 170], false],
+      [[0, 179.5], false],
+      [[0, -179.5], false],
+      [[0, -170], false],
+    ])
+    expect(clipToBounds(track([0, 170], [0, -170]), { sw: [-1, 179], ne: [1, -179] })).toEqual([])
+  })
+
+  it('returns a track that never leaves the box unchanged', () => {
+    const points = track([60.2, 24.2], [60.5, 24.5])
+    expect(clipToBounds(points, { sw: [...box.sw], ne: [...box.ne] })).toEqual(points)
   })
 })
 

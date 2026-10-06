@@ -25,6 +25,11 @@ export interface TimedPosition {
    * anywhere in that stretch.
    */
   span?: number
+  /**
+   * Starts a new line here whatever the time since the point before: the
+   * track left a clipping box between the two and came back.
+   */
+  breakBefore?: boolean
 }
 
 /**
@@ -85,6 +90,12 @@ export interface TrackParams {
    * read of every track it holds.
    */
   contexts?: Context[]
+  /**
+   * The caller clips each track to `bbox`, so a store need read only the
+   * stretches near the box rather than every position in the window. A read
+   * narrowing, not a filter: a store may ignore it and return whole tracks.
+   */
+  clip?: boolean
 }
 
 export interface Debug {

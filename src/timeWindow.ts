@@ -220,6 +220,36 @@ export function thin(points: TimedPosition[], resolution: number | undefined): T
   if (!resolution || points.length <= 2) {
     return points
   }
+  // Each stretch of a clipped track is thinned on its own, so every one keeps
+  // the points that carry it to the box edge.
+  const stretches = splitAtBreaks(points)
+  return stretches.length === 1 ? thinStretch(points, resolution) : stretches.flatMap((s) => thinStretch(s, resolution))
+}
+
+/** Points split wherever one starts a new line (`breakBefore`). */
+function splitAtBreaks(points: TimedPosition[]): TimedPosition[][] {
+  if (!points.some(({ breakBefore }) => breakBefore)) {
+    return [points]
+  }
+  const stretches: TimedPosition[][] = []
+  let current: TimedPosition[] = []
+  for (const point of points) {
+    if (point.breakBefore && current.length > 0) {
+      stretches.push(current)
+      current = []
+    }
+    current.push(point)
+  }
+  if (current.length > 0) {
+    stretches.push(current)
+  }
+  return stretches
+}
+
+function thinStretch(points: TimedPosition[], resolution: number): TimedPosition[] {
+  if (points.length <= 2) {
+    return points
+  }
   const result: TimedPosition[] = []
   let lastKept = Number.NEGATIVE_INFINITY
   let previous: TimedPosition | undefined
@@ -306,7 +336,11 @@ export function thinToBudget(
  * thinned track, or one reconciled with history buckets, segment exactly as
  * the recording would.
  *
- * `gap` of 0 or undefined returns a single segment, preserving the old shape.
+ * A point marked `breakBefore` starts a new segment whatever the gap: a
+ * clipped track leaves the box there.
+ *
+ * `gap` of 0 or undefined otherwise returns a single segment, preserving the
+ * old shape.
  * An empty input returns no segments rather than one empty one, so a caller can
  * distinguish "no track" from "a track with no points".
  */
@@ -315,13 +349,13 @@ export function segment(points: TimedPosition[], gap: number | undefined): Timed
     return []
   }
   if (!gap || gap <= 0) {
-    return [points]
+    return splitAtBreaks(points)
   }
   const segments: TimedPosition[][] = []
   let current: TimedPosition[] = []
   let previous: TimedPosition | undefined
   for (const point of points) {
-    if (previous !== undefined && pauseBetween(previous, point) > gap) {
+    if (previous !== undefined && (point.breakBefore || pauseBetween(previous, point) > gap)) {
       segments.push(current)
       current = []
     }

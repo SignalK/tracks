@@ -36,6 +36,43 @@ export function createInBounds(bounds: GeoBounds): (position: LatLngTuple | null
 }
 
 /**
+ * Cut a track down to the parts inside `bounds`.
+ *
+ * Each stretch inside keeps the one point either side of it, so the line
+ * still reaches the box edge rather than stopping at the last fix inside, and
+ * each stretch after the first starts with `breakBefore`, so a track that
+ * leaves the box and comes back is not joined by a line across the outside.
+ * An outside point between two stretches is both one's exit and the next
+ * one's entry, and appears in each.
+ *
+ * Bounds crossing the antimeridian are handled by `createInBounds`.
+ */
+export function clipToBounds(points: TimedPosition[], bounds: GeoBounds): TimedPosition[] {
+  const inBounds = createInBounds(bounds)
+  const result: TimedPosition[] = []
+  let inside = false
+  for (const [i, point] of points.entries()) {
+    if (inBounds(point.position)) {
+      if (!inside) {
+        const entry = points[i - 1]
+        const first = entry ?? point
+        result.push(result.length > 0 ? { ...first, breakBefore: true } : first)
+        if (entry) {
+          result.push(point)
+        }
+        inside = true
+      } else {
+        result.push(point)
+      }
+    } else if (inside) {
+      result.push(point)
+      inside = false
+    }
+  }
+  return result
+}
+
+/**
  * Split a bounds that crosses the antimeridian into two that do not.
  *
  * A bounds wraps when its west edge is numerically greater than its east edge

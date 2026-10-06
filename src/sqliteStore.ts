@@ -19,6 +19,25 @@ import type {
 
 export class TransactionStateError extends Error {}
 
+const toTimed = ({ lat, lon, timestamp }: PositionRow): TimedPosition => ({
+  position: [lat, lon],
+  timestamp,
+})
+
+/** Sorted times grouped into `[first, last]` stretches, split where two lie more than `gap` apart. */
+const stretchesOf = (times: number[], gap: number): [number, number][] => {
+  const stretches: [number, number][] = []
+  for (const time of times) {
+    const current = stretches[stretches.length - 1]
+    if (current && time - current[1] <= gap) {
+      current[1] = time
+    } else {
+      stretches.push([time, time])
+    }
+  }
+  return stretches
+}
+
 /**
  * S2 cell ids are unsigned 64-bit; SQLite's INTEGER is signed 64-bit, and
  * node:sqlite refuses to bind a bigint above INT64_MAX outright:
@@ -85,6 +104,11 @@ interface PositionRow {
   lon: number
 }
 
+/** A row with its rowid, which tells apart two fixes sharing a timestamp. */
+interface NumberedRow extends PositionRow {
+  id: number
+}
+
 export interface SqliteStoreConfig {
   /** Absolute path to the database file, or ':memory:'. */
   file: string
@@ -107,6 +131,13 @@ export interface SqliteStoreConfig {
 
 const DEFAULT_MAX_CELLS = 8
 const DEFAULT_SEGMENT_GAP = 5 * 60 * 1000
+/**
+ * How far apart two fixes inside a clipping box may be and still be read as
+ * one stretch. A vessel cannot get far between fixes this close, so reading
+ * what lies between them costs less than the two extra queries a separate
+ * stretch takes. Any value gives the same clipped track.
+ */
+const CLIP_STRETCH_GAP = 10 * 60 * 1000
 
 /**
  * A position store backed by SQLite, so tracks survive a restart.
@@ -128,6 +159,8 @@ export class SqliteTrackStore implements TrackStore {
   private readonly segmentGap: number
   private readonly retention: number
   private readonly resolution: number
+  /** See CLIP_STRETCH_GAP; widened so a coarse write resolution does not split every fix. */
+  private readonly stretchGap: number
   private readonly debug: Debug
   /** Timestamp of the last position stored per context, for throttling. */
   private readonly lastStored = new Map<string, number>()
@@ -143,6 +176,7 @@ export class SqliteTrackStore implements TrackStore {
     this.segmentGap = config.segmentGap ?? DEFAULT_SEGMENT_GAP
     this.retention = config.retention ?? 0
     this.resolution = config.resolution ?? 0
+    this.stretchGap = Math.max(CLIP_STRETCH_GAP, 2 * this.resolution)
     this.debug = debug
 
     this.db = new DatabaseSync(config.file)
@@ -320,7 +354,10 @@ export class SqliteTrackStore implements TrackStore {
     debug?: Debug,
     query?: TrackQuery,
   ): Promise<TimedTrackCollection> {
-    const candidates = params.bbox ? this.contextsInBounds(params.bbox) : undefined
+    // A clipped query needs only the stretches near the box, so it reads those
+    // instead of every position each candidate has in the window.
+    const near = params.bbox && params.clip ? this.rowsNearBounds(params.bbox, query?.window) : undefined
+    const candidates = near ? new Set(near.keys()) : params.bbox ? this.contextsInBounds(params.bbox) : undefined
     const matcher = createMatcher(params, selfPosition, debug)
     const requested = params.contexts ? new Set(params.contexts) : undefined
 
@@ -330,12 +367,11 @@ export class SqliteTrackStore implements TrackStore {
       (context) => (!candidates || candidates.has(context)) && (!requested || requested.has(context)),
     )
     const tracks = await Promise.all(
-      contexts.map((context) =>
-        this.getTimed(context, query?.window).then((points) => ({
-          context,
-          points: thin(points, query?.resolution),
-        })),
-      ),
+      contexts.map((context) => {
+        const rows = near?.get(context)
+        const read = rows ? Promise.resolve(rows.map(toTimed)) : this.getTimed(context, query?.window)
+        return read.then((points) => ({ context, points: thin(points, query?.resolution) }))
+      }),
     )
     return tracks.reduce<TimedTrackCollection>((acc, { context, points }) => {
       if (matcher(points.map(({ position }) => position))) {
@@ -345,21 +381,32 @@ export class SqliteTrackStore implements TrackStore {
     }, {})
   }
 
-  /** Contexts with at least one position inside `bounds`, via the cell index. */
-  private contextsInBounds(bounds: GeoBounds): Set<string> {
+  /** The cell index condition for rows near `bounds`, or none for an empty covering. */
+  private coveringClause(bounds: GeoBounds): { where: string; params: bigint[]; cells: number } | undefined {
     const covering = coveringFor(bounds, this.maxCells)
-    const found = new Set<string>()
     if (covering.length === 0) {
-      return found
+      return undefined
     }
-
     // Bound parameters, never interpolation: `BETWEEN ${start} <= s2cell AND
     // ${end}` parses as `s2cell BETWEEN (start <= s2cell) AND end`, collapsing
     // the lower bound to 0 or 1 so the range starts at zero and out-of-range
     // rows leak in.
     const ranges = covering.map(cellRange)
-    const where = ranges.map(() => '(s2cell BETWEEN ? AND ?)').join(' OR ')
-    const params = ranges.flatMap(({ start, end }) => [toSigned(start), toSigned(end)])
+    return {
+      where: ranges.map(() => '(s2cell BETWEEN ? AND ?)').join(' OR '),
+      params: ranges.flatMap(({ start, end }) => [toSigned(start), toSigned(end)]),
+      cells: covering.length,
+    }
+  }
+
+  /** Contexts with at least one position inside `bounds`, via the cell index. */
+  private contextsInBounds(bounds: GeoBounds): Set<string> {
+    const found = new Set<string>()
+    const clause = this.coveringClause(bounds)
+    if (!clause) {
+      return found
+    }
+    const { where, params, cells } = clause
 
     const stmt = this.db.prepare(`SELECT DISTINCT context, lat, lon FROM positions WHERE ${where}`)
     const rows = stmt.all(...params) as unknown as { context: string; lat: number; lon: number }[]
@@ -371,9 +418,81 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     if (this.debug.enabled) {
-      this.debug(`bbox covering ${covering.length} cells -> ${rows.length} rows -> ${found.size} contexts`)
+      this.debug(`bbox covering ${cells} cells -> ${rows.length} rows -> ${found.size} contexts`)
     }
     return found
+  }
+
+  /**
+   * Per context, the positions a track clipped to `bounds` is made of, and
+   * only those: every position inside the box within the window, plus the one
+   * either side of each stretch inside, which carries the line to the edge.
+   *
+   * The cell index finds the times a context was inside the box. Times closer
+   * together than `stretchGap` are read as one stretch, including any
+   * excursion outside it, since the clip that follows cuts those anyway;
+   * further apart they are read separately and the time between is skipped.
+   * Nothing between two stretches is inside the box, so skipping it loses
+   * nothing the clip would keep: how they are grouped decides only how many
+   * rows are read, never the result.
+   */
+  private rowsNearBounds(bounds: GeoBounds, window?: TimeWindow): Map<Context, PositionRow[]> {
+    const near = new Map<Context, PositionRow[]>()
+    const clause = this.coveringClause(bounds)
+    if (!clause) {
+      return near
+    }
+    const timeClauses = window ? ['timestamp >= ?', window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?'] : []
+    const timeParams = window ? [window.from, window.to] : []
+    const inWindow = timeClauses.map((c) => ` AND ${c}`).join('')
+
+    const inside = this.db
+      .prepare(
+        `SELECT context, timestamp, lat, lon FROM positions WHERE (${clause.where})${inWindow} ORDER BY context, timestamp`,
+      )
+      .all(...clause.params, ...timeParams) as unknown as PositionRow[]
+    const inBounds = createInBounds(bounds)
+    const times = new Map<Context, number[]>()
+    for (const { context, timestamp, lat, lon } of inside) {
+      if (inBounds([lat, lon])) {
+        const list = times.get(context)
+        if (list) {
+          list.push(timestamp)
+        } else {
+          times.set(context, [timestamp])
+        }
+      }
+    }
+
+    const columns = 'SELECT rowid AS id, context, timestamp, lat, lon FROM positions WHERE context = ?'
+    const between = this.db.prepare(`${columns} AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp, rowid`)
+    const before = this.db.prepare(
+      `${columns} AND timestamp < ?${inWindow} ORDER BY timestamp DESC, rowid DESC LIMIT 1`,
+    )
+    const after = this.db.prepare(`${columns} AND timestamp > ?${inWindow} ORDER BY timestamp, rowid LIMIT 1`)
+    for (const [context, list] of times) {
+      const rows = new Map<number, NumberedRow>()
+      for (const [start, end] of stretchesOf(list, this.stretchGap)) {
+        const read = [
+          ...(before.all(context, start, ...timeParams) as unknown as NumberedRow[]),
+          ...(between.all(context, start, end) as unknown as NumberedRow[]),
+          ...(after.all(context, end, ...timeParams) as unknown as NumberedRow[]),
+        ]
+        // Keyed by row: where nothing was recorded between two stretches, one's
+        // neighbour is the other's first or last row.
+        for (const row of read) {
+          rows.set(row.id, row)
+        }
+      }
+      near.set(
+        context,
+        [...rows.values()].sort((a, b) => a.timestamp - b.timestamp || a.id - b.id),
+      )
+    }
+    if (this.debug.enabled) {
+      this.debug(`clip covering ${clause.cells} cells -> ${inside.length} rows -> ${near.size} contexts`)
+    }
+    return near
   }
 
   /**

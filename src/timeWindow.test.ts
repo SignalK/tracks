@@ -139,6 +139,11 @@ describe('thin', () => {
     expect(thin(points(0), 1000)).toHaveLength(1)
     expect(thin(points(0, 1), 1000)).toHaveLength(2)
   })
+  it('keeps both ends of every stretch of a clipped track', () => {
+    const p = points(0, 100, 200, 300, 400, 500)
+    p[3] = { ...p[3]!, breakBefore: true }
+    expect(thin(p, 1000).map((x) => x.timestamp - NOW)).toEqual([0, 200, 300, 500])
+  })
 })
 
 describe('segment', () => {
@@ -165,6 +170,12 @@ describe('segment', () => {
     // `>` not `>=`: a vessel reporting on a fixed 5-minute interval should not
     // have every single fix become its own segment.
     expect(segment([at(0), at(5 * MINUTE)], 5 * MINUTE)).toHaveLength(1)
+  })
+
+  it('splits where a clipped track left the box, whatever the gap', () => {
+    const points = [at(0), at(MINUTE), { ...at(2 * MINUTE), breakBefore: true }, at(3 * MINUTE)]
+    expect(segment(points, 5 * MINUTE).map((s) => s.length)).toEqual([2, 2])
+    expect(segment(points, 0).map((s) => s.length)).toEqual([2, 2])
   })
 
   it('keeps a single point as its own segment', () => {
