@@ -267,12 +267,17 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
         async ([context, stored]) =>
           [context, await deps.reconcileWithHistory(context, stored, window, resolution)] as const,
       ),
-      ...fromHistory.map(async (context) => {
-        const points = await deps.reconcileWithHistory(context, await storedFor(context), window, resolution)
-        return [context, !inBounds || points.some(({ position }) => inBounds(position)) ? points : []] as const
-      }),
+      ...fromHistory.map(
+        async (context) =>
+          [context, await deps.reconcileWithHistory(context, await storedFor(context), window, resolution)] as const,
+      ),
     ])
     for (const [context, reconciledPoints] of reconciled) {
+      // History can replace the stored point that put a context in the box,
+      // so the match is decided on the reconciled track for every context.
+      if (inBounds && !reconciledPoints.some(({ position }) => inBounds(position))) {
+        continue
+      }
       // Clipped after reconciling, because history positions come for the
       // whole window and the box has to cut those too.
       const points = clipTo ? thin(clipToBounds(reconciledPoints, clipTo), resolution) : reconciledPoints

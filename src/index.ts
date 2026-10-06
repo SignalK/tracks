@@ -573,7 +573,9 @@ async function historyPositions(
       historyApi.getValues({
         context,
         // Instants, not ISO strings: providers call Instant methods on these.
-        from: Temporal.Instant.from(new Date(window.from).toISOString()),
+        // A window with only an end starts at minus infinity, which no Date
+        // can hold.
+        from: Temporal.Instant.from(new Date(Math.max(window.from, EXISTENCE_PROBE_FROM_MS)).toISOString()),
         to: Temporal.Instant.from(new Date(window.to).toISOString()),
         pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
         resolution: providerSeconds,

@@ -836,6 +836,29 @@ describe('positions only a history provider holds', () => {
     }
   })
 
+  it('reads history for a window with only an end', async () => {
+    const h = createHarness({ history: { contexts: [OTHER_CONTEXT], rows: rows([10, 20], [10.1, 20.1]) } })
+    try {
+      const res = await providerOf(h).getTracks({ to: window.to, contexts: [OTHER_CONTEXT] })
+      expect(res.features.map((f) => f.properties.pointCount)).toEqual([2])
+    } finally {
+      await h.stop()
+    }
+  })
+
+  it('leaves out a stored vessel whose box crossing history replaced', async () => {
+    const h = createHarness({ history: { contexts: [SELF_CONTEXT], rows: rows([10, 20]) } })
+    try {
+      // The stored fix falls in the bucket of history's first row, which
+      // replaces it with a position far outside the box.
+      h.seedTrack(SELF_CONTEXT, [[60.5, 24.5]], [t0 + 500])
+      const res = await providerOf(h).getTracks({ ...window, bbox })
+      expect(res.features).toEqual([])
+    } finally {
+      await h.stop()
+    }
+  })
+
   it('leaves out a history vessel that never entered the box', async () => {
     const h = createHarness({ history: { contexts: [OTHER_CONTEXT], rows: rows([10, 20], [10.1, 20.1]) } })
     try {
