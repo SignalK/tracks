@@ -198,21 +198,24 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     }
     const window = toTimeWindow(query)
     const resolution = query.resolution ? totalMilliseconds(query.resolution) : undefined
-    const wanted = query.contexts?.length ? new Set(query.contexts.map(resolveSelf(deps.selfContext()))) : undefined
+    const wanted = query.contexts?.length
+      ? [...new Set(query.contexts.map(resolveSelf(deps.selfContext())))]
+      : undefined
 
     // Thinning is handed to the store rather than applied to the result: it is
     // the same `thin()` either way, and asking twice is both wasted work and a
     // second place for the two to disagree about what a resolution means.
     //
     // The bbox path goes through the store's spatial filter, which the sqlite
-    // store answers from its cell index rather than by reading every track.
+    // store answers from its cell index rather than by reading every track,
+    // and the requested contexts go with it so the store reads only those.
     const collection = await store.getFilteredTimedTracks(
       // intersects: the v2 contract matches a track on any position within the
       // window, not on where the vessel ended up — "a vessel that crossed the
       // box an hour ago and has since left still matches". The v1 routes keep
       // the last-position rule, which is the right answer to their own
       // question.
-      { bbox: toGeoBounds(query.bbox), radius: null, intersects: true },
+      { bbox: toGeoBounds(query.bbox), radius: null, intersects: true, ...(wanted ? { contexts: wanted } : {}) },
       undefined,
       undefined,
       {
@@ -225,9 +228,8 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     // Reconciled per context rather than in one pass: a history provider is
     // asked per context, and the store's own points are what a provider-less
     // install returns unchanged.
-    const contexts = Object.entries(collection).filter(([context]) => !wanted || wanted.has(context))
     const reconciled = await Promise.all(
-      contexts.map(
+      Object.entries(collection).map(
         async ([context, stored]) =>
           [context, await deps.reconcileWithHistory(context, stored, window, resolution)] as const,
       ),

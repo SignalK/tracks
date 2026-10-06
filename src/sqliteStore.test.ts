@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { s2 } from 's2js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
 import { splitAtAntimeridian } from './utils.js'
@@ -82,6 +82,54 @@ describe('bbox queries', () => {
 
     const tracks = await store.getFilteredTracks({ bbox: { sw: [-18, 179], ne: [-17, -179] }, radius: null })
     expect(Object.keys(tracks)).toEqual([ctx])
+    store.close()
+  })
+})
+
+describe('requested contexts', () => {
+  const third = 'vessels.urn:mrn:imo:mmsi:230000001' as Context
+  const helsinki: LatLngTuple = [60.16, 24.94]
+  const stockholm: LatLngTuple = [59.33, 18.07]
+
+  const seeded = (): SqliteTrackStore => {
+    const store = newStore()
+    store.newPosition(ctx, helsinki, 1000)
+    store.newPosition(other, helsinki, 1000)
+    store.newPosition(third, stockholm, 1000)
+    return store
+  }
+
+  it('returns every requested context and reads no other', async () => {
+    const store = seeded()
+    const getTimed = vi.spyOn(store, 'getTimed')
+
+    const tracks = await store.getFilteredTimedTracks({ bbox: null, radius: null, contexts: [ctx, third] })
+    expect(Object.keys(tracks).sort()).toEqual([ctx, third].sort())
+    expect(getTimed.mock.calls.map(([context]) => context).sort()).toEqual([ctx, third].sort())
+    store.close()
+  })
+
+  it('reads only the requested contexts the box lets through', async () => {
+    const store = seeded()
+    const getTimed = vi.spyOn(store, 'getTimed')
+    const bounds: GeoBounds = { sw: [60, 24], ne: [61, 26] }
+
+    const tracks = await store.getFilteredTimedTracks({
+      bbox: bounds,
+      radius: null,
+      intersects: true,
+      contexts: [ctx, third],
+    })
+    expect(Object.keys(tracks)).toEqual([ctx])
+    expect(getTimed.mock.calls.map(([context]) => context)).toEqual([ctx])
+    store.close()
+  })
+
+  it('reads every context when none is requested', async () => {
+    const store = seeded()
+
+    const tracks = await store.getFilteredTimedTracks({ bbox: null, radius: null })
+    expect(Object.keys(tracks).sort()).toEqual([ctx, other, third].sort())
     store.close()
   })
 })

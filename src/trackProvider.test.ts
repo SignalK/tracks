@@ -141,6 +141,22 @@ describe('getTracks', () => {
     }
   })
 
+  it('returns every requested context, not only the own vessel', async () => {
+    const h = createHarness()
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      const third = 'vessels.urn:mrn:imo:mmsi:230000001'
+      h.seedTrack(SELF_CONTEXT, [[60, 24]], [t0])
+      h.seedTrack(OTHER_CONTEXT, [[10, 20]], [t0])
+      h.seedTrack(third, [[30, 40]], [t0])
+
+      const res = await providerOf(h).getTracks({ contexts: ['self', OTHER_CONTEXT] })
+      expect(res.features.map((f) => f.properties.context).sort()).toEqual([OTHER_CONTEXT, SELF_CONTEXT].sort())
+    } finally {
+      await h.stop()
+    }
+  })
+
   it('applies a time window', async () => {
     const h = createHarness()
     try {

@@ -79,6 +79,12 @@ export interface TrackParams {
    * since left still matches. Same filter, two questions.
    */
   intersects?: boolean
+  /**
+   * Only these contexts, fully qualified; absent for every context. A store
+   * reads nothing for the others, so asking for one vessel does not cost a
+   * read of every track it holds.
+   */
+  contexts?: Context[]
 }
 
 export interface Debug {

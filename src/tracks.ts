@@ -138,7 +138,8 @@ export class Tracks implements TrackStore {
     this.debug('Self position', selfPosition)
     const matcher = createMatcher(params, selfPosition, debug)
 
-    const contexts = Object.keys(this.tracks)
+    const requested = params.contexts ? new Set(params.contexts) : undefined
+    const contexts = Object.keys(this.tracks).filter((context) => !requested || requested.has(context))
     const tracks = await Promise.all(
       contexts.map((context) =>
         this.getTimed(context, query?.window).then((points) => ({
