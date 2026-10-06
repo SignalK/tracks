@@ -7,9 +7,10 @@
 # A PR lands in the first category it matches, so order matters: dependencies
 # are listed before the catch-all, and the catch-all is last.
 #
-# Categories match on labels, but human PRs in this repo have historically gone
-# unlabelled, so the dependency category also matches the bot by author. Label a
-# PR to place it deliberately; an unlabelled one still appears, under Other.
+# Categories match on labels, which workflows/label-by-title.yml sets from each
+# PR's Conventional Commit title. The dependency category also matches the bot by
+# author. A label set by hand places a PR the same way; an unlabelled one still
+# appears, under Other.
 changelog:
   exclude:
     labels:
