@@ -382,6 +382,14 @@ interface KnownContexts {
   contexts: Promise<ReadonlySet<string>>
 }
 
+/** A provider's context list as a set, with the `vessels.self` spelling resolved. */
+const toContextSet = (listed: unknown[] | undefined, selfContext: string): ReadonlySet<string> =>
+  new Set(
+    (listed ?? [])
+      .filter((c): c is string => typeof c === 'string')
+      .map((c) => (c === 'vessels.self' ? selfContext : c)),
+  )
+
 /**
  * Whether a history provider holds anything at all for a context.
  *
@@ -435,14 +443,7 @@ async function historyKnowsContext(
           // vessels. The `vessels.self` spelling at least one provider returns
           // is resolved here, while `app.selfContext` is a single fixed value,
           // so the lookup itself is a plain membership test.
-          .then(
-            (listed) =>
-              new Set(
-                (listed ?? [])
-                  .filter((c): c is string => typeof c === 'string')
-                  .map((c) => (c === 'vessels.self' ? app.selfContext : c)),
-              ) as ReadonlySet<string>,
-          ),
+          .then((listed) => toContextSet(listed, app.selfContext)),
         HISTORY_QUERY_TIMEOUT_MS,
       )
       // Dropped on failure so the next miss retries rather than inheriting a
@@ -462,6 +463,57 @@ async function historyKnowsContext(
   } catch (err) {
     debug(`History contexts unavailable for ${context}: ${errorDetail(err)}`)
     return false
+  }
+}
+
+/**
+ * Contexts a history provider holds data for within a window, or none.
+ *
+ * What lets the v2 provider return a vessel the store has never seen, or match
+ * a box on positions only history recorded: the store is often far younger
+ * than the provider. Best-effort like every other provider call: no provider,
+ * a provider without `getContexts`, an error or a hang all answer with no
+ * contexts, and the store answers alone.
+ *
+ * A window with no start is asked from the epoch, for the same reason the
+ * existence probe is; without any window the probe's cached all-time list is
+ * reused rather than asking again per query.
+ */
+async function historyContextsIn(
+  app: App,
+  window: TimeWindow | undefined,
+  debug: Debug,
+  cache: { current: KnownContexts | undefined },
+): Promise<ReadonlySet<string>> {
+  const getHistoryApi = app.getHistoryApi
+  if (!getHistoryApi) {
+    return new Set()
+  }
+  try {
+    if (!window) {
+      await historyKnowsContext(app, app.selfContext, debug, cache)
+      return (await cache.current?.contexts) ?? new Set()
+    }
+    const historyApi = await withTimeout(
+      getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
+      HISTORY_QUERY_TIMEOUT_MS,
+    )
+    if (!historyApi.getContexts) {
+      return new Set()
+    }
+    const listed = await withTimeout(
+      historyApi.getContexts({
+        from: Temporal.Instant.from(new Date(Math.max(window.from, EXISTENCE_PROBE_FROM_MS)).toISOString()),
+        to: Temporal.Instant.from(new Date(window.to).toISOString()),
+      }),
+      HISTORY_QUERY_TIMEOUT_MS,
+    )
+    return toContextSet(listed, app.selfContext)
+  } catch (err) {
+    if (debug.enabled) {
+      debug(`History contexts unavailable: ${errorDetail(err)}`)
+    }
+    return new Set()
   }
 }
 
@@ -521,7 +573,9 @@ async function historyPositions(
       historyApi.getValues({
         context,
         // Instants, not ISO strings: providers call Instant methods on these.
-        from: Temporal.Instant.from(new Date(window.from).toISOString()),
+        // A window with only an end starts at minus infinity, which no Date
+        // can hold.
+        from: Temporal.Instant.from(new Date(Math.max(window.from, EXISTENCE_PROBE_FROM_MS)).toISOString()),
         to: Temporal.Instant.from(new Date(window.to).toISOString()),
         pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
         resolution: providerSeconds,
@@ -808,6 +862,7 @@ export default function ThePlugin(app: App): Plugin {
           // it the plugin answers differently depending on which route a client
           // uses: the store alone through v2, the store enriched by a history
           // provider through v1.
+          historyContexts: (window) => historyContextsIn(app, window, app.debug, knownContexts),
           reconcileWithHistory: async (context, stored, window, resolutionMs) => {
             const effective = resolutionMs ?? storeResolution
             // A query with no window still gets history, for the same reason

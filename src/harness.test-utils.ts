@@ -122,6 +122,11 @@ export interface HarnessOptions {
     /** Fail the windowed read, leaving the provider unable to answer at all. */
     getValuesRejects?: boolean
     /**
+     * Answer `getValues` as a real provider does with `aggregate: 'first'`:
+     * only the earliest of `rows` in each bucket of the asked resolution.
+     */
+    aggregatesFirst?: boolean
+    /**
      * Reject `getHistoryApi` itself, as the server does when no provider is
      * registered — the default install, and not an outage.
      */
@@ -143,6 +148,19 @@ export function deferred(): { release: () => void; wait: Promise<void> } {
     release = resolve
   })
   return { release, wait }
+}
+
+/** History rows as `[time, …]`, keeping the earliest row in each bucket. */
+function firstPerBucket(rows: unknown[], bucketMs: number): unknown[] {
+  const seen = new Set<number>()
+  return rows.filter((row) => {
+    const bucket = Math.floor(Date.parse(String((row as unknown[])[0])) / bucketMs)
+    if (seen.has(bucket)) {
+      return false
+    }
+    seen.add(bucket)
+    return true
+  })
 }
 
 export function createHarness(options: HarnessOptions = {}): TestHarness {
@@ -177,14 +195,17 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
               : options.history?.noProvider === true
                 ? Promise.reject(new Error('No history api provider configured'))
                 : Promise.resolve({
-                    getValues: () =>
+                    getValues: (query: { resolution?: number }) =>
                       options.history?.getValuesRejects === true
                         ? Promise.reject(new Error('history provider unavailable'))
                         : Promise.resolve({
                             context: selfContext,
                             range: { from: '', to: '' },
                             values: [],
-                            data: options.history?.rows ?? [],
+                            data:
+                              options.history?.aggregatesFirst === true
+                                ? firstPerBucket(options.history.rows ?? [], (query.resolution ?? 1) * 1000)
+                                : (options.history?.rows ?? []),
                           }),
                     ...(options.history?.withoutGetContexts === true
                       ? {}
