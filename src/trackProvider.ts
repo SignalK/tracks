@@ -238,9 +238,10 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
       undefined,
       {
         ...(window ? { window } : {}),
-        // A clipped track is thinned after clipping, below, so the points that
-        // carry it to the box edge are kept.
-        ...(resolution === undefined || clipTo ? {} : { resolution }),
+        // A track matched against a box is thinned after matching, below, so
+        // thinning cannot drop the point inside it, and a clipped one keeps
+        // the points that carry it to the box edge.
+        ...(resolution === undefined || bounds ? {} : { resolution }),
       },
     )
 
@@ -255,7 +256,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     const inBounds = bounds ? createInBounds(bounds) : undefined
     const storedFor = async (context: string): Promise<TimedPosition[]> => {
       const points = await store.getTimed(context, window).catch(() => [])
-      return clipTo ? points : thin(points, resolution)
+      return bounds ? points : thin(points, resolution)
     }
 
     const result = new Map<string, TimedPosition[]>()
@@ -280,7 +281,11 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
       }
       // Clipped after reconciling, because history positions come for the
       // whole window and the box has to cut those too.
-      const points = clipTo ? thin(clipToBounds(reconciledPoints, clipTo), resolution) : reconciledPoints
+      const points = clipTo
+        ? thin(clipToBounds(reconciledPoints, clipTo), resolution)
+        : bounds
+          ? thin(reconciledPoints, resolution)
+          : reconciledPoints
       // Dropped here rather than in getTracks, so both entry points agree on
       // what matched. A store filters on the *last* position, so a context can
       // match spatially and still have no point inside the time window;

@@ -859,6 +859,27 @@ describe('positions only a history provider holds', () => {
     }
   })
 
+  it('matches a box on a crossing that thinning would drop', async () => {
+    const h = createHarness()
+    try {
+      // A minute's resolution keeps the first and last of these, both outside
+      // the box, and drops the one inside it.
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [59, 23],
+          [60.5, 24.5],
+          [62, 26],
+        ],
+        [t0, t0 + 10_000, t0 + 20_000],
+      )
+      const res = await providerOf(h).getTracks({ ...window, bbox, resolution: Temporal.Duration.from({ minutes: 1 }) })
+      expect(res.features.map((f) => f.properties.context)).toEqual([SELF_CONTEXT])
+    } finally {
+      await h.stop()
+    }
+  })
+
   it('leaves out a history vessel that never entered the box', async () => {
     const h = createHarness({ history: { contexts: [OTHER_CONTEXT], rows: rows([10, 20], [10.1, 20.1]) } })
     try {
