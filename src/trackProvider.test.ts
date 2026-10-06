@@ -880,6 +880,29 @@ describe('positions only a history provider holds', () => {
     }
   })
 
+  it('matches a box on a history crossing shorter than the requested resolution', async () => {
+    const h = createHarness({
+      history: {
+        contexts: [OTHER_CONTEXT],
+        aggregatesFirst: true,
+        // Inside the box only for the middle of one minute.
+        rows: [
+          [new Date(t0).toISOString(), [23, 59]],
+          [new Date(t0 + 20_000).toISOString(), [24.5, 60.5]],
+          [new Date(t0 + 40_000).toISOString(), [26, 62]],
+        ],
+      },
+    })
+    try {
+      const query = { ...window, bbox, resolution: Temporal.Duration.from({ minutes: 1 }) }
+      const res = await providerOf(h).getTracks(query)
+      expect(res.features.map((f) => f.properties.context)).toEqual([OTHER_CONTEXT])
+      expect(await providerOf(h).getTrackContexts(query)).toEqual([OTHER_CONTEXT])
+    } finally {
+      await h.stop()
+    }
+  })
+
   it('leaves out a history vessel that never entered the box', async () => {
     const h = createHarness({ history: { contexts: [OTHER_CONTEXT], rows: rows([10, 20], [10.1, 20.1]) } })
     try {

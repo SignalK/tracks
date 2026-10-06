@@ -259,6 +259,12 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
       return bounds ? points : thin(points, resolution)
     }
 
+    // A provider aggregates to one position per bucket of the resolution it is
+    // asked for, so a box query asks at the recording resolution: at the
+    // requested one, a crossing shorter than a bucket would be aggregated away
+    // before the match could see it.
+    const historyResolution = bounds ? undefined : resolution
+
     const result = new Map<string, TimedPosition[]>()
     // Reconciled per context rather than in one pass: a history provider is
     // asked per context, and the store's own points are what a provider-less
@@ -266,11 +272,14 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     const reconciled = await Promise.all([
       ...Object.entries(collection).map(
         async ([context, stored]) =>
-          [context, await deps.reconcileWithHistory(context, stored, window, resolution)] as const,
+          [context, await deps.reconcileWithHistory(context, stored, window, historyResolution)] as const,
       ),
       ...fromHistory.map(
         async (context) =>
-          [context, await deps.reconcileWithHistory(context, await storedFor(context), window, resolution)] as const,
+          [
+            context,
+            await deps.reconcileWithHistory(context, await storedFor(context), window, historyResolution),
+          ] as const,
       ),
     ])
     for (const [context, reconciledPoints] of reconciled) {
