@@ -4,7 +4,7 @@ import { segment, thin, thinToBudget } from './timeWindow.js'
 import type { TrackStore } from './store.js'
 import type { TrackApi, TrackBoundingBox, TrackFeature, TracksRequest, TracksResponse } from './trackApi.js'
 import type { GeoBounds, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
-import { clipToBounds, toIsoTimes } from './utils.js'
+import { clipToBounds, createInBounds, toIsoTimes } from './utils.js'
 
 /**
  * Serves the v2 Track API from this plugin's store.
@@ -46,6 +46,15 @@ export interface TrackProviderDeps {
    * Resolves to the store's own points unchanged when no provider is
    * installed, which is the common case.
    */
+  /**
+   * Contexts a history provider holds data for within the window, empty when
+   * there is no provider.
+   *
+   * The store can be far younger than the provider, so it alone cannot say
+   * which vessels exist or which passed through a box: a vessel recorded
+   * only before this plugin was installed is known to history alone.
+   */
+  historyContexts: (window: TimeWindow | undefined) => Promise<ReadonlySet<string>>
   reconcileWithHistory: (
     context: string,
     stored: TimedPosition[],
@@ -235,16 +244,34 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
       },
     )
 
+    // Contexts the store did not return but history holds data for: a vessel
+    // the store has never seen, or one whose crossing of the box only history
+    // recorded. The store's own points, if any, still take part in the
+    // reconciliation; whether such a context matches the box is decided on
+    // the reconciled track, since the store could not decide it.
+    const fromHistory = [...(await deps.historyContexts(window))].filter(
+      (context) => !(context in collection) && (!wanted || wanted.includes(context)),
+    )
+    const inBounds = bounds ? createInBounds(bounds) : undefined
+    const storedFor = async (context: string): Promise<TimedPosition[]> => {
+      const points = await store.getTimed(context, window).catch(() => [])
+      return clipTo ? points : thin(points, resolution)
+    }
+
     const result = new Map<string, TimedPosition[]>()
     // Reconciled per context rather than in one pass: a history provider is
     // asked per context, and the store's own points are what a provider-less
     // install returns unchanged.
-    const reconciled = await Promise.all(
-      Object.entries(collection).map(
+    const reconciled = await Promise.all([
+      ...Object.entries(collection).map(
         async ([context, stored]) =>
           [context, await deps.reconcileWithHistory(context, stored, window, resolution)] as const,
       ),
-    )
+      ...fromHistory.map(async (context) => {
+        const points = await deps.reconcileWithHistory(context, await storedFor(context), window, resolution)
+        return [context, !inBounds || points.some(({ position }) => inBounds(position)) ? points : []] as const
+      }),
+    ])
     for (const [context, reconciledPoints] of reconciled) {
       // Clipped after reconciling, because history positions come for the
       // whole window and the box has to cut those too.

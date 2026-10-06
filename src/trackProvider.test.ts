@@ -791,6 +791,62 @@ describe('clip in v2', () => {
   })
 })
 
+describe('positions only a history provider holds', () => {
+  const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+  const MINUTE = 60_000
+  const window = {
+    from: Temporal.Instant.fromEpochMilliseconds(t0 - 60 * MINUTE),
+    to: Temporal.Instant.fromEpochMilliseconds(t0 + 60 * MINUTE),
+  }
+  const bbox: [number, number, number, number] = [24, 60, 25, 61]
+  /** History rows as `[time, [lon, lat]]`, one a minute from t0. */
+  const rows = (...positions: [number, number][]) =>
+    positions.map(([lat, lng], i) => [new Date(t0 + i * MINUTE).toISOString(), [lng, lat]])
+
+  it('returns a vessel the store has never recorded', async () => {
+    const h = createHarness({ history: { contexts: [OTHER_CONTEXT], rows: rows([10, 20], [10.1, 20.1]) } })
+    try {
+      const provider = providerOf(h)
+      const res = await provider.getTracks({ ...window, contexts: [OTHER_CONTEXT] })
+      expect(res.features.map((f) => f.properties.context)).toEqual([OTHER_CONTEXT])
+      expect(res.features[0]!.properties.pointCount).toBe(2)
+      expect(await provider.getTrackContexts({ ...window, contexts: [OTHER_CONTEXT] })).toEqual([OTHER_CONTEXT])
+    } finally {
+      await h.stop()
+    }
+  })
+
+  it('matches a box on a crossing only history recorded', async () => {
+    const h = createHarness({
+      history: { contexts: [SELF_CONTEXT], rows: rows([59, 23], [60.5, 24.5], [62, 26]) },
+    })
+    try {
+      // The store holds only positions outside the box, later than history's.
+      h.seedTrack(SELF_CONTEXT, [[50, 10]], [t0 + 30 * MINUTE])
+      const res = await providerOf(h).getTracks({ ...window, bbox, clip: true })
+      expect(res.features[0]!.geometry!.coordinates).toEqual([
+        [
+          [23, 59],
+          [24.5, 60.5],
+          [26, 62],
+        ],
+      ])
+    } finally {
+      await h.stop()
+    }
+  })
+
+  it('leaves out a history vessel that never entered the box', async () => {
+    const h = createHarness({ history: { contexts: [OTHER_CONTEXT], rows: rows([10, 20], [10.1, 20.1]) } })
+    try {
+      const res = await providerOf(h).getTracks({ ...window, bbox })
+      expect(res.features).toEqual([])
+    } finally {
+      await h.stop()
+    }
+  })
+})
+
 describe('getTrackContexts', () => {
   // A store matches on the *last* position, so a context can pass the spatial
   // filter and still have nothing inside the time window. Listing it while
