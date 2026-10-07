@@ -1,7 +1,7 @@
 import { Temporal } from '@js-temporal/polyfill'
 import { describe, expect, it, vi } from 'vitest'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
-import type { TestHarness } from './harness.test-utils.js'
+import type { HistoryValuesQuery, TestHarness } from './harness.test-utils.js'
 import type { TrackApi } from './trackApi.js'
 
 /**
@@ -908,6 +908,86 @@ describe('positions only a history provider holds', () => {
     try {
       const res = await providerOf(h).getTracks({ ...window, bbox })
       expect(res.features).toEqual([])
+    } finally {
+      await h.stop()
+    }
+  })
+})
+
+describe('bounded history reads', () => {
+  const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+  const MINUTE = 60_000
+  const DAY = 24 * 60 * MINUTE
+  const to = Temporal.Instant.fromEpochMilliseconds(t0 + 60 * MINUTE)
+  const rowAt = (timestamp: number, [lat, lng]: [number, number]) => [new Date(timestamp).toISOString(), [lng, lat]]
+
+  it('starts a read with no start where the provider has data, not at the epoch', async () => {
+    const asked: HistoryValuesQuery[] = []
+    const h = createHarness({
+      history: {
+        contexts: [OTHER_CONTEXT],
+        aggregatesFirst: true,
+        rows: [rowAt(t0, [10, 20]), rowAt(t0 + MINUTE, [10.1, 20.1])],
+        onValues: (query) => asked.push(query),
+      },
+    })
+    try {
+      const res = await providerOf(h).getTracks({ to, contexts: [OTHER_CONTEXT] })
+      expect(res.features.map((f) => f.properties.pointCount)).toEqual([2])
+      // One coarse read to find where the data begins, then the read itself.
+      expect(asked.map(({ from }) => Date.parse(from.toString()))).toEqual([0, expect.any(Number)])
+      const from = Date.parse(asked[1]!.from.toString())
+      expect(from).toBeLessThanOrEqual(t0)
+      expect(from).toBeGreaterThan(t0 - 30 * DAY)
+    } finally {
+      await h.stop()
+    }
+  })
+
+  it('stops after the first read when a window with no start holds no history', async () => {
+    const asked: HistoryValuesQuery[] = []
+    const h = createHarness({
+      history: { contexts: [OTHER_CONTEXT], rows: [], onValues: (query) => asked.push(query) },
+    })
+    try {
+      h.seedTrack(OTHER_CONTEXT, [[10, 20]], [t0])
+      const res = await providerOf(h).getTracks({ to, contexts: [OTHER_CONTEXT] })
+      expect(res.features.map((f) => f.properties.pointCount)).toEqual([1])
+      expect(asked).toHaveLength(1)
+    } finally {
+      await h.stop()
+    }
+  })
+
+  it('widens a read past its budget, and lets it fill only what the store lacks', async () => {
+    const asked: HistoryValuesQuery[] = []
+    const h = createHarness({
+      history: {
+        contexts: [SELF_CONTEXT],
+        aggregatesFirst: true,
+        rows: [rowAt(t0 - 50 * DAY, [30, 40]), rowAt(t0 + 30_000, [11, 21])],
+        onValues: (query) => asked.push(query),
+      },
+    })
+    try {
+      // Two fixes inside one widened bucket, which the history row shares.
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [10, 20],
+          [10.1, 20.1],
+        ],
+        [t0 + 10_000, t0 + 40_000],
+      )
+      const from = to.subtract({ hours: 60 * 24 })
+      const res = await providerOf(h).getTracks({ from, to })
+      // Sixty days at the budget of a month of one-minute buckets.
+      expect(asked.map(({ resolution }) => resolution)).toEqual([120])
+      expect(res.features[0]!.geometry!.coordinates.flat()).toEqual([
+        [40, 30],
+        [20, 10],
+        [20.1, 10.1],
+      ])
     } finally {
       await h.stop()
     }

@@ -48,6 +48,41 @@ describe('GET /vessels/:vesselId/track', () => {
 
     expect(res.body.message).toMatch(/No track available/)
   })
+
+  // The same merge the v2 provider makes: a history read widened past its
+  // budget fills only what the store lacks.
+  it('lets a widened history read fill only what the store lacks', async () => {
+    const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+    const to = t0 + 60 * 60 * 1000
+    const row = (timestamp: number, [lat, lng]: [number, number]) => [new Date(timestamp).toISOString(), [lng, lat]]
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: {
+        contexts: [SELF_CONTEXT],
+        aggregatesFirst: true,
+        rows: [row(t0 - 50 * 24 * 60 * 60 * 1000, [30, 40]), row(t0 + 30_000, [11, 21])],
+      },
+    }))
+    h.seedTrack(
+      SELF_CONTEXT,
+      [
+        [10, 20],
+        [10.1, 20.1],
+      ],
+      [t0 + 10_000, t0 + 40_000],
+    )
+    const from = new Date(to - 60 * 24 * 60 * 60 * 1000).toISOString()
+
+    const res = await request(h.app)
+      .get(`${API}/vessels/${SELF_ID}/track?from=${from}&to=${new Date(to).toISOString()}`)
+      .expect(200)
+
+    expect(res.body.coordinates.flat()).toEqual([
+      [40, 30],
+      [20, 10],
+      [20.1, 10.1],
+    ])
+  })
 })
 
 describe('GET /tracks', () => {

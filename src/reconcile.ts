@@ -91,6 +91,31 @@ export function reconcile(history: TimedPosition[], stored: TimedPosition[], res
 }
 
 /**
+ * Merge history that is coarser than the store into it, the store first.
+ *
+ * The rule above holds while history is the finer source. A history read
+ * widened to stay within its bucket budget is not: one of its buckets spans
+ * several stored fixes, and letting it win would replace them all with one
+ * point. So here the store keeps every bucket it has a point in, and history
+ * fills only the buckets the store has nothing for — where the provider
+ * recorded before this plugin was installed, or while it was off.
+ */
+export function fillFromHistory(
+  history: TimedPosition[],
+  stored: TimedPosition[],
+  resolution: number,
+): ReconcileResult {
+  const covered = new Set(stored.map(({ timestamp }) => bucketOf(timestamp, resolution)))
+  const filling = history.filter(({ timestamp }) => !covered.has(bucketOf(timestamp, resolution)))
+  const positions = [...stored, ...filling].sort((a, b) => a.timestamp - b.timestamp)
+  return {
+    positions: measuredFromHistory(positions, filling),
+    fromHistory: filling.length,
+    fromStore: stored.length,
+  }
+}
+
+/**
  * A stored point's `pauseBefore` was measured over the stored points thinning
  * dropped before it. Where a history point now comes right before it, history
  * covered part of that time, so the pause is at most the time since that

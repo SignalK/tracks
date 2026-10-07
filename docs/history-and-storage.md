@@ -127,6 +127,23 @@ retention setting, or ask how long it has been running — it asks for the windo
 and uses what comes back, so coverage that changes underneath needs no
 attention.
 
+## How much is asked of the provider
+
+A provider has no spatial filter, so a query with a box still reads every
+position in its time window, and providers produce one row per bucket of that
+window whether or not anything was recorded in it. So each read is held to a
+fixed number of buckets: a longer window is read at a wider resolution, so the
+read stays the same size however far back it reaches.
+
+A history read widened like that is coarser than the plugin's store, so for it
+the rule below flips: the store keeps every bucket it has a position in, and
+the provider only fills the buckets the store has nothing for.
+
+A window with only an end, such as "everything older than a day", would
+otherwise start at the Unix epoch. Instead the plugin first finds where the
+provider's positions begin and reads from there, within the same budget; when
+the provider has none in the window, it contributes nothing.
+
 ## Why the two never double up
 
 A provider aggregates into buckets and stamps each one on its boundary:
