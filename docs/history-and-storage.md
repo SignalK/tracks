@@ -132,8 +132,8 @@ attention.
 A provider has no spatial filter, so a query with a box still reads every
 position in its time window, and providers produce one row per bucket of that
 window whether or not anything was recorded in it. So each read is held to a
-budget of a month of one-minute buckets: a longer window is read at a wider
-resolution, so the read stays the same size however far back it reaches.
+fixed number of buckets: a longer window is read at a wider resolution, so the
+read stays the same size however far back it reaches.
 
 A history read widened like that is coarser than the plugin's store, so for it
 the rule below flips: the store keeps every bucket it has a position in, and

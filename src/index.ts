@@ -594,7 +594,7 @@ async function historyPositions(
     }
     return none(timedOut)
   }
-  const read = async (from: number, seconds: number): Promise<TimedPosition[]> => {
+  const read = async (from: number, seconds: number, throughEnd = false): Promise<TimedPosition[]> => {
     const response = await withTimeout(
       historyApi.getValues({
         context,
@@ -619,7 +619,7 @@ async function historyPositions(
         // as half-open so consecutive bands tile without repeating the point
         // they share. Clipping inclusively here would reintroduce exactly
         // that duplicate from the provider side.
-        const withinEnd = window.inclusiveEnd ? timestamp <= window.to : timestamp < window.to
+        const withinEnd = window.inclusiveEnd || throughEnd ? timestamp <= window.to : timestamp < window.to
         if (timestamp >= window.from && withinEnd) {
           // A bucket, not a fix: its width keeps segment() from reading the
           // spacing between buckets as a stop in the recording.
@@ -635,7 +635,10 @@ async function historyPositions(
     let from = Math.max(window.from, EXISTENCE_PROBE_FROM_MS)
     if (!Number.isFinite(window.from)) {
       const probeSeconds = Math.max(askedSeconds, Math.ceil((window.to - from) / 1000 / START_PROBE_BUCKETS))
-      const probed = await read(from, probeSeconds)
+      // Through the end: a provider that stamps buckets on their end can put
+      // the last one exactly there, and the probe only needs to know where
+      // data begins, not to tile with a neighbouring window.
+      const probed = await read(from, probeSeconds, true)
       if (probed.length === 0) {
         return none(false)
       }
