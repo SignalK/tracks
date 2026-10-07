@@ -140,9 +140,9 @@ the rule below flips: the store keeps every bucket it has a position in, and
 the provider only fills the buckets the store has nothing for.
 
 A window with only an end, such as "everything older than a day", would
-otherwise start at the Unix epoch. One coarse read finds the earliest bucket
-the provider has a position in, and the real read starts there; when that read
-finds nothing, nothing more is asked.
+otherwise start at the Unix epoch. Instead the plugin first finds where the
+provider's positions begin and reads from there, within the same budget; when
+the provider has none in the window, it contributes nothing.
 
 ## Why the two never double up
 
