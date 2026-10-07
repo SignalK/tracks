@@ -126,6 +126,8 @@ export interface HarnessOptions {
      * only the earliest of `rows` in each bucket of the asked resolution.
      */
     aggregatesFirst?: boolean
+    /** Called with every `getValues` query, so a test can see what was asked. */
+    onValues?: (query: HistoryValuesQuery) => void
     /**
      * Reject `getHistoryApi` itself, as the server does when no provider is
      * registered — the default install, and not an outage.
@@ -148,6 +150,12 @@ export function deferred(): { release: () => void; wait: Promise<void> } {
     release = resolve
   })
   return { release, wait }
+}
+
+export interface HistoryValuesQuery {
+  from: { toString: () => string }
+  to: { toString: () => string }
+  resolution?: number
 }
 
 /** History rows as `[time, …]`, keeping the earliest row in each bucket. */
@@ -195,8 +203,9 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
               : options.history?.noProvider === true
                 ? Promise.reject(new Error('No history api provider configured'))
                 : Promise.resolve({
-                    getValues: (query: { resolution?: number }) =>
-                      options.history?.getValuesRejects === true
+                    getValues: (query: HistoryValuesQuery) => {
+                      options.history?.onValues?.(query)
+                      return options.history?.getValuesRejects === true
                         ? Promise.reject(new Error('history provider unavailable'))
                         : Promise.resolve({
                             context: selfContext,
@@ -206,7 +215,8 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
                               options.history?.aggregatesFirst === true
                                 ? firstPerBucket(options.history.rows ?? [], (query.resolution ?? 1) * 1000)
                                 : (options.history?.rows ?? []),
-                          }),
+                          })
+                    },
                     ...(options.history?.withoutGetContexts === true
                       ? {}
                       : {

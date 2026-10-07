@@ -21,7 +21,7 @@ import type { TrackApi } from './trackApi.js'
 import { AsyncTrackStore } from './asyncTrackStore.js'
 import type { TrackStore } from './store.js'
 import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
-import { reconcile } from './reconcile.js'
+import { fillFromHistory, reconcile } from './reconcile.js'
 import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
 import { toGpx } from './gpx.js'
@@ -261,6 +261,32 @@ const WINDOWLESS_HISTORY_SPAN_MS = 24 * 60 * 60 * 1000
  * branch that was already about to 404, and the answer is cached.
  */
 const EXISTENCE_PROBE_FROM_MS = 0
+
+/**
+ * The most buckets one history read may ask a provider for.
+ *
+ * A provider has no spatial filter, so a box query reads every position in
+ * its window, and the cost of that read grows with the window's span over the
+ * resolution, not with what is drawn. Providers fabricate a row for every
+ * bucket in the range — questdb fills empty ones with nulls — and refuse a
+ * range past their own cap, which one-minute buckets over two years already
+ * exceed. A month of one-minute buckets keeps a Pi-class server responsive;
+ * a longer window is read at a wider resolution instead.
+ */
+const HISTORY_BUCKET_BUDGET = 30 * 24 * 60
+
+/**
+ * How many buckets the read that finds where a provider's data begins asks
+ * for.
+ *
+ * A window with no start would otherwise reach back to the Unix epoch, and
+ * spread over fifty-odd years the bucket budget leaves buckets weeks wide.
+ * One coarse read first finds the earliest bucket holding a position, so the
+ * real read starts there. A thousand buckets over the whole epoch are about
+ * three weeks each, which only sets how much empty time the real read starts
+ * with.
+ */
+const START_PROBE_BUCKETS = 1000
 
 /**
  * How long a provider's context list is reused before asking again.
@@ -530,19 +556,19 @@ async function historyPositions(
   window: TimeWindow,
   resolutionMs: number,
   debug: Debug,
-): Promise<{ points: TimedPosition[]; resolutionMs: number; failed: boolean }> {
+): Promise<{ points: TimedPosition[]; resolutionMs: number; coarsened: boolean; failed: boolean }> {
   // The API takes whole seconds, so the width the provider actually bucketed
   // by is not necessarily the one asked for. Reconciling on the requested
   // width would leave a stored point in a bucket history already covered, and
   // keep both.
-  const providerSeconds = Math.max(1, Math.round(resolutionMs / 1000))
-  const applied = providerSeconds * 1000
+  const askedSeconds = Math.max(1, Math.round(resolutionMs / 1000))
+  const none = (failed: boolean) => ({ points: [], resolutionMs: askedSeconds * 1000, coarsened: false, failed })
   const getHistoryApi = app.getHistoryApi
   if (!getHistoryApi) {
     // Not a failure: no provider installed is the documented normal case, and
     // the store answers alone. Only a provider that was asked and could not
     // answer counts as one.
-    return { points: [], resolutionMs: applied, failed: false }
+    return none(false)
   }
   // Resolved in its own step, because failing to reach a provider and failing
   // to read one are different answers. The server rejects this call outright
@@ -566,19 +592,17 @@ async function historyPositions(
     if (debug.enabled) {
       debug(`${timedOut ? 'History provider timed out' : 'No history provider'} for ${context}: ${errorDetail(err)}`)
     }
-    return { points: [], resolutionMs: applied, failed: timedOut }
+    return none(timedOut)
   }
-  try {
+  const read = async (from: number, seconds: number): Promise<TimedPosition[]> => {
     const response = await withTimeout(
       historyApi.getValues({
         context,
         // Instants, not ISO strings: providers call Instant methods on these.
-        // A window with only an end starts at minus infinity, which no Date
-        // can hold.
-        from: Temporal.Instant.from(new Date(Math.max(window.from, EXISTENCE_PROBE_FROM_MS)).toISOString()),
+        from: Temporal.Instant.from(new Date(from).toISOString()),
         to: Temporal.Instant.from(new Date(window.to).toISOString()),
         pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
-        resolution: providerSeconds,
+        resolution: seconds,
       }),
       HISTORY_QUERY_TIMEOUT_MS,
     )
@@ -599,14 +623,33 @@ async function historyPositions(
         if (timestamp >= window.from && withinEnd) {
           // A bucket, not a fix: its width keeps segment() from reading the
           // spacing between buckets as a stop in the recording.
-          points.push({ position, timestamp, span: applied })
+          points.push({ position, timestamp, span: seconds * 1000 })
         }
       }
     }
-    if (debug.enabled) {
-      debug(`History supplied ${points.length} position(s) for ${context}`)
+    return points
+  }
+  try {
+    // A window with only an end starts at minus infinity, which no Date can
+    // hold, so it is read from where the provider's data begins.
+    let from = Math.max(window.from, EXISTENCE_PROBE_FROM_MS)
+    if (!Number.isFinite(window.from)) {
+      const probeSeconds = Math.max(askedSeconds, Math.ceil((window.to - from) / 1000 / START_PROBE_BUCKETS))
+      const probed = await read(from, probeSeconds)
+      if (probed.length === 0) {
+        return none(false)
+      }
+      // Back by one probe bucket, since providers disagree on whether a
+      // bucket's timestamp marks its start or its end.
+      const earliest = Math.min(...probed.map(({ timestamp }) => timestamp))
+      from = Math.max(from, earliest - probeSeconds * 1000)
     }
-    return { points, resolutionMs: applied, failed: false }
+    const providerSeconds = Math.max(askedSeconds, Math.ceil((window.to - from) / 1000 / HISTORY_BUCKET_BUDGET))
+    const points = await read(from, providerSeconds)
+    if (debug.enabled) {
+      debug(`History supplied ${points.length} position(s) for ${context} at ${providerSeconds}s`)
+    }
+    return { points, resolutionMs: providerSeconds * 1000, coarsened: providerSeconds > askedSeconds, failed: false }
   } catch (err) {
     if (debug.enabled) {
       debug(`History unavailable for ${context}: ${errorDetail(err)}`)
@@ -615,9 +658,24 @@ async function historyPositions(
     // a provider is an enrichment, not a dependency — but a caller with
     // nothing else to serve has to be able to tell "no positions" from "could
     // not ask".
-    return { points: [], resolutionMs: applied, failed: true }
+    return none(true)
   }
 }
+
+/**
+ * A track from the store and what history holds for it.
+ *
+ * History is the finer source where it reaches, so it wins its buckets —
+ * unless the read was widened to stay within its budget, when it is the
+ * coarser one and only fills what the store lacks.
+ */
+const withHistory = (
+  history: { points: TimedPosition[]; resolutionMs: number; coarsened: boolean },
+  stored: TimedPosition[],
+): TimedPosition[] =>
+  history.points.length === 0
+    ? stored
+    : (history.coarsened ? fillFromHistory : reconcile)(history.points, stored, history.resolutionMs).positions
 
 /** Epoch milliseconds for a history row, or 0 when the timestamp is unusable. */
 const historyRowTimestamp = (row: unknown): number => {
@@ -875,7 +933,7 @@ export default function ThePlugin(app: App): Plugin {
             // no per-context error and no 404, so a provider outage degrades to
             // the store's own points rather than failing a multi-context query
             // for every other vessel in it.
-            return history.points.length ? reconcile(history.points, stored, history.resolutionMs).positions : stored
+            return withHistory(history, stored)
           },
         }),
       )
@@ -958,9 +1016,7 @@ export default function ThePlugin(app: App): Plugin {
         // skipping the provider there would quietly serve store-only data.
         const window = query.window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
         const history = await historyPositions(app, context, window, effectiveResolution, app.debug)
-        const points = history.points.length
-          ? reconcile(history.points, stored, history.resolutionMs).positions
-          : stored
+        const points = withHistory(history, stored)
         // 404 only for a vessel neither source knows at all. A known vessel
         // with nothing inside the window is an empty track, not a missing one.
         //
