@@ -21,6 +21,10 @@ export function readText(req: Request, limit = MAX_UPLOAD_BYTES): Promise<string
   if (typeof parsed === 'string') {
     return Buffer.byteLength(parsed) > limit ? Promise.reject(new UploadTooLargeError(limit)) : Promise.resolve(parsed)
   }
+  // Refused before reading when the client says up front it is too large.
+  if (Number(req.headers['content-length']) > limit) {
+    return Promise.reject(new UploadTooLargeError(limit))
+  }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let size = 0
