@@ -181,7 +181,7 @@ describe('imported tracks through the Track API', () => {
       expect(await provider.deleteTrack(id)).toBe(true)
       expect(await provider.getTrack(id)).toBeUndefined()
       expect(await provider.deleteTrack(id)).toBe(false)
-      expect(await provider.deleteTrack(`recorded:${SELF_CONTEXT}`)).toBe(false)
+      expect(await provider.deleteTrack(`unknown:${SELF_CONTEXT}`)).toBe(false)
       expect(await provider.getTrack(SELF_CONTEXT)).toBeUndefined()
     } finally {
       await h.stop()
@@ -202,7 +202,7 @@ describe('imported tracks through the Track API', () => {
       const provider = providerOf(h)
       const id = await provider.storeTrack(passage())
       const { features } = await provider.getTracks({ ...day, contexts: [OTHER_CONTEXT] })
-      expect(features.map(({ properties }) => properties.id)).toEqual([undefined, id])
+      expect(features.map(({ properties }) => properties.id)).toEqual([`recorded:${OTHER_CONTEXT}`, id])
       expect(await provider.getTrackContexts({ ...day, contexts: [OTHER_CONTEXT] })).toEqual([OTHER_CONTEXT])
     } finally {
       await h.stop()

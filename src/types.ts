@@ -78,6 +78,42 @@ export interface ImportFilter {
 }
 
 /**
+ * The positions recorded or imported between two instants, both inclusive. An
+ * absent `from` reaches back to the start of the track.
+ */
+export interface DeletedSpan {
+  from?: number
+  to: number
+}
+
+/** A recorded vessel's deleted span, which hides history as well as the store. */
+export interface RecordedSpan extends DeletedSpan {
+  context: Context
+}
+
+/**
+ * One delete waiting in the recycle bin: a span of a vessel's recording, a
+ * span of an imported track, or a whole imported track (`whole`, no span).
+ */
+export interface BinEntry {
+  id: number
+  /** The recorded vessel, or the vessel an import names. */
+  context?: Context
+  importId?: string
+  /** An import's own name. */
+  name?: string
+  whole: boolean
+  from?: number
+  to?: number
+  deletedAt: number
+  /** Points held in the bin for this entry. */
+  pointCount: number
+}
+
+/** What restoring a recycle bin entry came to. */
+export type RestoreResult = 'restored' | 'missing' | 'conflict'
+
+/**
  * A time window in epoch milliseconds, half-open as `[from, to)`.
  *
  * Half-open so the bands a client requests to cover a long trail tile exactly:

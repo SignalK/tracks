@@ -66,6 +66,14 @@ above, so a large import neither pauses recording nor is dropped. Once recording
 writes have failed, imports are refused too. Retention never removes an imported
 track: it stays until it is deleted.
 
+Deleting a track, or part of one, moves its points into recycle bin tables in the
+same database, and restoring moves them back; both are written as imports are.
+The retention settings never reach into the bin. Its own retention, 180 days by
+default, purges an entry during the regular prune. A recorded span keeps its
+entry after its points are purged, because it is also what hides that span in a
+history provider's answer: the History API has no delete, so a provider still
+holds the positions, and the plugin filters them out of every v1 and v2 query.
+
 Stopping unsubscribes input immediately, then returns a Promise that resolves
 only after accepted work drains, SQLite closes and the worker exits. Plugin
 lifecycle callers must await `stop()` before restarting or removing its data

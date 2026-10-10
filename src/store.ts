@@ -1,9 +1,12 @@
 import type {
+  BinEntry,
   Context,
   Debug,
   ImportedTrack,
   ImportFilter,
   LatLngTuple,
+  RecordedSpan,
+  RestoreResult,
   TimedPosition,
   TimedTrackCollection,
   TimeWindow,
@@ -126,12 +129,36 @@ export interface TrackStore {
    */
   storeImport?(track: ImportedTrack): void | Promise<void>
 
-  /** Delete an imported track by id, resolving whether there was one. */
-  deleteImport?(id: string): boolean | Promise<boolean>
-
   getImport?(id: string): ImportedTrack | undefined | Promise<ImportedTrack | undefined>
 
   findImports?(filter?: ImportFilter): ImportedTrack[] | Promise<ImportedTrack[]>
+
+  /**
+   * The recycle bin. Optional like the import methods: a store without it
+   * cannot delete. A delete moves rows into the bin rather than removing them,
+   * and each of these resolves once committed, like `storeImport`.
+   *
+   * `binRecorded` moves a vessel's positions recorded within `[from, to]`;
+   * `binImport` moves an imported track, or only its points within a span.
+   */
+  binRecorded?(
+    context: Context,
+    from: number | undefined,
+    to: number,
+    deletedAt: number,
+    keepEmpty: boolean,
+  ): { id?: number; known: boolean } | Promise<{ id?: number; known: boolean }>
+  binImport?(
+    importId: string,
+    span: { from?: number; to?: number } | undefined,
+    deletedAt: number,
+  ): number | undefined | Promise<number | undefined>
+  restoreFromBin?(id: number): RestoreResult | Promise<RestoreResult>
+  /** Purge an entry now, resolving whether it was in the bin. */
+  purgeFromBin?(id: number): boolean | Promise<boolean>
+  binEntries?(): BinEntry[] | Promise<BinEntry[]>
+  /** Every deleted span of a recorded track, purged or not: what history must not show. */
+  deletedSpans?(): RecordedSpan[] | Promise<RecordedSpan[]>
 
   /**
    * Release any resources held by the store.

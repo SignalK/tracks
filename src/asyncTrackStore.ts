@@ -336,8 +336,23 @@ export class AsyncTrackStore implements TrackStore {
   storeImport(track: ImportedTrack): Promise<void> {
     return this.enqueue('storeImport', [track], 'acknowledged')
   }
-  deleteImport(id: string): Promise<boolean> {
-    return this.enqueue('deleteImport', [id], 'acknowledged')
+  binRecorded(context: Context, from: number | undefined, to: number, deletedAt: number, keepEmpty: boolean) {
+    return this.enqueue('binRecorded', [context, from, to, deletedAt, keepEmpty], 'acknowledged')
+  }
+  binImport(importId: string, span: { from?: number; to?: number } | undefined, deletedAt: number) {
+    return this.enqueue('binImport', [importId, span, deletedAt], 'acknowledged')
+  }
+  restoreFromBin(id: number) {
+    return this.enqueue('restoreFromBin', [id], 'acknowledged')
+  }
+  purgeFromBin(id: number) {
+    return this.enqueue('purgeFromBin', [id], 'acknowledged')
+  }
+  binEntries() {
+    return this.enqueue('binEntries', [])
+  }
+  deletedSpans() {
+    return this.enqueue('deletedSpans', [])
   }
   getImport(id: string) {
     return this.enqueue('getImport', [id])

@@ -11,9 +11,14 @@ export type StoreMethod =
   | 'getFilteredTracks'
   | 'getFilteredTimedTracks'
   | 'storeImport'
-  | 'deleteImport'
   | 'getImport'
   | 'findImports'
+  | 'binRecorded'
+  | 'binImport'
+  | 'restoreFromBin'
+  | 'purgeFromBin'
+  | 'binEntries'
+  | 'deletedSpans'
   | 'close'
 export type Operation = {
   [K in StoreMethod]: { id: number; method: K; args: Parameters<SqliteTrackStore[K]> }

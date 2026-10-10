@@ -17,6 +17,7 @@ import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
 import { join } from 'node:path'
 import { createTrackProvider } from './trackProvider.js'
+import { outsideSpans, recordedId } from './recycleBin.js'
 import type { TrackApi } from './trackApi.js'
 import { AsyncTrackStore } from './asyncTrackStore.js'
 import type { TrackStore } from './store.js'
@@ -28,7 +29,9 @@ import { toGpx } from './gpx.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type {
+  BinEntry,
   Context,
+  DeletedSpan,
   Debug,
   LatLngTuple,
   LngLatTuple,
@@ -177,6 +180,7 @@ interface Plugin {
   enabledByDefault: boolean
   stop: () => Promise<void>
   signalKApiRoutes: (r: Router) => Router
+  registerWithRouter: (r: Router) => Router
   id: string
   name: string
   description: string
@@ -195,6 +199,8 @@ interface TracksPluginConfig {
   resolution?: number
   /** Days another vessel is kept after its last fix. 0 keeps every vessel. */
   aisRetentionDays?: number
+  /** Days a deleted track waits in the recycle bin before it is purged. */
+  recycleBinDays?: number
   /** Minutes without a fix that start a new track segment. 0 disables. */
   segmentGapMinutes?: number
   /** Speed above which a position is treated as a glitch. 0 disables. */
@@ -211,6 +217,9 @@ const DEFAULT_RESOLUTION = 60000
 // passage last week is still there to compare against, and short enough that a
 // season in a busy harbour does not accumulate every target that ever passed.
 const DEFAULT_AIS_RETENTION_DAYS = 30
+// Long enough to notice a track deleted by mistake after a season ashore.
+const DEFAULT_RECYCLE_BIN_DAYS = 180
+const DAY_MS = 24 * 60 * 60 * 1000
 
 // A vessel that has aged out is not urgent, so this need not be frequent.
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000
@@ -723,6 +732,51 @@ export default function ThePlugin(app: App): Plugin {
    */
   let storageError: string | undefined
   let storeResolution = DEFAULT_RESOLUTION
+  let binRetentionMs = DEFAULT_RECYCLE_BIN_DAYS * DAY_MS
+  /**
+   * The deleted spans of recorded tracks by context, loaded once and dropped
+   * whenever a delete, restore or purge changes them. Read for every history
+   * reconciliation, which would otherwise ask the store each time.
+   */
+  let deletedSpans: Promise<Map<string, DeletedSpan[]>> | undefined
+
+  /** A vessel's deleted spans, purged ones included. */
+  async function deletedSpansOf(context: string): Promise<DeletedSpan[]> {
+    const store = tracks
+    if (!store?.deletedSpans) {
+      return []
+    }
+    const loading = (deletedSpans ??= Promise.resolve(store.deletedSpans()).then((spans) => {
+      const byContext = new Map<string, DeletedSpan[]>()
+      for (const { context: owner, ...span } of spans) {
+        byContext.set(owner, [...(byContext.get(owner) ?? []), span])
+      }
+      return byContext
+    }))
+    try {
+      return (await loading).get(context) ?? []
+    } catch (err) {
+      if (deletedSpans === loading) deletedSpans = undefined
+      throw err
+    }
+  }
+
+  /**
+   * What history holds for a context, without what was deleted from it.
+   *
+   * The plugin cannot delete from a history provider, so a deleted span is
+   * cut out of every answer it gives; the store's own rows went to the
+   * recycle bin and are not read at all.
+   */
+  async function visibleHistory(
+    context: Context,
+    window: TimeWindow,
+    resolutionMs: number,
+  ): ReturnType<typeof historyPositions> {
+    const history = await historyPositions(app, context, window, resolutionMs, app.debug)
+    const spans = await deletedSpansOf(context)
+    return spans.length === 0 ? history : { ...history, points: outsideSpans(history.points, spans) }
+  }
   const sourceWatch = new SourceWatch()
   let glitchFilter = new GlitchFilter({ maxSpeedKnots: DEFAULT_MAX_SPEED_KNOTS })
   let stateGate = new StateGate(app.selfContext, DEFAULT_PAUSE_STATES)
@@ -762,6 +816,8 @@ export default function ThePlugin(app: App): Plugin {
       storeResolution = toNumber(config.resolution) ?? DEFAULT_RESOLUTION
       const segmentGapMinutes = toNumber(config.segmentGapMinutes) ?? DEFAULT_SEGMENT_GAP_MINUTES
       segmentGap = segmentGapMinutes > 0 ? segmentGapMinutes * 60 * 1000 : 0
+      binRetentionMs = Math.max(1, toNumber(config.recycleBinDays) ?? DEFAULT_RECYCLE_BIN_DAYS) * DAY_MS
+      deletedSpans = undefined
 
       // Rebuilt on every start so a changed ceiling takes effect, and so the
       // reference positions do not survive a restart the user made precisely
@@ -800,6 +856,7 @@ export default function ThePlugin(app: App): Plugin {
             // keeping, and a year of it at the default resolution is a few
             // megabytes. Other vessels are pruned by aisRetentionDays.
             retention: 0,
+            binRetention: binRetentionMs,
             segmentGap,
           },
           app.debug,
@@ -924,6 +981,10 @@ export default function ThePlugin(app: App): Plugin {
           // uses: the store alone through v2, the store enriched by a history
           // provider through v1.
           historyContexts: (window) => historyContextsIn(app, window, app.debug, knownContexts),
+          historyKnows: (context) => historyKnowsContext(app, context, app.debug, knownContexts),
+          deleted: () => {
+            deletedSpans = undefined
+          },
           reconcileWithHistory: async (context, stored, window, resolutionMs) => {
             const effective = resolutionMs ?? storeResolution
             // A query with no window still gets history, for the same reason
@@ -931,7 +992,7 @@ export default function ThePlugin(app: App): Plugin {
             // before this plugin was installed — would otherwise never be asked
             // about.
             const asked = window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
-            const history = await historyPositions(app, context, asked, effective, app.debug)
+            const history = await visibleHistory(context, asked, effective)
             // `failed` is deliberately not escalated here: the v2 contract has
             // no per-context error and no 404, so a provider outage degrades to
             // the store's own points rather than failing a multi-context query
@@ -1018,7 +1079,7 @@ export default function ThePlugin(app: App): Plugin {
         // history: `/self/track` with no parameters is the common case, and
         // skipping the provider there would quietly serve store-only data.
         const window = query.window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
-        const history = await historyPositions(app, context, window, effectiveResolution, app.debug)
+        const history = await visibleHistory(context, window, effectiveResolution)
         const points = withHistory(history, stored)
         // 404 only for a vessel neither source knows at all. A known vessel
         // with nothing inside the window is an empty track, not a missing one.
@@ -1267,6 +1328,95 @@ export default function ThePlugin(app: App): Plugin {
       return router
     },
 
+    // Mounted under /plugins/tracks, where the server keeps routes registered
+    // directly on the router admin-only: the same authority the Track API
+    // asks to delete, which restoring and purging are part of.
+    registerWithRouter: function (router: Router) {
+      const binEntryJson = (entry: BinEntry) => {
+        const name =
+          entry.context === undefined
+            ? undefined
+            : contextName(
+                entry.context,
+                remembering(() => tracks),
+              )
+        const iso = (ms: number | undefined) => (ms === undefined ? undefined : new Date(ms).toISOString())
+        return {
+          id: entry.id,
+          trackId: entry.importId ?? recordedId(entry.context!),
+          kind: entry.importId === undefined ? 'recorded' : 'imported',
+          ...(entry.context === undefined ? {} : { context: entry.context, isSelf: entry.context === app.selfContext }),
+          ...(name === undefined ? {} : { contextName: name }),
+          ...(entry.name === undefined ? {} : { name: entry.name }),
+          whole: entry.whole,
+          ...(entry.from === undefined ? {} : { from: iso(entry.from) }),
+          ...(entry.to === undefined ? {} : { to: iso(entry.to) }),
+          deletedAt: iso(entry.deletedAt),
+          purgeAt: iso(entry.deletedAt + binRetentionMs),
+          pointCount: entry.pointCount,
+        }
+      }
+      /** The bin entry an `:id` names, or undefined after answering 400 or 404. */
+      const binStore = (req: Request, res: Response): { store: TrackStore; id: number } | undefined => {
+        const store = tracks
+        if (!store?.binEntries || !store.restoreFromBin || !store.purgeFromBin) {
+          notAvailable(res)
+          return undefined
+        }
+        const id = Number(req.params.id)
+        if (!Number.isSafeInteger(id) || id <= 0) {
+          res.status(400).json({ message: `Recycle bin entry '${req.params.id}' is not an id` })
+          return undefined
+        }
+        return { store, id }
+      }
+      const failed = (res: Response) => (err: unknown) => {
+        app.error(`Recycle bin: ${errorDetail(err)}`)
+        res.status(500).json({ message: 'Track storage failed' })
+      }
+
+      router.get('/recycle-bin', (_req: Request, res: Response) => {
+        const store = tracks
+        if (!store?.binEntries) {
+          notAvailable(res)
+          return
+        }
+        Promise.resolve(store.binEntries())
+          .then((entries) => res.json(entries.map(binEntryJson)))
+          .catch(failed(res))
+      })
+      router.post('/recycle-bin/:id/restore', (req: Request, res: Response) => {
+        const found = binStore(req, res)
+        if (!found) return
+        Promise.resolve(found.store.restoreFromBin!(found.id))
+          .then((result) => {
+            deletedSpans = undefined
+            if (result === 'restored') {
+              res.json({})
+            } else if (result === 'missing') {
+              res.status(404).json({ message: 'No such entry in the recycle bin' })
+            } else {
+              res.status(409).json({ message: 'The whole track is in the recycle bin too; restore it first' })
+            }
+          })
+          .catch(failed(res))
+      })
+      router.delete('/recycle-bin/:id', (req: Request, res: Response) => {
+        const found = binStore(req, res)
+        if (!found) return
+        Promise.resolve(found.store.purgeFromBin!(found.id))
+          .then((purged) => {
+            if (purged) {
+              res.json({})
+            } else {
+              res.status(404).json({ message: 'No such entry in the recycle bin' })
+            }
+          })
+          .catch(failed(res))
+      })
+      return router
+    },
+
     getTracks: () => tracks,
 
     id: 'tracks',
@@ -1298,6 +1448,14 @@ export default function ThePlugin(app: App): Plugin {
           description:
             'A gap longer than this starts a new track segment, so a stop overnight or a spell out of AIS range does not draw a straight line across it. 0 (the default) returns the track as a single line, as before. Note that slow-updating AIS targets can legitimately go many minutes between fixes, so a low value will fragment their tracks.',
           default: DEFAULT_SEGMENT_GAP_MINUTES,
+        },
+        recycleBinDays: {
+          type: 'integer',
+          minimum: 1,
+          title: 'Days to keep a deleted track in the recycle bin',
+          description:
+            'A deleted track, or part of one, can be restored from the recycle bin in the Tracks webapp until it is purged after this many days.',
+          default: DEFAULT_RECYCLE_BIN_DAYS,
         },
         maxSpeedKnots: {
           type: 'integer',

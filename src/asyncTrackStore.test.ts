@@ -300,7 +300,7 @@ describe('imported tracks through the worker', () => {
     await store.storeImport(track('imported:a'))
     expect(await store.getImport('imported:a')).toEqual(track('imported:a'))
     expect((await store.findImports({ contexts: ['vessels.other'] })).map(({ id }) => id)).toEqual(['imported:a'])
-    expect(await store.deleteImport('imported:a')).toBe(true)
+    expect(await store.binImport('imported:a', undefined, 1000)).toBeTypeOf('number')
     expect(await store.getImport('imported:a')).toBeUndefined()
   })
 
@@ -331,6 +331,6 @@ describe('imported tracks through the worker', () => {
     store.newPosition('self', [NaN, 24], 100)
     await expect(store.get('self')).rejects.toThrow()
     await expect(store.storeImport(track('imported:a'))).rejects.toThrow()
-    await expect(store.deleteImport('imported:a')).rejects.toThrow()
+    await expect(store.binImport('imported:a', undefined, 1000)).rejects.toThrow()
   })
 })
