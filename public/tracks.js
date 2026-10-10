@@ -96,11 +96,14 @@ function row(properties) {
  * A button asking `bin.js` to delete this track.
  *
  * Handed over as an event rather than handled here, so the list stays a page
- * that only reads; a track without an id cannot be addressed, and gets none.
+ * that only reads; a track that cannot be addressed gets none.
  */
 function deleteCell(properties) {
   const td = document.createElement('td')
-  if (typeof properties.id === 'string') {
+  // The server names a track `providerId:trackId`; one that hands out the
+  // provider's own ids has no route to delete them by.
+  const { id, providerId } = properties
+  if (typeof id === 'string' && typeof providerId === 'string' && id.startsWith(`${providerId}:`)) {
     const button = document.createElement('button')
     button.type = 'button'
     button.textContent = 'Delete…'
