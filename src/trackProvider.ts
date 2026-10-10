@@ -2,7 +2,14 @@ import { Temporal } from '@js-temporal/polyfill'
 import { M_PER_DEG, simplify } from './simplify.js'
 import { segment, thin, thinToBudget } from './timeWindow.js'
 import type { TrackStore } from './store.js'
-import type { TrackApi, TrackBoundingBox, TrackFeature, TracksRequest, TracksResponse } from './trackApi.js'
+import type {
+  TrackApi,
+  TrackBoundingBox,
+  TrackFeature,
+  TrackProperties,
+  TracksRequest,
+  TracksResponse,
+} from './trackApi.js'
 import type { GeoBounds, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
 import { clipToBounds, createInBounds, toIsoTimes } from './utils.js'
 
@@ -315,74 +322,96 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
       const selfContext = deps.selfContext()
       const features: TrackFeature[] = []
       for (const [context, all] of matched) {
-        // The budget is applied per track, after the store's own thinning: a
-        // client that named both is asking for this spacing *and* no more than
-        // this many points, and the wider of the two wins.
-        const { points, resolution: appliedMs } =
-          query.maxPoints === undefined
-            ? { points: all, resolution: requested }
-            : thinToBudget(all, query.maxPoints, requested)
-        if (points.length === 0) {
-          continue
-        }
-        // Simplification runs after thinning, not before: thinning is what a
-        // client asked for explicitly, and simplifying first would spend the
-        // shape budget on points that are about to be dropped anyway.
-        //
-        // `epsilon` implies `simplify`, per the spec. With `simplify` and no
-        // epsilon the tolerance is sized to the query's box, or to the track
-        // itself when there is none; see chooseEpsilon.
-        //
-        // Segmenting comes first and each segment is simplified on its own.
-        // The simplifier has no notion of a time gap, so given the whole track
-        // it can drop the points either side of one — two collinear legs
-        // three hours apart reduce to a single line, and segmenting that
-        // afterwards yields one-point segments, which are not drawable
-        // geometry. Splitting first keeps every leg's own endpoints.
-        const chosenEpsilon = chooseEpsilon(points, query)
-        const segments = segment(points, gap).map((s) => (chosenEpsilon === undefined ? s : simplify(s, chosenEpsilon)))
-        const shaped = segments.flat()
-        const bbox = boundsOf(shaped)
         const name = deps.contextName(context)
-        features.push({
-          type: 'Feature',
-          // geometry=false asks for the metadata only, so a client can list
-          // what exists before paying for the coordinates.
-          geometry:
-            query.geometry === false
-              ? null
-              : {
-                  type: 'MultiLineString',
-                  coordinates: segments.map((s) => s.map(({ position }) => toLngLat(position))),
-                },
-          properties: {
-            context,
-            isSelf: context === selfContext,
-            // Omitted rather than empty: the spec says "where known".
-            ...(name === undefined ? {} : { contextName: name }),
-            from: new Date(shaped[0]!.timestamp).toISOString(),
-            to: new Date(shaped[shaped.length - 1]!.timestamp).toISOString(),
-            ...(bbox ? { bbox } : {}),
-            pointCount: shaped.length,
-            // The spacing actually applied, which is not always the one asked
-            // for: a maxPoints budget widens it. Reported so a client can tell
-            // a thinned track from a full one, and see what produced it.
-            ...(appliedMs === undefined ? {} : { resolution: msToDuration(appliedMs).toString() }),
-            // The tolerance simplification ran with, absent when it did not
-            // run at all. Note a tolerance can legitimately change nothing —
-            // a track with no point further than epsilon from its own line is
-            // already as simple as it gets — so this reports what was applied
-            // rather than implying the geometry differs from the stored one.
-            ...(chosenEpsilon === undefined ? {} : { epsilon: chosenEpsilon }),
-            ...(query.times ? { coordTimes: segments.map(toIsoTimes) } : {}),
-          },
+        const feature = shapeFeature(all, gap, query, requested, {
+          context,
+          isSelf: context === selfContext,
+          // Omitted rather than empty: the spec says "where known".
+          ...(name === undefined ? {} : { contextName: name }),
         })
+        if (feature) {
+          features.push(feature)
+        }
       }
       return { type: 'FeatureCollection', features }
     },
 
     async getTrackContexts(query: TracksRequest): Promise<string[]> {
       return [...(await matching(query)).tracks.keys()]
+    },
+  }
+}
+
+/**
+ * One track as a Feature, or undefined when the budget leaves nothing to draw.
+ *
+ * `identity` is whatever names the track — context, vessel name — and comes
+ * first, so the derived properties after it always describe the geometry
+ * actually returned.
+ */
+function shapeFeature(
+  all: TimedPosition[],
+  gap: number,
+  query: TracksRequest,
+  requested: number | undefined,
+  identity: Pick<TrackProperties, 'context' | 'isSelf' | 'contextName'>,
+): TrackFeature | undefined {
+  // The budget is applied per track, after the store's own thinning: a
+  // client that named both is asking for this spacing *and* no more than
+  // this many points, and the wider of the two wins.
+  const { points, resolution: appliedMs } =
+    query.maxPoints === undefined
+      ? { points: all, resolution: requested }
+      : thinToBudget(all, query.maxPoints, requested)
+  if (points.length === 0) {
+    return undefined
+  }
+  // Simplification runs after thinning, not before: thinning is what a
+  // client asked for explicitly, and simplifying first would spend the
+  // shape budget on points that are about to be dropped anyway.
+  //
+  // `epsilon` implies `simplify`, per the spec. With `simplify` and no
+  // epsilon the tolerance is sized to the query's box, or to the track
+  // itself when there is none; see chooseEpsilon.
+  //
+  // Segmenting comes first and each segment is simplified on its own.
+  // The simplifier has no notion of a time gap, so given the whole track
+  // it can drop the points either side of one — two collinear legs
+  // three hours apart reduce to a single line, and segmenting that
+  // afterwards yields one-point segments, which are not drawable
+  // geometry. Splitting first keeps every leg's own endpoints.
+  const chosenEpsilon = chooseEpsilon(points, query)
+  const segments = segment(points, gap).map((s) => (chosenEpsilon === undefined ? s : simplify(s, chosenEpsilon)))
+  const shaped = segments.flat()
+  const bbox = boundsOf(shaped)
+  return {
+    type: 'Feature',
+    // geometry=false asks for the metadata only, so a client can list
+    // what exists before paying for the coordinates.
+    geometry:
+      query.geometry === false
+        ? null
+        : {
+            type: 'MultiLineString',
+            coordinates: segments.map((s) => s.map(({ position }) => toLngLat(position))),
+          },
+    properties: {
+      ...identity,
+      from: new Date(shaped[0]!.timestamp).toISOString(),
+      to: new Date(shaped[shaped.length - 1]!.timestamp).toISOString(),
+      ...(bbox ? { bbox } : {}),
+      pointCount: shaped.length,
+      // The spacing actually applied, which is not always the one asked
+      // for: a maxPoints budget widens it. Reported so a client can tell
+      // a thinned track from a full one, and see what produced it.
+      ...(appliedMs === undefined ? {} : { resolution: msToDuration(appliedMs).toString() }),
+      // The tolerance simplification ran with, absent when it did not
+      // run at all. Note a tolerance can legitimately change nothing —
+      // a track with no point further than epsilon from its own line is
+      // already as simple as it gets — so this reports what was applied
+      // rather than implying the geometry differs from the stored one.
+      ...(chosenEpsilon === undefined ? {} : { epsilon: chosenEpsilon }),
+      ...(query.times ? { coordTimes: segments.map(toIsoTimes) } : {}),
     },
   }
 }
