@@ -69,7 +69,7 @@ the History API has no way to delete or hide data and the next query would other
 back in.
 
 Nothing deleted is gone at once. It goes to a recycle bin, listed in the Tracks webapp, where
-it can be restored or deleted for good, and it is purged after 180 days (a setting). The
+it can be restored or deleted for good, until it is purged after the number of days set in the plugin settings (180 by default). The
 retention settings above do not reach into the bin. Once a recorded span is purged its points
 are gone, but the span stays hidden in the provider's data for good.
 
