@@ -51,8 +51,8 @@ beforeAll(async () => {
   await server.feed(CTX, [60.12, 24.92], t0 + 2 * MINUTE)
 }, 180_000)
 
-afterAll(() => {
-  server?.stop()
+afterAll(async () => {
+  await server?.stop()
 })
 
 describe('the plugin registers as a track provider', () => {

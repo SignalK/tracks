@@ -85,8 +85,8 @@ beforeAll(async () => {
   })
 }, 300_000)
 
-afterAll(() => {
-  server?.stop()
+afterAll(async () => {
+  await server?.stop()
 })
 
 describe('bootstrap through a real history provider', () => {

@@ -26,8 +26,8 @@ beforeAll(async () => {
   server = await startServer({ config: { segmentGapMinutes: 5 } })
 }, 180_000)
 
-afterAll(() => {
-  server?.stop()
+afterAll(async () => {
+  await server?.stop()
 })
 
 describe('the server loads and mounts the plugin', () => {
