@@ -1,6 +1,7 @@
 import { Readable } from 'node:stream'
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request } from 'express'
+import express from 'express'
 import request from 'supertest'
 import { describe, expect, it } from 'vitest'
 import type { GpxTrack } from './gpx.js'
@@ -8,7 +9,7 @@ import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils
 import type { TestHarness } from './harness.test-utils.js'
 import { fromGpxTrack } from './importedTracks.js'
 import { TrackRejectedError } from './trackApi.js'
-import { readText, UploadTooLargeError } from './upload.js'
+import { readText, UploadTooLargeError, UploadTypeError } from './upload.js'
 
 const t0 = Date.UTC(2025, 6, 1, 12)
 const MINUTE = 60_000
@@ -81,6 +82,21 @@ describe('reading an upload', () => {
 
   it('takes a body already read as text', async () => {
     expect(await readText(fakeRequest('', '<gpx/>'))).toBe('<gpx/>')
+  })
+
+  // XML allows one, and many Windows tools write it.
+  it('drops a byte-order mark', async () => {
+    expect(await readText(fakeRequest('\uFEFF<gpx/>'))).toBe('<gpx/>')
+    expect(await readText(fakeRequest('', '\uFEFF<gpx/>'))).toBe('<gpx/>')
+  })
+
+  // A form parser has read the stream and left an object: waiting on the
+  // stream would never end.
+  it('refuses a body a parser already consumed', async () => {
+    const consumed = fakeRequest('', {})
+    consumed.resume()
+    await new Promise((resolve) => consumed.on('end', resolve))
+    await expect(readText(consumed)).rejects.toBeInstanceOf(UploadTypeError)
   })
 })
 
@@ -156,6 +172,19 @@ describe('the GPX upload route', () => {
       expect(res.status).toBe(400)
       expect((res.body as { message: string }).message).toContain('Untimed')
       expect(await listed(h)).toEqual([])
+    }))
+
+  // The server's form parser reads a body sent as curl's default type.
+  it('answers 415 for a body sent as a form', () =>
+    withHarness(async (h) => {
+      const app = express()
+      app.use(express.urlencoded({ extended: true }))
+      app.use(h.app)
+      const res = await request(app)
+        .post('/plugins/tracks/imports')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(gpxFile(trk('Morning', [t0])))
+      expect(res.status).toBe(415)
     }))
 
   it('refuses a file that holds no track', () =>

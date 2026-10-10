@@ -27,7 +27,7 @@ import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
 import { fromGpx, toGpx } from './gpx.js'
 import { fromGpxTrack } from './importedTracks.js'
-import { readText, UploadTooLargeError } from './upload.js'
+import { readText, UploadTooLargeError, UploadTypeError } from './upload.js'
 import { TrackRejectedError } from './trackApi.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
@@ -1467,6 +1467,8 @@ export default function ThePlugin(app: App): Plugin {
           } catch (err) {
             if (err instanceof UploadTooLargeError) {
               res.status(413).json({ message: err.message })
+            } else if (err instanceof UploadTypeError) {
+              res.status(415).json({ message: err.message })
             } else {
               res.status(400).json({ message: 'The file could not be read' })
             }
@@ -1496,7 +1498,8 @@ export default function ThePlugin(app: App): Plugin {
             return
           }
           res.status(201).json({
-            // As the Track API names them, so a client can fetch or delete them there.
+            // As the Track API names them on a server with its write routes,
+            // so a client can fetch or delete them there.
             ids: converted.map(({ track }) => `${PLUGIN_ID}:${track.id}`),
             skippedPoints: converted.reduce((sum, { skippedPoints }) => sum + skippedPoints, 0),
           })
