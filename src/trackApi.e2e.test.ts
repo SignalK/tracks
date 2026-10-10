@@ -22,6 +22,7 @@ interface Feature {
   type: string
   geometry: { type: string; coordinates: [number, number][][] } | null
   properties: {
+    id?: string
     context: string
     isSelf: boolean
     providerId?: string
@@ -190,5 +191,46 @@ describe('a v2 query through the real HTTP route', () => {
   it('rejects a malformed query before reaching the provider', async () => {
     const { status } = await server.apiV2(`/tracks?contexts=${CTX}&bbox=1,2,3`)
     expect(status).toBe(400)
+  })
+})
+
+describe('an imported track through the real HTTP routes', () => {
+  // Storing tracks arrived in SignalK/signalk-server#3038. A server without it
+  // has no POST route, which says nothing about this plugin, so the test steps
+  // aside there rather than failing.
+  it('is stored, listed, fetched and deleted by its id', async (context) => {
+    const posted = {
+      type: 'Feature',
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [24.5, 60.5],
+          [24.6, 60.6],
+        ],
+      },
+      properties: {
+        name: 'Imported passage',
+        coordTimes: [new Date(t0).toISOString(), new Date(t0 + MINUTE).toISOString()],
+        colour: 'red',
+      },
+    }
+    const stored = await server.apiV2('/tracks', { method: 'POST', body: posted })
+    if (stored.status === 404 || stored.status === 405) {
+      context.skip()
+    }
+    expect(stored.status).toBe(201)
+    const { id } = stored.body as { id: string }
+    expect(id).toMatch(/^tracks:imported:/)
+
+    const fetched = await server.apiV2(`/tracks/${encodeURIComponent(id)}`)
+    expect(fetched.status).toBe(200)
+    expect((fetched.body as Feature).properties).toMatchObject({ id, name: 'Imported passage', colour: 'red' })
+
+    const from = new Date(t0 - MINUTE).toISOString()
+    const listed = await server.apiV2(`/tracks?from=${from}&bbox=24.4,60.4,24.7,60.7`)
+    expect((listed.body as Collection).features.map(({ properties }) => properties.id)).toEqual([id])
+
+    expect((await server.apiV2(`/tracks/${encodeURIComponent(id)}`, { method: 'DELETE' })).status).toBe(200)
+    expect((await server.apiV2(`/tracks/${encodeURIComponent(id)}`)).status).toBe(404)
   })
 })

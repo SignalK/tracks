@@ -39,8 +39,10 @@ export interface E2EServer {
    *
    * The status is what distinguishes "no provider registered" (501) from an
    * answered query, which is the thing a provider registration test is about.
+   * `init` sends another method, with `body` as JSON. A body that is not JSON,
+   * as an older server's 404 page is, comes back as its text.
    */
-  apiV2: (path: string) => Promise<{ status: number; body: unknown }>
+  apiV2: (path: string, init?: { method?: string; body?: unknown }) => Promise<{ status: number; body: unknown }>
   /** The server's own vessel context, as it resolved it. */
   selfContext: string
   stop: () => void
@@ -204,9 +206,20 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
             const r = await fetch(`${url}/signalk/v1/api${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
             return r.json()
           },
-          apiV2: async (path: string) => {
-            const r = await fetch(`${url}/signalk/v2/api${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
-            return { status: r.status, body: await r.json() }
+          apiV2: async (path: string, init?: { method?: string; body?: unknown }) => {
+            const r = await fetch(`${url}/signalk/v2/api${path}`, {
+              signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+              ...(init?.method ? { method: init.method } : {}),
+              ...(init?.body === undefined
+                ? {}
+                : { body: JSON.stringify(init.body), headers: { 'Content-Type': 'application/json' } }),
+            })
+            const text = await r.text()
+            try {
+              return { status: r.status, body: JSON.parse(text) as unknown }
+            } catch {
+              return { status: r.status, body: text }
+            }
           },
           stop,
         }
