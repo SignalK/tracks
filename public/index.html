@@ -21,11 +21,53 @@
             <th scope="col">To</th>
             <th scope="col" class="num">Points</th>
             <th scope="col">Export</th>
+            <th scope="col"><span class="sr-only">Delete</span></th>
           </tr>
         </thead>
         <tbody></tbody>
       </table>
+      <section id="bin" aria-labelledby="bin-title">
+        <h2 id="bin-title">Recycle bin</h2>
+        <p id="bin-status" role="status">Loading…</p>
+        <table id="bin-table" hidden>
+          <thead>
+            <tr>
+              <th scope="col">Track</th>
+              <th scope="col">Deleted part</th>
+              <th scope="col">Deleted</th>
+              <th scope="col">Purged</th>
+              <th scope="col" class="num">Points</th>
+              <th scope="col"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
     </main>
+    <dialog id="delete-dialog">
+      <form method="dialog">
+        <h2 id="delete-title">Delete track</h2>
+        <fieldset>
+          <legend>What to delete</legend>
+          <label
+            ><input type="radio" name="scope" value="whole" checked />
+            <span id="delete-whole">The whole track</span></label
+          >
+          <label><input type="radio" name="scope" value="span" /> Only the part recorded</label>
+          <div class="span">
+            <label>from <input type="datetime-local" name="from" step="1" /></label>
+            <label>to <input type="datetime-local" name="to" step="1" /></label>
+          </div>
+        </fieldset>
+        <p>It goes to the recycle bin, where it can be restored until it is purged.</p>
+        <p id="delete-error" class="error" role="alert" hidden></p>
+        <menu>
+          <button value="cancel" formnovalidate>Cancel</button>
+          <button value="delete" class="danger">Delete</button>
+        </menu>
+      </form>
+    </dialog>
     <script type="module" src="./tracks.js"></script>
+    <script type="module" src="./bin.js"></script>
   </body>
 </html>

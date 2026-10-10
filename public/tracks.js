@@ -56,8 +56,8 @@ function label({ context, contextName, isSelf }) {
   if (contextName) {
     return `AIS ${contextName}`
   }
-  const mmsi = /urn:mrn:imo:mmsi:(\d+)$/.exec(context)
-  return mmsi ? `AIS ${mmsi[1]}` : context
+  const mmsi = /urn:mrn:imo:mmsi:(\d+)$/.exec(context ?? '')
+  return mmsi ? `AIS ${mmsi[1]}` : (context ?? 'No vessel')
 }
 
 /** ISO-8601 from the API, rendered in the viewer's own locale and zone. */
@@ -73,14 +73,43 @@ function row(properties) {
   if (properties.isSelf) {
     name.className = 'self'
   }
+  // An imported track names the vessel it belongs to and has a name of its
+  // own; without the second it reads exactly like that vessel's recording.
+  if (typeof properties.name === 'string') {
+    const imported = document.createElement('span')
+    imported.className = 'imported'
+    imported.textContent = ` (imported: ${properties.name})`
+    name.append(imported)
+  }
   tr.append(
     name,
     cell(when(properties.from)),
     cell(when(properties.to)),
     cell(properties.pointCount, 'num'),
     exportCell(properties),
+    deleteCell(properties),
   )
   return tr
+}
+
+/**
+ * A button asking `bin.js` to delete this track.
+ *
+ * Handed over as an event rather than handled here, so the list stays a page
+ * that only reads; a track without an id cannot be addressed, and gets none.
+ */
+function deleteCell(properties) {
+  const td = document.createElement('td')
+  if (typeof properties.id === 'string') {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = 'Delete…'
+    button.addEventListener('click', () => {
+      document.dispatchEvent(new CustomEvent('tracks:delete', { detail: { ...properties, label: label(properties) } }))
+    })
+    td.append(button)
+  }
+  return td
 }
 
 /**
@@ -92,6 +121,9 @@ function row(properties) {
  */
 function exportCell({ context, isSelf }) {
   const td = document.createElement('td')
+  if (typeof context !== 'string') {
+    return td
+  }
   const link = document.createElement('a')
   // `self` resolves server-side; using it keeps the URL short and avoids
   // guessing how the own vessel's context should be spelled.
@@ -176,8 +208,12 @@ async function load() {
   // that just finished.
   const sorted = features
     .map((feature) => feature?.properties)
+    // An import may name no vessel; it is still listed, so it can be deleted.
     .filter(
-      (properties) => properties && typeof properties.context === 'string' && Number.isFinite(properties.pointCount),
+      (properties) =>
+        properties &&
+        (typeof properties.context === 'string' || typeof properties.name === 'string') &&
+        Number.isFinite(properties.pointCount),
     )
     .sort((a, b) => String(b.to ?? '').localeCompare(String(a.to ?? '')))
 
