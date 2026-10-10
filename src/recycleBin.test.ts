@@ -150,6 +150,15 @@ describe('recycle bin: imported tracks', () => {
     store.close()
   })
 
+  it('leaves no entry for a span that holds none of its points', () => {
+    const store = newStore()
+    store.storeImport(passage())
+    expect(store.binImport('imported:a', { from: t0 + 10_000 }, t0 + DAY)).toBeUndefined()
+    expect(store.binEntries()).toEqual([])
+    expect(store.getImport('imported:a')).toEqual(passage())
+    store.close()
+  })
+
   it('moves a span of an import and puts its points back in their segments', () => {
     const store = newStore()
     store.storeImport(passage())

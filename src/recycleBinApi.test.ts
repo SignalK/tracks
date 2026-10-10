@@ -232,6 +232,15 @@ describe('deleting imported tracks', () => {
       expect((await provider.getTrack(id))?.properties.coordTimes).toEqual([[iso(t0)]])
     }))
 
+  // The track exists, so the delete succeeded; it just had nothing to move.
+  it('answers true for a span with none of an import’s points, binning nothing', () =>
+    withHarness(async (h) => {
+      const provider = providerOf(h)
+      const id = await provider.storeTrack(passage())
+      expect(await provider.deleteTrackSpan(id, { from: instant(t0 + 10 * MINUTE) })).toBe(true)
+      expect((await request(h.app).get('/plugins/tracks/recycle-bin')).body).toEqual([])
+    }))
+
   it('refuses a span of an import without times as the client’s error', () =>
     withHarness(async (h) => {
       const provider = providerOf(h)

@@ -804,7 +804,7 @@ export class SqliteTrackStore implements TrackStore {
   /**
    * Move an imported track into the recycle bin, or with a span only its
    * points within it, resolving to the entry's id; undefined when there is no
-   * such import.
+   * such import, or the span holds none of its points.
    */
   binImport(importId: string, span: { from?: number; to?: number } | undefined, deletedAt: number): number | undefined {
     const track = this.db.prepare('SELECT context, name FROM imported_tracks WHERE id = ?').get(importId) as
@@ -823,12 +823,19 @@ export class SqliteTrackStore implements TrackStore {
     const params = span
       ? [importId, span.from ?? Number.MIN_SAFE_INTEGER, span.to ?? Number.MAX_SAFE_INTEGER]
       : [importId]
-    this.db
-      .prepare(
-        `INSERT INTO binned_imported_points (bin_id, track_id, seq, segment, timestamp, lat, lon)
-         SELECT ?, track_id, seq, segment, timestamp, lat, lon FROM imported_points WHERE ${where}`,
-      )
-      .run(id, ...params)
+    const moved = Number(
+      this.db
+        .prepare(
+          `INSERT INTO binned_imported_points (bin_id, track_id, seq, segment, timestamp, lat, lon)
+           SELECT ?, track_id, seq, segment, timestamp, lat, lon FROM imported_points WHERE ${where}`,
+        )
+        .run(id, ...params).changes,
+    )
+    // An empty span leaves the track as it was, and so leaves nothing to restore.
+    if (span && moved === 0) {
+      this.db.prepare('DELETE FROM recycle_bin WHERE id = ?').run(id)
+      return undefined
+    }
     this.db.prepare(`DELETE FROM imported_points WHERE ${where}`).run(...params)
     // A span that took every point would leave a track no query lists, so it
     // takes the track too, and restoring the entry brings back both.
