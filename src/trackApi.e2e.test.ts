@@ -352,9 +352,16 @@ describe('a GPX file through the import route', () => {
     const [id] = (imported.body as { ids: string[] }).ids
 
     const listed = await server.apiV2(`/tracks?duration=PT1H&bbox=22.9,60.9,23.1,61.1`)
-    const features = (listed.body as Collection).features.filter(({ properties }) => properties.id?.endsWith(id!))
+    // The route names the track as the Track API does on a server that
+    // prefixes ids with the provider; an older one lists it bare.
+    const local = id!.replace(/^tracks:/, '')
+    const features = (listed.body as Collection).features.filter(({ properties }) => properties.id?.endsWith(local))
     expect(features.map(({ properties }) => [properties.context, properties.isSelf, properties.pointCount])).toEqual([
       [server.selfContext, true, 3],
     ])
+    // The webapp's list of every import, through the server's own access check.
+    const all = await server.plugin('/imports')
+    expect(all.status).toBe(200)
+    expect((all.body as { id: string; name: string }[]).find((entry) => entry.id === id)?.name).toBe('Old passage')
   })
 })

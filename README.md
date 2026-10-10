@@ -68,6 +68,10 @@ nothing is stored and the reason is shown. In a timed track, points without a ti
 skipped, and the answer says how many. The route needs write access on a Signal K server that
 lets a plugin say so, and administrator rights on an older one.
 
+The webapp lists every imported track, however old and whether or not it has times, next to
+the last 30 days of recorded ones, so a passage imported from years ago can be found, exported
+and deleted there. `GET /plugins/tracks/imports` returns that list.
+
 ## Deleting tracks
 
 `DELETE /signalk/v2/api/tracks/<id>` deletes a track, and with `from`, `to` or both only the

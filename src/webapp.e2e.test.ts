@@ -46,13 +46,17 @@ describe('the webapp is served by a real server', () => {
     // out of the source, which would pin how the request happens to be
     // written rather than where it goes.
     const { requested } = await renderShippedPage(await (await fetchApp('tracks.js')).text())
-    expect(requested).toHaveLength(1)
+    expect(requested).toHaveLength(2)
+    const [imports, tracks] = [...requested].sort()
 
-    const resolved = new URL(requested[0]!, page)
-    const res = await fetch(resolved)
+    const listed = await fetch(new URL(tracks!, page))
+    expect(listed.status).toBe(200)
+    expect(await listed.json()).toHaveProperty('features')
 
-    expect(res.status).toBe(200)
-    expect(await res.json()).toHaveProperty('features')
+    // Every import, from the plugin's own route.
+    const all = await fetch(new URL(imports!, page))
+    expect(all.status).toBe(200)
+    expect(Array.isArray(await all.json())).toBe(true)
   })
 })
 

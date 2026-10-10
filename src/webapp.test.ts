@@ -180,7 +180,7 @@ const element = (tagName: string): StubElement => {
 
 async function render(
   response: { status?: number; ok?: boolean; body?: unknown } | Error | 'stall' | 'stall-body',
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; imports?: unknown[] } = {},
 ) {
   const status = element('p')
   const tbody = element('tbody')
@@ -209,6 +209,14 @@ async function render(
   await run(
     document,
     (url: string, init: { signal?: AbortSignal }) => {
+      // Every import, from the plugin's own route; a server without it answers 404.
+      if (url.endsWith('/plugins/tracks/imports')) {
+        return Promise.resolve(
+          options.imports === undefined
+            ? { status: 404, ok: false, json: () => Promise.reject(new Error('not JSON')) }
+            : { status: 200, ok: true, json: () => Promise.resolve(options.imports) },
+        )
+      }
       requested.push(url)
       if (response === 'stall-body') {
         return Promise.resolve({
@@ -594,6 +602,65 @@ describe('the webapp offers a GPX download', () => {
 
     expect(listed).toBe('P30D')
     expect(exported).toBe(30 * 24 * 60 * 60 * 1000)
+  })
+})
+
+// The list reaches back 30 days through the Track API, which an old passage
+// or an untimed track never matches; an imported file must still be findable.
+describe('the webapp lists every import', () => {
+  const old = {
+    id: 'tracks:imported:old',
+    providerId: 'tracks',
+    name: 'Passage 2019',
+    from: '2019-06-01T00:00:00Z',
+    to: '2019-06-02T00:00:00Z',
+    pointCount: 40,
+  }
+
+  it('adds an import the window misses', async () => {
+    const { tbody, status } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [feature({ context: SELF, isSelf: true, to: '2026-09-01T00:00:00Z', pointCount: 2 })],
+        },
+      },
+      { imports: [old] },
+    )
+    expect(tbody.children).toHaveLength(2)
+    expect(tbody.children[1]!.children[0]!.textContent).toBe('No vessel')
+    expect(status.textContent).toBe('2 tracks: the last 30 days, and every import.')
+  })
+
+  it('lists an import the window also returned once', async () => {
+    const recent = { ...old, from: '2026-09-01T00:00:00Z', to: '2026-09-01T01:00:00Z' }
+    const { tbody, status } = await render(
+      { body: { type: 'FeatureCollection', features: [feature(recent)] } },
+      { imports: [recent] },
+    )
+    expect(tbody.children).toHaveLength(1)
+    expect(status.textContent).toBe('1 track in the last 30 days.')
+  })
+
+  // A server without the Track API's write routes names a track without its
+  // provider; the same import must still be listed once.
+  it('lists an import once when the API names it without its provider', async () => {
+    const recent = { ...old, from: '2026-09-01T00:00:00Z', to: '2026-09-01T01:00:00Z' }
+    const { tbody } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [feature({ ...recent, id: 'imported:old', providerId: undefined })],
+        },
+      },
+      { imports: [recent] },
+    )
+    expect(tbody.children).toHaveLength(1)
+  })
+
+  it('shows an old import when the window has nothing', async () => {
+    const { tbody } = await render({ body: { type: 'FeatureCollection', features: [] } }, { imports: [old] })
+    expect(tbody.children).toHaveLength(1)
   })
 })
 

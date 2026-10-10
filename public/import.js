@@ -77,7 +77,7 @@ function start() {
       return
     }
     show(imported(body))
-    // The list shows the last 30 days; an older passage is stored all the same.
+    // Reloaded so the list, which shows every import, includes this one.
     setTimeout(() => location.reload(), 1500)
   })
 }

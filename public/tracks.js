@@ -36,6 +36,8 @@ const REQUEST_TIMEOUT_MS = 30_000
 
 /** Relative, because the server mounts this under /@signalk/tracks-plugin. */
 const TRACKS_URL = `../../signalk/v2/api/tracks?geometry=false&duration=${WINDOW_V2}`
+/** Every import, in the shape of the list's rows; the window above misses old and untimed ones. */
+const IMPORTS_URL = '../../plugins/tracks/imports'
 
 const status = document.getElementById('status')
 const table = document.getElementById('tracks')
@@ -158,14 +160,41 @@ function show(message, state) {
   }
 }
 
+/**
+ * Every imported track, or none when the server cannot list them: one that
+ * predates the route, or keeps it to administrators. The list then shows what
+ * the Track API returns, as it always has.
+ */
+async function allImports(signal) {
+  try {
+    const response = await fetch(IMPORTS_URL, { credentials: 'include', signal })
+    const body = response.ok ? await response.json() : undefined
+    return Array.isArray(body) ? body : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * A track's id without the provider prefix, which a server older than the
+ * Track API's write routes leaves off; the import listing always carries it.
+ */
+function localId(properties) {
+  const { id, providerId } = properties ?? {}
+  return typeof id === 'string' && typeof providerId === 'string' && id.startsWith(`${providerId}:`)
+    ? id.slice(providerId.length + 1)
+    : id
+}
+
 async function load() {
-  let response
   // Bounded, because an unsettled fetch is the one failure the page cannot
   // recover from: every other path ends in an error message, while a stalled
   // server or proxy leaves it on "Loading…" indefinitely, which reads as a
   // hang rather than a failure. The signal stays armed through json() below,
   // so a response that stops mid-body is caught too.
   const deadline = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  const imports = allImports(deadline)
+  let response
   try {
     response = await fetch(TRACKS_URL, { credentials: 'include', signal: deadline })
   } catch {
@@ -206,11 +235,12 @@ async function load() {
   }
   // Individual entries are still skipped rather than thrown on: one malformed
   // feature should not blank a list that is otherwise fine.
-  const features = body.features
+  const listed = body.features.map((feature) => feature?.properties)
+  const ids = new Set(listed.map(localId))
+  const older = (await imports).filter((properties) => !ids.has(localId(properties)))
   // Newest first: the track someone came to look at is almost always the one
   // that just finished.
-  const sorted = features
-    .map((feature) => feature?.properties)
+  const sorted = [...listed, ...older]
     // An import may name no vessel; it is still listed, so it can be deleted.
     .filter(
       (properties) =>
@@ -229,7 +259,8 @@ async function load() {
 
   tbody.replaceChildren(...sorted.map(row))
   table.hidden = false
-  show(`${sorted.length} track${sorted.length === 1 ? '' : 's'} in the last 30 days.`)
+  const tracks = `${sorted.length} track${sorted.length === 1 ? '' : 's'}`
+  show(older.length > 0 ? `${tracks}: the last 30 days, and every import.` : `${tracks} in the last 30 days.`)
 }
 
 void load()

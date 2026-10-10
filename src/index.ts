@@ -36,6 +36,7 @@ import type {
   Context,
   DeletedSpan,
   Debug,
+  ImportedTrack,
   LatLngTuple,
   LngLatTuple,
   Position,
@@ -206,6 +207,9 @@ interface Plugin {
 interface AccessRouter extends Router {
   access?: (level: 'readwrite' | 'readonly') => Pick<Router, 'get' | 'post' | 'put' | 'delete'>
 }
+
+/** The plugin's id, which the server also uses as its Track API provider id. */
+const PLUGIN_ID = 'tracks'
 
 interface TracksPluginConfig {
   resolution?: number
@@ -1348,6 +1352,39 @@ export default function ThePlugin(app: App): Plugin {
     // directly on the router admin-only: the same authority the Track API
     // asks to delete, which restoring and purging are part of.
     registerWithRouter: function (router: Router) {
+      /** An import as the webapp lists it, in the shape of a v2 track's properties. */
+      const importSummary = (track: ImportedTrack) => {
+        const name =
+          track.context === undefined
+            ? undefined
+            : contextName(
+                track.context,
+                remembering(() => tracks),
+              )
+        // A loop rather than Math.min(...): a long passage has more points than
+        // a call can take arguments.
+        let pointCount = 0
+        let from = Infinity
+        let to = -Infinity
+        for (const segment of track.segments) {
+          for (const { timestamp } of segment) {
+            pointCount++
+            if (timestamp !== undefined) {
+              from = Math.min(from, timestamp)
+              to = Math.max(to, timestamp)
+            }
+          }
+        }
+        return {
+          id: `${PLUGIN_ID}:${track.id}`,
+          providerId: PLUGIN_ID,
+          ...(track.name === undefined ? {} : { name: track.name }),
+          ...(track.context === undefined ? {} : { context: track.context, isSelf: track.context === app.selfContext }),
+          ...(name === undefined ? {} : { contextName: name }),
+          ...(from > to ? {} : { from: new Date(from).toISOString(), to: new Date(to).toISOString() }),
+          pointCount,
+        }
+      }
       const binEntryJson = (entry: BinEntry) => {
         const name =
           entry.context === undefined
@@ -1390,6 +1427,25 @@ export default function ThePlugin(app: App): Plugin {
         app.error(`Recycle bin: ${errorDetail(err)}`)
         res.status(500).json({ message: 'Track storage failed' })
       }
+
+      // Every import, whatever its time span: the webapp lists the last 30 days
+      // through the Track API, which an old passage or an untimed track never
+      // matches, so without this an imported file could not be found again.
+      // Listing asks for read access, as reading the Track API does.
+      const readable = (router as AccessRouter).access?.('readonly') ?? router
+      readable.get('/imports', (_req: Request, res: Response) => {
+        const store = tracks
+        if (!store?.findImports) {
+          notAvailable(res)
+          return
+        }
+        Promise.resolve(store.findImports())
+          .then((imports) => res.json(imports.map(importSummary)))
+          .catch((err: unknown) => {
+            app.error(`Listing imports: ${errorDetail(err)}`)
+            res.status(500).json({ message: 'Track storage failed' })
+          })
+      })
 
       // Storing a track asks for write access, as the Track API's POST does.
       // A server without per-route access keeps the route admin-only.
@@ -1440,7 +1496,8 @@ export default function ThePlugin(app: App): Plugin {
             return
           }
           res.status(201).json({
-            ids: converted.map(({ track }) => track.id),
+            // As the Track API names them, so a client can fetch or delete them there.
+            ids: converted.map(({ track }) => `${PLUGIN_ID}:${track.id}`),
             skippedPoints: converted.reduce((sum, { skippedPoints }) => sum + skippedPoints, 0),
           })
         })()
@@ -1490,7 +1547,7 @@ export default function ThePlugin(app: App): Plugin {
 
     getTracks: () => tracks,
 
-    id: 'tracks',
+    id: PLUGIN_ID,
     name: 'Tracks',
     // On by default: a track recorder that records nothing until someone finds
     // and enables it loses exactly the passage the user wanted kept.
