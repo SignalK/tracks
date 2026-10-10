@@ -580,6 +580,29 @@ describe('the webapp offers a GPX download', () => {
     expect(link.href).toContain('track.gpx')
   })
 
+  // Even when the import names a vessel: the vessel's recording is a
+  // different track from the one on this row.
+  it('exports an import as it was imported', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          feature({
+            id: 'tracks:imported:a b',
+            providerId: 'tracks',
+            context: SELF,
+            isSelf: true,
+            name: 'Race day',
+            pointCount: 2,
+          }),
+        ],
+      },
+    })
+
+    const link = tbody.children[0]!.children[4]!.children[0]!
+    expect(link.href).toBe('../../plugins/tracks/imports/imported%3Aa%20b/track.gpx')
+  })
+
   // The list shows a bounded window, and the export must not quietly differ
   // from what the row says it contains.
   it('exports the same window the list shows', async () => {
@@ -664,12 +687,13 @@ describe('the webapp lists every import', () => {
   })
 
   // The v1 route exports a vessel's recording, which an import is not part of.
-  it('offers no recording export for an import that names a vessel', async () => {
+  it('exports an import that names a vessel as it was imported', async () => {
     const { tbody } = await render(
       { body: { type: 'FeatureCollection', features: [] } },
       { imports: [{ ...old, context: SELF, isSelf: true }] },
     )
-    expect(tbody.children[0]!.children[4]!.children).toHaveLength(0)
+    const link = tbody.children[0]!.children[4]!.children[0]!
+    expect(link.href).toBe('../../plugins/tracks/imports/imported%3Aold/track.gpx')
   })
 
   // A server that names tracks without their provider cannot delete by id.
@@ -792,8 +816,8 @@ describe('the webapp offers to delete a track', () => {
     expect(name.children[0]!.textContent).toBe(' (imported: Race day)')
   })
 
-  // An import may name no vessel. Listing it is the only way to delete it from
-  // the page; there is no vessel recording to export for it, so no GPX link.
+  // An import may name no vessel. Listing it is the only way to reach it from
+  // the page, to export or delete it.
   it('lists an import that names no vessel', async () => {
     const { tbody } = await render({
       body: {
@@ -803,7 +827,7 @@ describe('the webapp offers to delete a track', () => {
     })
     const cells = tbody.children[0]!.children
     expect(cells[0]!.textContent).toBe('No vessel')
-    expect(cells.at(-2)!.children).toHaveLength(0)
+    expect(cells.at(-2)!.children[0]!.textContent).toBe('GPX')
     expect(cells.at(-1)!.children[0]!.textContent).toBe('Delete…')
   })
 })

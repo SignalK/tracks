@@ -73,6 +73,10 @@ The webapp lists every imported track, however old and whether or not it has tim
 the last 30 days of recorded ones, so a passage imported from years ago can be found there. It
 can be deleted there on a Signal K server that deletes tracks by id. `GET /plugins/tracks/imports` returns every imported track, and no recorded ones.
 
+The Tracks webapp exports an imported track as GPX from its row, as it was imported: under its
+own name, and without times if it had none. A client can download the same file from
+`GET /plugins/tracks/imports/<id>/track.gpx`, with the id less its `tracks:` prefix.
+
 ## Deleting tracks
 
 `DELETE /signalk/v2/api/tracks/<id>` deletes a track, and with `from`, `to` or both only the
