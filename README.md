@@ -58,19 +58,20 @@ only be found again by its id.
 ### Importing a GPX file
 
 The Tracks webapp imports a GPX file from the **Import** form, and a client can do the same
-with `POST /plugins/tracks/imports`, the file as the request body. Each track in the file
+with `POST /plugins/tracks/imports`, the file as the request body with `Content-Type:
+application/gpx+xml`. Each track in the file
 becomes an imported track as above. Ticking **Tracks of my own vessel** (`?self=true`) files
 them under the own vessel; otherwise a track names a vessel only if the file says which, as
 the plugin's own GPX export does.
 
-A file is imported whole or not at all: if any track in it has neither times nor a vessel,
-nothing is stored and the reason is shown. In a timed track, points without a time are
+A file with a track that cannot be kept is refused whole: if any track in it has neither times
+nor a vessel, nothing is stored and the reason is shown. In a timed track, points without a time are
 skipped, and the answer says how many. The route needs write access on a Signal K server that
 lets a plugin say so, and administrator rights on an older one.
 
 The webapp lists every imported track, however old and whether or not it has times, next to
-the last 30 days of recorded ones, so a passage imported from years ago can be found, exported
-and deleted there. `GET /plugins/tracks/imports` returns that list.
+the last 30 days of recorded ones, so a passage imported from years ago can be found and deleted
+there. `GET /plugins/tracks/imports` returns that list.
 
 ## Deleting tracks
 

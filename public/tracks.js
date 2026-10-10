@@ -36,6 +36,8 @@ const REQUEST_TIMEOUT_MS = 30_000
 
 /** Relative, because the server mounts this under /@signalk/tracks-plugin. */
 const TRACKS_URL = `../../signalk/v2/api/tracks?geometry=false&duration=${WINDOW_V2}`
+/** One track by its id, on a server that serves them so. */
+const TRACK_URL = '../../signalk/v2/api/tracks/'
 /** Every import, in the shape of the list's rows; the window above misses old and untimed ones. */
 const IMPORTS_URL = '../../plugins/tracks/imports'
 
@@ -124,9 +126,11 @@ function deleteCell(properties) {
  * response with a Content-Disposition on it, and the server sets one. Doing it
  * by hand would mean holding a whole track in memory to build a blob.
  */
-function exportCell({ context, isSelf }) {
+function exportCell(properties) {
+  const { context, isSelf } = properties
   const td = document.createElement('td')
-  if (typeof context !== 'string') {
+  // The v1 route exports a vessel's recording, which an import is not part of.
+  if (typeof context !== 'string' || String(localId(properties)).startsWith('imported:')) {
     return td
   }
   const link = document.createElement('a')
@@ -186,6 +190,28 @@ function localId(properties) {
     : id
 }
 
+/**
+ * Whether the server names tracks `providerId:trackId`. Its listing shows it;
+ * with nothing listed, asking it for one import by that name does.
+ */
+async function namesByProvider(listed, unlisted, signal) {
+  if (listed.length > 0) {
+    return listed.some((properties) => typeof properties?.providerId === 'string')
+  }
+  if (unlisted.length === 0) {
+    return false
+  }
+  try {
+    const response = await fetch(`${TRACK_URL}${encodeURIComponent(unlisted[0].id)}`, {
+      credentials: 'include',
+      signal,
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
 async function load() {
   // Bounded, because an unsettled fetch is the one failure the page cannot
   // recover from: every other path ends in an error message, while a stalled
@@ -237,7 +263,13 @@ async function load() {
   // feature should not blank a list that is otherwise fine.
   const listed = body.features.map((feature) => feature?.properties)
   const ids = new Set(listed.map(localId))
-  const older = (await imports).filter((properties) => !ids.has(localId(properties)))
+  const unlisted = (await imports).filter((properties) => !ids.has(localId(properties)))
+  // A server older than the Track API's write routes names tracks without
+  // their provider and cannot delete by id, so the imports added here follow
+  // suit there rather than offer a delete that cannot work.
+  const older = (await namesByProvider(listed, unlisted, deadline))
+    ? unlisted
+    : unlisted.map((properties) => ({ ...properties, id: localId(properties), providerId: undefined }))
   // Newest first: the track someone came to look at is almost always the one
   // that just finished.
   const sorted = [...listed, ...older]

@@ -180,7 +180,7 @@ const element = (tagName: string): StubElement => {
 
 async function render(
   response: { status?: number; ok?: boolean; body?: unknown } | Error | 'stall' | 'stall-body',
-  options: { timeoutMs?: number; imports?: unknown[] } = {},
+  options: { timeoutMs?: number; imports?: unknown[]; byId?: boolean } = {},
 ) {
   const status = element('p')
   const tbody = element('tbody')
@@ -216,6 +216,11 @@ async function render(
             ? { status: 404, ok: false, json: () => Promise.reject(new Error('not JSON')) }
             : { status: 200, ok: true, json: () => Promise.resolve(options.imports) },
         )
+      }
+      // One track by its id, which only a server with the write routes serves.
+      if (url.includes('/signalk/v2/api/tracks/')) {
+        const ok = options.byId ?? true
+        return Promise.resolve({ status: ok ? 200 : 404, ok, json: () => Promise.resolve({}) })
       }
       requested.push(url)
       if (response === 'stall-body') {
@@ -656,6 +661,63 @@ describe('the webapp lists every import', () => {
       { imports: [recent] },
     )
     expect(tbody.children).toHaveLength(1)
+  })
+
+  // The v1 route exports a vessel's recording, which an import is not part of.
+  it('offers no recording export for an import that names a vessel', async () => {
+    const { tbody } = await render(
+      { body: { type: 'FeatureCollection', features: [] } },
+      { imports: [{ ...old, context: SELF, isSelf: true }] },
+    )
+    expect(tbody.children[0]!.children[4]!.children).toHaveLength(0)
+  })
+
+  // A server that names tracks without their provider cannot delete by id.
+  it('offers no delete for an import on a server that names tracks without their provider', async () => {
+    const { tbody } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [
+            feature({ id: `recorded:${SELF}`, context: SELF, isSelf: true, to: '2026-09-01T00:00:00Z', pointCount: 2 }),
+          ],
+        },
+      },
+      { imports: [old] },
+    )
+    expect(tbody.children[1]!.children.at(-1)!.children).toHaveLength(0)
+  })
+
+  it('offers delete for an import on a server that names tracks by provider', async () => {
+    const { tbody } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [
+            feature({
+              id: `tracks:recorded:${SELF}`,
+              providerId: 'tracks',
+              context: SELF,
+              isSelf: true,
+              to: '2026-09-01T00:00:00Z',
+              pointCount: 2,
+            }),
+          ],
+        },
+      },
+      { imports: [old] },
+    )
+    expect(tbody.children[1]!.children.at(-1)!.children[0]!.textContent).toBe('Delete…')
+  })
+
+  // With nothing listed, the server is asked for one import by its full name.
+  it('asks whether the server deletes by id when the window has nothing', async () => {
+    const deletable = async (byId: boolean) => {
+      const { tbody } = await render({ body: { type: 'FeatureCollection', features: [] } }, { imports: [old], byId })
+      return tbody.children[0]!.children.at(-1)!.children.length
+    }
+    expect(await deletable(true)).toBe(1)
+    expect(await deletable(false)).toBe(0)
   })
 
   it('shows an old import when the window has nothing', async () => {
