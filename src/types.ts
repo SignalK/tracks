@@ -33,6 +33,51 @@ export interface TimedPosition {
 }
 
 /**
+ * A point of an imported track. `timestamp` is absent when the import carried
+ * no times: a GPX without `<time>` is a shape someone sailed, not a recording.
+ */
+export interface ImportedPoint {
+  position: LatLngTuple
+  timestamp?: number
+}
+
+/**
+ * A track a client supplied, kept apart from recorded positions.
+ *
+ * It belongs to whoever imported it rather than to the recording: it is never
+ * merged into a vessel's recorded track, reconciled with a history provider,
+ * or aged out by retention, and it stays until it is deleted by its id.
+ */
+export interface ImportedTrack {
+  id: string
+  /** The vessel it belongs to, when the import named one. */
+  context?: Context
+  /** The track's own name, such as a GPX `<trk><name>`. */
+  name?: string
+  /** The client's other properties, returned as they were posted. */
+  metadata: Record<string, unknown>
+  /** Segments as posted; a point is either timed throughout or not at all. */
+  segments: ImportedPoint[][]
+}
+
+/** Which imported tracks a query can see. Every field narrows; none means all. */
+export interface ImportFilter {
+  /** Only imports naming one of these contexts; contextless ones drop out. */
+  contexts?: Context[]
+  /**
+   * Only timed imports whose time span overlaps the window; untimed ones drop
+   * out. Like `bbox`, a match on the extent rather than on the points.
+   */
+  window?: TimeWindow
+  /**
+   * Only imports whose extent overlaps the box. A coarse match on the extent:
+   * an import can overlap without a point inside, so callers that need a
+   * point inside test the points themselves.
+   */
+  bbox?: GeoBounds
+}
+
+/**
  * A time window in epoch milliseconds, half-open as `[from, to)`.
  *
  * Half-open so the bands a client requests to cover a long trail tile exactly:

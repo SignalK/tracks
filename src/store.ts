@@ -1,6 +1,8 @@
 import type {
   Context,
   Debug,
+  ImportedTrack,
+  ImportFilter,
   LatLngTuple,
   TimedPosition,
   TimedTrackCollection,
@@ -112,6 +114,24 @@ export interface TrackStore {
    * keeps it out of a real configuration.
    */
   prune(maxAge: number, keep?: Context): void
+
+  /**
+   * Keep a track a client imported. Optional: a store that only records what
+   * it observes leaves the four import methods out, and the Track API then
+   * answers that storing tracks is not supported.
+   *
+   * Resolves once the track is durably stored, unlike the recording writes
+   * above: the caller hands its id to a client, which must be able to read it
+   * back at once.
+   */
+  storeImport?(track: ImportedTrack): void | Promise<void>
+
+  /** Delete an imported track by id, resolving whether there was one. */
+  deleteImport?(id: string): boolean | Promise<boolean>
+
+  getImport?(id: string): ImportedTrack | undefined | Promise<ImportedTrack | undefined>
+
+  findImports?(filter?: ImportFilter): ImportedTrack[] | Promise<ImportedTrack[]>
 
   /**
    * Release any resources held by the store.

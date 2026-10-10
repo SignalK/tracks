@@ -2,7 +2,7 @@ import { SelfPositionUnavailableError } from './utils.js'
 import { Worker } from 'node:worker_threads'
 import type { TrackStore } from './store.js'
 import type { SqliteTrackStore, SqliteStoreConfig } from './sqliteStore.js'
-import type { Debug, Context, LatLngTuple, TimeWindow, TrackParams } from './types.js'
+import type { Debug, Context, ImportedTrack, ImportFilter, LatLngTuple, TimeWindow, TrackParams } from './types.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { Operation, StoreMethod, WorkerMessage } from './trackStoreProtocol.js'
 interface Pending {
@@ -130,9 +130,11 @@ export class AsyncTrackStore implements TrackStore {
   private enqueue<K extends StoreMethod>(
     method: K,
     args: Parameters<SqliteTrackStore[K]>,
-    write = false,
+    kind: 'read' | 'write' | 'acknowledged' = 'read',
   ): Promise<Awaited<ReturnType<SqliteTrackStore[K]>>> {
     this.resumeIfDrained()
+    if (kind === 'acknowledged') return this.acknowledged(method, args)
+    const write = kind === 'write'
     if (this.failed || (this.closing && method !== 'close') || (write && this.statusError)) {
       if (write && this.overloaded) this.dropped++
       const error = new Error(this.statusError ?? 'Track store is closing')
@@ -171,6 +173,33 @@ export class AsyncTrackStore implements TrackStore {
     const result = write
       ? Promise.resolve(undefined)
       : new Promise<unknown>((resolve, reject) => Object.assign(item, { resolve, reject }))
+    this.queue.push(item)
+    this.schedule()
+    return result as Promise<Awaited<ReturnType<SqliteTrackStore[K]>>>
+  }
+
+  /**
+   * A write whose caller waits for the commit: an imported track, or its
+   * deletion. Admitted outside the recording budget, which is sized for
+   * positions; an import of a few megabytes would otherwise pause recording,
+   * and then be dropped like a position. Refused once writes have failed,
+   * since that state lasts until a restart.
+   */
+  private acknowledged<K extends StoreMethod>(
+    method: K,
+    args: Parameters<SqliteTrackStore[K]>,
+  ): Promise<Awaited<ReturnType<SqliteTrackStore[K]>>> {
+    if (this.failed || this.closing || this.writeFailed) {
+      return Promise.reject(new Error(this.statusError ?? 'Track store cannot write'))
+    }
+    let copy: Parameters<SqliteTrackStore[K]>
+    try {
+      copy = structuredClone(args)
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    }
+    const item: Pending = { operation: { id: ++this.sequence, method, args: copy } as Operation, bytes: 0 }
+    const result = new Promise<unknown>((resolve, reject) => Object.assign(item, { resolve, reject }))
     this.queue.push(item)
     this.schedule()
     return result as Promise<Awaited<ReturnType<SqliteTrackStore[K]>>>
@@ -264,25 +293,25 @@ export class AsyncTrackStore implements TrackStore {
     const previous = this.admitted.get(context)
     if (this.resolution > 0 && previous !== undefined && timestamp - previous < this.resolution) return
     const sequence = this.sequence
-    void this.enqueue('newPosition', [context, position, timestamp], true)
+    void this.enqueue('newPosition', [context, position, timestamp], 'write')
     // Dropped positions must not suppress the first fix after recovery.
     if (this.sequence !== sequence && this.resolution > 0) this.admitted.set(context, timestamp)
   }
   recordName(context: Context, name: string, timestamp = Date.now()): void {
-    void this.enqueue('recordName', [context, name, timestamp], true)
+    void this.enqueue('recordName', [context, name, timestamp], 'write')
   }
   nameFor(context: Context): string | undefined {
     return this.names.get(context)
   }
   initialTrack(context: Context, track: LatLngTuple[], timestamps?: number[]): void {
     const sequence = this.sequence
-    void this.enqueue('initialTrack', [context, track, timestamps], true)
+    void this.enqueue('initialTrack', [context, track, timestamps], 'write')
     if (this.sequence !== sequence) this.admitted.delete(context)
   }
   prune(maxAge: number, keep?: Context): void {
     const now = Date.now()
     const sequence = this.sequence
-    void this.enqueue('prune', [maxAge, keep, now], true)
+    void this.enqueue('prune', [maxAge, keep, now], 'write')
     if (this.sequence !== sequence) {
       for (const [context, timestamp] of this.admitted) {
         if (context !== keep && timestamp < now - maxAge) this.admitted.delete(context)
@@ -303,6 +332,18 @@ export class AsyncTrackStore implements TrackStore {
   }
   getFilteredTimedTracks(params: TrackParams, selfPosition?: LatLngTuple, _debug?: Debug, query?: TrackQuery) {
     return this.enqueue('getFilteredTimedTracks', [params, selfPosition, undefined, query])
+  }
+  storeImport(track: ImportedTrack): Promise<void> {
+    return this.enqueue('storeImport', [track, Date.now()], 'acknowledged')
+  }
+  deleteImport(id: string): Promise<boolean> {
+    return this.enqueue('deleteImport', [id], 'acknowledged')
+  }
+  getImport(id: string) {
+    return this.enqueue('getImport', [id])
+  }
+  findImports(filter?: ImportFilter) {
+    return this.enqueue('findImports', [filter])
   }
   close(): Promise<void> {
     if (!this.closePromise) {

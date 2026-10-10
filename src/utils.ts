@@ -402,3 +402,34 @@ export function rfc8187(filename: string): string {
     (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
   )
 }
+
+/**
+ * The narrower of the two longitude intervals covering these points.
+ *
+ * A plain min/max describes a track spanning the antimeridian as almost the
+ * whole globe: two fixes at 179 and -179 are two degrees apart, but min/max
+ * reports 358. RFC 7946 says a box crossing the antimeridian is written with
+ * west greater than east, so the wrap-around interval is expressible — pick it
+ * whenever it is the shorter of the two.
+ *
+ * The widest gap between adjacent longitudes is the part of the globe the track
+ * does not cover, so the complement of that gap is the tightest interval that
+ * does.
+ */
+export const longitudeSpan = (longitudes: number[]): [number, number] => {
+  const sorted = [...longitudes].sort((a, b) => a - b)
+  const min = sorted[0]!
+  const max = sorted[sorted.length - 1]!
+  let widestGap = 360 - (max - min)
+  let west = min
+  let east = max
+  for (let i = 1; i < sorted.length; i++) {
+    const gap = sorted[i]! - sorted[i - 1]!
+    if (gap > widestGap) {
+      widestGap = gap
+      west = sorted[i]!
+      east = sorted[i - 1]!
+    }
+  }
+  return [west, east]
+}

@@ -10,6 +10,10 @@ export type StoreMethod =
   | 'getAllTracks'
   | 'getFilteredTracks'
   | 'getFilteredTimedTracks'
+  | 'storeImport'
+  | 'deleteImport'
+  | 'getImport'
+  | 'findImports'
   | 'close'
 export type Operation = {
   [K in StoreMethod]: { id: number; method: K; args: Parameters<SqliteTrackStore[K]> }
