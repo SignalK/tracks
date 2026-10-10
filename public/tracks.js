@@ -25,6 +25,9 @@
 const WINDOW_V2 = 'P30D'
 const WINDOW_V1 = '30d'
 
+/** This plugin's id, which the server stamps on its tracks as `providerId`. */
+const PROVIDER_ID = 'tracks'
+
 /**
  * Ceiling on the list request.
  *
@@ -127,13 +130,17 @@ function deleteCell(properties) {
  * by hand would mean holding a whole track in memory to build a blob.
  */
 function exportCell(properties) {
-  const { context, isSelf } = properties
+  const { providerId, context, isSelf } = properties
   const td = document.createElement('td')
   const link = document.createElement('a')
   const trackId = localId(properties)
   // An import is exported as it was imported, never as the recording of the
-  // vessel it names; v1 does not know imports at all.
+  // vessel it names; v1 does not know imports at all. Only this plugin's own:
+  // another provider's ids mean nothing to its route.
   if (typeof trackId === 'string' && trackId.startsWith('imported:')) {
+    if (providerId !== undefined && providerId !== PROVIDER_ID) {
+      return td
+    }
     link.href = `../../plugins/tracks/imports/${encodeURIComponent(trackId)}/track.gpx`
   } else if (typeof context === 'string') {
     // `self` resolves server-side; using it keeps the URL short and avoids
