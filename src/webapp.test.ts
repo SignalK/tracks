@@ -588,6 +588,17 @@ describe('the webapp offers a GPX download', () => {
     expect(link.href).toBe('../../plugins/tracks/imports/imported%3Aa%20b/track.gpx')
   })
 
+  it('does not send another provider’s import to this plugin', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [feature({ id: 'other:imported:a', providerId: 'other', name: 'Race day', pointCount: 2 })],
+      },
+    })
+
+    expect(tbody.children[0]!.children[4]!.children).toHaveLength(0)
+  })
+
   it('exports an import the API names without its provider', async () => {
     const { tbody } = await render({
       body: {

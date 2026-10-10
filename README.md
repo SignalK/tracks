@@ -55,9 +55,9 @@ A track needs times (`coordTimes`) or a vessel (`context`). One with neither is 
 it would match no time window, and a query across every vessel needs one, so it could
 only be found again by its id.
 
-The Tracks webapp exports an imported track as GPX from its row, as it was imported: under its
-own name, and without times if it had none. A client can download the same file from
-`GET /plugins/tracks/imports/<id>/track.gpx`, with the id less its `tracks:` prefix.
+The Tracks webapp exports an imported track as GPX from its row, as it was imported. A client
+can download the same file from `GET /plugins/tracks/imports/<id>/track.gpx`, with the id less
+its `tracks:` prefix: under the track's own name, and without times if it had none.
 
 ## Deleting tracks
 

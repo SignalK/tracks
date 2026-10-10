@@ -25,6 +25,9 @@
 const WINDOW_V2 = 'P30D'
 const WINDOW_V1 = '30d'
 
+/** This plugin's id, which the server stamps on its tracks as `providerId`. */
+const PROVIDER_ID = 'tracks'
+
 /**
  * Ceiling on the list request.
  *
@@ -132,8 +135,13 @@ function exportCell({ id, providerId, context, isSelf }) {
       ? id.slice(providerId.length + 1)
       : id
   // An import is exported as it was imported, never as the recording of the
-  // vessel it names; v1 does not know imports at all.
-  if (typeof trackId === 'string' && trackId.startsWith('imported:')) {
+  // vessel it names; v1 does not know imports at all. Only this plugin's own:
+  // another provider's ids mean nothing to its route.
+  if (
+    typeof trackId === 'string' &&
+    trackId.startsWith('imported:') &&
+    (providerId === undefined || providerId === PROVIDER_ID)
+  ) {
     link.href = `../../plugins/tracks/imports/${encodeURIComponent(trackId)}/track.gpx`
   } else if (typeof context === 'string') {
     // `self` resolves server-side; using it keeps the URL short and avoids
