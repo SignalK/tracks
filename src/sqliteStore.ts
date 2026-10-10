@@ -6,6 +6,7 @@ import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
 import { createInBounds, createMatcher, longitudeSpan, splitAtAntimeridian } from './utils.js'
 import type {
+  BinEntry,
   Context,
   Debug,
   GeoBounds,
@@ -13,6 +14,8 @@ import type {
   ImportedTrack,
   ImportFilter,
   LatLngTuple,
+  RecordedSpan,
+  RestoreResult,
   TimedPosition,
   TimedTrackCollection,
   TimeWindow,
@@ -112,6 +115,18 @@ interface NumberedRow extends PositionRow {
   id: number
 }
 
+interface BinRow {
+  id: number
+  context: string | null
+  import_id: string | null
+  name: string | null
+  whole: number
+  span_from: number | null
+  span_to: number | null
+  deleted_at: number
+  purged: number
+}
+
 interface ImportedRow {
   id: string
   context: string | null
@@ -147,6 +162,8 @@ export interface SqliteStoreConfig {
   resolution?: number
   /** Drop positions older than this many ms. 0 keeps everything. */
   retention?: number
+  /** Purge a recycle bin entry this many ms after its delete. 0 never purges. */
+  binRetention?: number
   /** Cells per bounding box covering. */
   maxCells?: number
   /** A gap longer than this ms starts a new track segment. */
@@ -183,6 +200,7 @@ export class SqliteTrackStore implements TrackStore {
   private readonly maxCells: number
   private readonly segmentGap: number
   private readonly retention: number
+  private readonly binRetention: number
   private readonly resolution: number
   /** See CLIP_STRETCH_GAP; widened so a coarse write resolution does not split every fix. */
   private readonly stretchGap: number
@@ -200,6 +218,7 @@ export class SqliteTrackStore implements TrackStore {
     this.maxCells = config.maxCells ?? DEFAULT_MAX_CELLS
     this.segmentGap = config.segmentGap ?? DEFAULT_SEGMENT_GAP
     this.retention = config.retention ?? 0
+    this.binRetention = config.binRetention ?? 0
     this.resolution = config.resolution ?? 0
     this.stretchGap = Math.max(CLIP_STRETCH_GAP, 2 * this.resolution)
     this.debug = debug
@@ -260,6 +279,53 @@ export class SqliteTrackStore implements TrackStore {
         lon       REAL    NOT NULL,
         PRIMARY KEY (track_id, seq)
       ) WITHOUT ROWID;
+      -- The recycle bin. A delete moves rows here rather than removing them,
+      -- so the tables every read uses stay as they are and a restore moves
+      -- them back. A purged recorded span keeps its row: a history provider
+      -- would otherwise fill the deleted window back in.
+      CREATE TABLE IF NOT EXISTS recycle_bin (
+        id          INTEGER PRIMARY KEY,
+        context     TEXT,
+        import_id   TEXT,
+        name        TEXT,
+        whole       INTEGER NOT NULL,
+        span_from   INTEGER,
+        span_to     INTEGER,
+        deleted_at  INTEGER NOT NULL,
+        purged      INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS binned_positions (
+        bin_id    INTEGER NOT NULL,
+        context   TEXT    NOT NULL,
+        timestamp INTEGER NOT NULL,
+        lat       REAL    NOT NULL,
+        lon       REAL    NOT NULL,
+        s2cell    INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_binned_positions ON binned_positions(bin_id);
+      CREATE TABLE IF NOT EXISTS binned_imported_tracks (
+        bin_id      INTEGER PRIMARY KEY,
+        id          TEXT    NOT NULL,
+        context     TEXT,
+        name        TEXT,
+        metadata    TEXT    NOT NULL,
+        first_time  INTEGER,
+        last_time   INTEGER,
+        west        REAL    NOT NULL,
+        south       REAL    NOT NULL,
+        east        REAL    NOT NULL,
+        north       REAL    NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS binned_imported_points (
+        bin_id    INTEGER NOT NULL,
+        track_id  TEXT    NOT NULL,
+        seq       INTEGER NOT NULL,
+        segment   INTEGER NOT NULL,
+        timestamp INTEGER,
+        lat       REAL    NOT NULL,
+        lon       REAL    NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_binned_imported_points ON binned_imported_points(bin_id);
     `)
     this.insert = this.db.prepare('INSERT INTO positions (context, timestamp, lat, lon, s2cell) VALUES (?, ?, ?, ?, ?)')
     // Newer wins: a corrected or changed name replaces what is stored, while
@@ -626,6 +692,17 @@ export class SqliteTrackStore implements TrackStore {
     // of the own vessel's track to keep", and applying it to every context
     // would truncate an AIS vessel's track on a setting that does not name it.
     // Unscoped without a `keep`, which is how a standalone store behaves.
+    if (this.binRetention > 0) {
+      const expired = this.db
+        .prepare('SELECT * FROM recycle_bin WHERE purged = 0 AND deleted_at < ? ORDER BY whole DESC')
+        .all(now - this.binRetention) as unknown as BinRow[]
+      for (const entry of expired) {
+        // A whole import purged first takes its spans with it.
+        if (this.liveEntry(entry.id)) {
+          this.purge(entry)
+        }
+      }
+    }
     if (this.retention > 0) {
       const oldest = now - this.retention
       if (keep === undefined) {
@@ -686,10 +763,237 @@ export class SqliteTrackStore implements TrackStore {
     }
   }
 
-  /** Delete an imported track, resolving whether there was one. */
-  deleteImport(id: string): boolean {
-    this.db.prepare('DELETE FROM imported_points WHERE track_id = ?').run(id)
-    return Number(this.db.prepare('DELETE FROM imported_tracks WHERE id = ?').run(id).changes) > 0
+  /**
+   * Move a vessel's positions recorded within `[from, to]` into the recycle
+   * bin, resolving to the entry's id and whether the store held the vessel at
+   * all.
+   *
+   * An entry is made even when the store holds nothing there if `keepEmpty`
+   * says another source does: the span still has to hide what a history
+   * provider holds. Without one, an empty delete leaves no entry behind.
+   */
+  binRecorded(
+    context: Context,
+    from: number | undefined,
+    to: number,
+    deletedAt: number,
+    keepEmpty: boolean,
+  ): { id?: number; known: boolean } {
+    const known = this.knows(context)
+    const lower = from ?? Number.MIN_SAFE_INTEGER
+    const id = this.newBinEntry({ context, ...(from === undefined ? {} : { from }), to, deletedAt })
+    const moved = Number(
+      this.db
+        .prepare(
+          `INSERT INTO binned_positions (bin_id, context, timestamp, lat, lon, s2cell)
+           SELECT ?, context, timestamp, lat, lon, s2cell FROM positions
+           WHERE context = ? AND timestamp >= ? AND timestamp <= ?`,
+        )
+        .run(id, context, lower, to).changes,
+    )
+    if (moved === 0 && !keepEmpty) {
+      this.db.prepare('DELETE FROM recycle_bin WHERE id = ?').run(id)
+      return { known }
+    }
+    this.db
+      .prepare('DELETE FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?')
+      .run(context, lower, to)
+    return { id, known }
+  }
+
+  /**
+   * Move an imported track into the recycle bin, or with a span only its
+   * points within it, resolving to the entry's id; undefined when there is no
+   * such import, or the span holds none of its points.
+   */
+  binImport(importId: string, span: { from?: number; to?: number } | undefined, deletedAt: number): number | undefined {
+    const track = this.db.prepare('SELECT context, name FROM imported_tracks WHERE id = ?').get(importId) as
+      { context: string | null; name: string | null } | undefined
+    if (!track) {
+      return undefined
+    }
+    const id = this.newBinEntry({
+      ...(track.context === null ? {} : { context: track.context }),
+      importId,
+      ...(track.name === null ? {} : { name: track.name }),
+      ...(span ?? {}),
+      deletedAt,
+    })
+    const where = span ? 'track_id = ? AND timestamp >= ? AND timestamp <= ?' : 'track_id = ?'
+    const params = span
+      ? [importId, span.from ?? Number.MIN_SAFE_INTEGER, span.to ?? Number.MAX_SAFE_INTEGER]
+      : [importId]
+    const moved = Number(
+      this.db
+        .prepare(
+          `INSERT INTO binned_imported_points (bin_id, track_id, seq, segment, timestamp, lat, lon)
+           SELECT ?, track_id, seq, segment, timestamp, lat, lon FROM imported_points WHERE ${where}`,
+        )
+        .run(id, ...params).changes,
+    )
+    // An empty span leaves the track as it was, and so leaves nothing to restore.
+    if (span && moved === 0) {
+      this.db.prepare('DELETE FROM recycle_bin WHERE id = ?').run(id)
+      return undefined
+    }
+    this.db.prepare(`DELETE FROM imported_points WHERE ${where}`).run(...params)
+    // A span that took every point would leave a track no query lists, so it
+    // takes the track too, and restoring the entry brings back both.
+    const emptied = span && !this.db.prepare('SELECT 1 AS found FROM imported_points WHERE track_id = ?').get(importId)
+    if (emptied) {
+      this.db.prepare('UPDATE recycle_bin SET whole = 1, span_from = NULL, span_to = NULL WHERE id = ?').run(id)
+    }
+    if (!span || emptied) {
+      this.db
+        .prepare(
+          `INSERT INTO binned_imported_tracks
+           SELECT ?, id, context, name, metadata, first_time, last_time, west, south, east, north
+           FROM imported_tracks WHERE id = ?`,
+        )
+        .run(id, importId)
+      this.db.prepare('DELETE FROM imported_tracks WHERE id = ?').run(importId)
+    }
+    return id
+  }
+
+  private newBinEntry(entry: Omit<BinEntry, 'id' | 'whole' | 'pointCount'>): number {
+    const whole = entry.importId !== undefined && entry.from === undefined && entry.to === undefined
+    return Number(
+      this.db
+        .prepare(
+          `INSERT INTO recycle_bin (context, import_id, name, whole, span_from, span_to, deleted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          entry.context ?? null,
+          entry.importId ?? null,
+          entry.name ?? null,
+          whole ? 1 : 0,
+          entry.from ?? null,
+          entry.to ?? null,
+          entry.deletedAt,
+        ).lastInsertRowid,
+    )
+  }
+
+  /**
+   * Put a recycle bin entry's rows back where they were deleted from.
+   *
+   * A span of an import whose whole track has since gone to the bin as well
+   * is a conflict: its points have no track to return to until that is
+   * restored first.
+   */
+  restoreFromBin(id: number): RestoreResult {
+    const entry = this.liveEntry(id)
+    if (!entry) {
+      return 'missing'
+    }
+    if (entry.import_id === null) {
+      this.db
+        .prepare(
+          `INSERT INTO positions (context, timestamp, lat, lon, s2cell)
+           SELECT context, timestamp, lat, lon, s2cell FROM binned_positions WHERE bin_id = ?`,
+        )
+        .run(id)
+      this.db.prepare('DELETE FROM binned_positions WHERE bin_id = ?').run(id)
+    } else {
+      if (entry.whole === 1) {
+        this.db
+          .prepare(
+            `INSERT INTO imported_tracks (id, context, name, metadata, first_time, last_time, west, south, east, north)
+             SELECT id, context, name, metadata, first_time, last_time, west, south, east, north
+             FROM binned_imported_tracks WHERE bin_id = ?`,
+          )
+          .run(id)
+        this.db.prepare('DELETE FROM binned_imported_tracks WHERE bin_id = ?').run(id)
+      } else if (!this.db.prepare('SELECT 1 AS found FROM imported_tracks WHERE id = ?').get(entry.import_id)) {
+        return 'conflict'
+      }
+      this.db
+        .prepare(
+          `INSERT INTO imported_points (track_id, seq, segment, timestamp, lat, lon)
+           SELECT track_id, seq, segment, timestamp, lat, lon FROM binned_imported_points WHERE bin_id = ?`,
+        )
+        .run(id)
+      this.db.prepare('DELETE FROM binned_imported_points WHERE bin_id = ?').run(id)
+    }
+    this.db.prepare('DELETE FROM recycle_bin WHERE id = ?').run(id)
+    return 'restored'
+  }
+
+  /** Purge one recycle bin entry now, resolving whether it was in the bin. */
+  purgeFromBin(id: number): boolean {
+    const entry = this.liveEntry(id)
+    if (!entry) {
+      return false
+    }
+    this.purge(entry)
+    return true
+  }
+
+  /** Entries still in the recycle bin, newest delete first. */
+  binEntries(): BinEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT bin.*,
+           (SELECT COUNT(*) FROM binned_positions WHERE bin_id = bin.id)
+           + (SELECT COUNT(*) FROM binned_imported_points WHERE bin_id = bin.id) AS point_count
+         FROM recycle_bin AS bin WHERE purged = 0 ORDER BY deleted_at DESC, id DESC`,
+      )
+      .all() as unknown as (BinRow & { point_count: number })[]
+    return rows.map((row) => ({
+      id: row.id,
+      ...(row.context === null ? {} : { context: row.context }),
+      ...(row.import_id === null ? {} : { importId: row.import_id }),
+      ...(row.name === null ? {} : { name: row.name }),
+      whole: row.whole === 1,
+      ...(row.span_from === null ? {} : { from: row.span_from }),
+      ...(row.span_to === null ? {} : { to: row.span_to }),
+      deletedAt: row.deleted_at,
+      pointCount: row.point_count,
+    }))
+  }
+
+  /** Every deleted span of a recorded track, purged or not: what history must not show. */
+  deletedSpans(): RecordedSpan[] {
+    const rows = this.db
+      .prepare('SELECT context, span_from, span_to FROM recycle_bin WHERE import_id IS NULL')
+      .all() as unknown as { context: string; span_from: number | null; span_to: number }[]
+    return rows.map(({ context, span_from, span_to }) => ({
+      context,
+      ...(span_from === null ? {} : { from: span_from }),
+      to: span_to,
+    }))
+  }
+
+  private liveEntry(id: number): BinRow | undefined {
+    return this.db.prepare('SELECT * FROM recycle_bin WHERE id = ? AND purged = 0').get(id) as BinRow | undefined
+  }
+
+  /**
+   * Remove an entry's rows for good. A recorded span stays as a tombstone, so
+   * history cannot refill it; a whole import takes the spans deleted from it
+   * earlier with it, since they have no track left to be restored into.
+   */
+  private purge(entry: BinRow): void {
+    const ids =
+      entry.whole === 1
+        ? (
+            this.db.prepare('SELECT id FROM recycle_bin WHERE import_id = ? AND purged = 0').all(entry.import_id) as {
+              id: number
+            }[]
+          ).map(({ id }) => id)
+        : [entry.id]
+    for (const id of ids) {
+      this.db.prepare('DELETE FROM binned_positions WHERE bin_id = ?').run(id)
+      this.db.prepare('DELETE FROM binned_imported_points WHERE bin_id = ?').run(id)
+      this.db.prepare('DELETE FROM binned_imported_tracks WHERE bin_id = ?').run(id)
+      if (entry.import_id === null) {
+        this.db.prepare('UPDATE recycle_bin SET purged = 1 WHERE id = ?').run(id)
+      } else {
+        this.db.prepare('DELETE FROM recycle_bin WHERE id = ?').run(id)
+      }
+    }
   }
 
   getImport(id: string): ImportedTrack | undefined {

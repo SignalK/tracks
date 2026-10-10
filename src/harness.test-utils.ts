@@ -286,6 +286,7 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
 
   const expressApp = express()
   expressApp.use('/signalk/v1/api', plugin.signalKApiRoutes(express.Router()))
+  expressApp.use('/plugins/tracks', plugin.registerWithRouter(express.Router()))
 
   return {
     app: expressApp,

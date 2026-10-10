@@ -11,7 +11,8 @@ import { Temporal } from '@js-temporal/polyfill'
  * Specified in https://github.com/SignalK/signalk-server/issues/2504 and
  * implemented in https://github.com/SignalK/signalk-server/pull/2995; storing,
  * fetching and deleting a track by id in
- * https://github.com/SignalK/signalk-server/pull/3038.
+ * https://github.com/SignalK/signalk-server/pull/3038, and deleting part of
+ * one in the server's `deleteTrackSpan`.
  */
 
 /** `[west, south, east, north]` — GeoJSON coordinate order. */
@@ -100,6 +101,14 @@ export interface TrackApi {
   storeTrack?(track: TrackImport): Promise<string>
   /** Delete a stored track by id, resolving false when there is none. */
   deleteTrack?(id: string): Promise<boolean>
+  /** Delete the part of a stored track recorded within `span`, resolving false when there is no such track. */
+  deleteTrackSpan?(id: string, span: TrackSpan): Promise<boolean>
+}
+
+/** Every point recorded at or after `from` and at or before `to`; an absent bound is open. */
+export interface TrackSpan {
+  from?: Temporal.Instant
+  to?: Temporal.Instant
 }
 
 /**

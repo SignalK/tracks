@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { trackLabel } from './utils.js'
 import { parseDuration } from './timeWindow.js'
+// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
+import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '../public/bin.js'
 
 /**
  * The webapp ships as plain static files with no build step, so it cannot
@@ -165,6 +167,7 @@ const element = (tagName: string): StubElement => {
     children: [],
   }
   return Object.assign(el, {
+    addEventListener: () => {},
     append: (...kids: StubElement[]) => el.children.push(...kids),
     replaceChildren: (...kids: StubElement[]) => {
       el.children.length = 0
@@ -589,5 +592,106 @@ describe('the webapp offers a GPX download', () => {
 
     expect(listed).toBe('P30D')
     expect(exported).toBe(30 * 24 * 60 * 60 * 1000)
+  })
+})
+
+describe('the webapp offers to delete a track', () => {
+  const deleteButton = async (properties: Record<string, unknown>) => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [
+          feature({
+            context: OTHER,
+            isSelf: false,
+            from: '2026-09-01T00:00:00Z',
+            to: '2026-09-01T01:00:00Z',
+            pointCount: 2,
+            ...properties,
+          }),
+        ],
+      },
+    })
+    return tbody.children[0]!.children.at(-1)!.children[0]
+  }
+
+  it('for a track the API gave an id', async () => {
+    expect((await deleteButton({ id: `tracks:recorded:${OTHER}`, providerId: 'tracks' }))?.textContent).toBe('Delete…')
+  })
+
+  it('not for a track without an id', async () => {
+    expect(await deleteButton({})).toBeUndefined()
+  })
+
+  it('tells an import from the vessel’s recording', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [feature({ context: OTHER, isSelf: false, name: 'Race day', pointCount: 2 })],
+      },
+    })
+    const name = tbody.children[0]!.children[0]!
+    expect(name.textContent).toBe('AIS 987654321')
+    expect(name.children[0]!.textContent).toBe(' (imported: Race day)')
+  })
+
+  // An import may name no vessel. Listing it is the only way to delete it from
+  // the page; there is no vessel recording to export for it, so no GPX link.
+  it('lists an import that names no vessel', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [feature({ id: 'tracks:imported:a', name: 'Race day', pointCount: 2 })],
+      },
+    })
+    const cells = tbody.children[0]!.children
+    expect(cells[0]!.textContent).toBe('No vessel')
+    expect(cells.at(-2)!.children).toHaveLength(0)
+    expect(cells.at(-1)!.children[0]!.textContent).toBe('Delete…')
+  })
+})
+
+describe('the recycle bin page', () => {
+  it('labels a track as tracks.js and the server do', () => {
+    for (const properties of [
+      { context: SELF, isSelf: true },
+      { context: OTHER, contextName: 'Ariadne', isSelf: false },
+      { context: OTHER, isSelf: false },
+    ]) {
+      const lookup = (path: string) =>
+        properties.contextName !== undefined && path === `${properties.context}.name`
+          ? properties.contextName
+          : undefined
+      expect(binLabel(properties)).toBe(
+        trackLabel(properties.context, properties.isSelf ? properties.context : SELF, lookup),
+      )
+    }
+    expect(binLabel({ isSelf: false })).toBe('No vessel')
+  })
+
+  it('says what part was deleted', () => {
+    expect(deletedPart({ whole: true })).toBe('The whole track')
+    expect(deletedPart({ whole: false, to: '2026-09-01T00:00:00Z' })).toMatch(/^Everything up to /)
+    expect(deletedPart({ whole: false, from: '2026-09-01T00:00:00Z' })).toMatch(/^Everything from /)
+  })
+
+  it('reaches the end of the second a span ends in, and refuses an empty span', () => {
+    const query = new URLSearchParams(spanQuery('2026-09-01T10:00:00', '2026-09-01T11:00:00').slice(1))
+    const from = Date.parse(query.get('from')!)
+    expect(Date.parse(query.get('to')!) - from).toBe(60 * 60 * 1000 + 999)
+    expect(spanQuery('', '')).toBeUndefined()
+    expect(new URLSearchParams(spanQuery('', '2026-09-01T11:00:00').slice(1)).has('from')).toBe(false)
+  })
+
+  it('fills the inputs in the viewer’s zone, to the second', () => {
+    const iso = '2026-09-01T10:20:30.400Z'
+    expect(new Date(localInput(iso)).getTime()).toBe(Date.parse('2026-09-01T10:20:30Z'))
+    expect(localInput('not a time')).toBe('')
+  })
+
+  it('asks for an administrator when refused', () => {
+    expect(refusal(401)).toMatch(/administrator/)
+    expect(refusal(403)).toMatch(/administrator/)
+    expect(refusal(501)).toMatch(/cannot/)
   })
 })

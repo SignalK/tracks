@@ -27,6 +27,11 @@ const SERVER_DIR = process.env.SIGNALK_SERVER_DIR ?? join(process.env.HOME ?? ''
 /** QuestDB endpoint used by the history-provider tier. */
 export const QUESTDB_URL = process.env.QUESTDB_URL ?? 'http://localhost:9000'
 
+export interface RequestOptions {
+  method?: string
+  body?: unknown
+}
+
 export interface E2EServer {
   url: string
   configDir: string
@@ -42,7 +47,9 @@ export interface E2EServer {
    * `init` sends another method, with `body` as JSON. A body that is not JSON,
    * as an older server's 404 page is, comes back as its text.
    */
-  apiV2: (path: string, init?: { method?: string; body?: unknown }) => Promise<{ status: number; body: unknown }>
+  apiV2: (path: string, init?: RequestOptions) => Promise<{ status: number; body: unknown }>
+  /** As `apiV2`, for a path under this plugin's own router at /plugins/tracks. */
+  plugin: (path: string, init?: RequestOptions) => Promise<{ status: number; body: unknown }>
   /** The server's own vessel context, as it resolved it. */
   selfContext: string
   /** Stop the server, resolving once it has exited and its config dir is gone. */
@@ -220,21 +227,8 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
             const r = await fetch(`${url}/signalk/v1/api${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
             return r.json()
           },
-          apiV2: async (path: string, init?: { method?: string; body?: unknown }) => {
-            const r = await fetch(`${url}/signalk/v2/api${path}`, {
-              signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-              ...(init?.method ? { method: init.method } : {}),
-              ...(init?.body === undefined
-                ? {}
-                : { body: JSON.stringify(init.body), headers: { 'Content-Type': 'application/json' } }),
-            })
-            const text = await r.text()
-            try {
-              return { status: r.status, body: JSON.parse(text) as unknown }
-            } catch {
-              return { status: r.status, body: text }
-            }
-          },
+          apiV2: (path, init) => request(`${url}/signalk/v2/api${path}`, init),
+          plugin: (path, init) => request(`${url}/plugins/tracks${path}`, init),
           stop,
         }
       }
@@ -246,6 +240,22 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
 
   await stop()
   throw new Error(`signalk-server did not start within the timeout. Output:\n${log.join('')}`)
+}
+
+async function request(url: string, init?: RequestOptions): Promise<{ status: number; body: unknown }> {
+  const r = await fetch(url, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    ...(init?.method ? { method: init.method } : {}),
+    ...(init?.body === undefined
+      ? {}
+      : { body: JSON.stringify(init.body), headers: { 'Content-Type': 'application/json' } }),
+  })
+  const text = await r.text()
+  try {
+    return { status: r.status, body: JSON.parse(text) as unknown }
+  } catch {
+    return { status: r.status, body: text }
+  }
 }
 
 /**

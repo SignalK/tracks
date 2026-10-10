@@ -3,12 +3,15 @@ import { M_PER_DEG, simplify } from './simplify.js'
 import { segment, thin, thinToBudget } from './timeWindow.js'
 import type { TrackStore } from './store.js'
 import { decimate, isImportedId, isTimed, positionsOf, toImportedTrack } from './importedTracks.js'
+import { recordedContext, recordedId } from './recycleBin.js'
+import { TrackRejectedError } from './trackApi.js'
 import type {
   TrackApi,
   TrackBoundingBox,
   TrackFeature,
   TrackImport,
   TrackProperties,
+  TrackSpan,
   TracksRequest,
   TracksResponse,
 } from './trackApi.js'
@@ -64,6 +67,10 @@ export interface TrackProviderDeps {
    * only before this plugin was installed is known to history alone.
    */
   historyContexts: (window: TimeWindow | undefined) => Promise<ReadonlySet<string>>
+  /** Whether a history provider holds anything at all for a context. */
+  historyKnows: (context: string) => Promise<boolean>
+  /** Called after a delete, so whatever hides deleted spans from history reloads them. */
+  deleted: () => void
   reconcileWithHistory: (
     context: string,
     stored: TimedPosition[],
@@ -348,29 +355,58 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     }
   }
 
-  /** The store, when it can keep imported tracks; an ordinary failure otherwise. */
-  const importStore = (): Required<Pick<TrackStore, 'storeImport' | 'deleteImport' | 'getImport'>> => {
+  type WritableStore = Required<Pick<TrackStore, 'storeImport' | 'getImport' | 'binImport' | 'binRecorded'>>
+
+  /** The store, when it can keep and delete tracks; an ordinary failure otherwise. */
+  const writableStore = (): WritableStore => {
     const store = deps.store()
-    if (!store?.storeImport || !store.deleteImport || !store.getImport) {
+    if (!store?.storeImport || !store.getImport || !store.binImport || !store.binRecorded) {
       throw new Error('Track storage is not available')
     }
-    return store as Required<Pick<TrackStore, 'storeImport' | 'deleteImport' | 'getImport'>>
+    return store as WritableStore
+  }
+
+  /** The recorded feature's identity, which `getTracks` and `getTrack` share. */
+  const recordedIdentity = (context: string): Omit<TrackProperties, 'pointCount'> => {
+    const name = deps.contextName(context)
+    return {
+      id: recordedId(context),
+      context,
+      isSelf: context === deps.selfContext(),
+      // Omitted rather than empty: the spec says "where known".
+      ...(name === undefined ? {} : { contextName: name }),
+    }
+  }
+
+  /**
+   * Move a vessel's recording within the span to the recycle bin, resolving
+   * false for a vessel neither the store nor history knows.
+   *
+   * `to` is the moment of the delete, never the end of time: recording goes
+   * on, and what it records afterwards is a new track, not a deleted one.
+   */
+  const deleteRecorded = async (
+    context: string,
+    from: number | undefined,
+    to: number | undefined,
+  ): Promise<boolean> => {
+    const now = Date.now()
+    const end = Math.min(to ?? now, now)
+    const historyKnown = await deps.historyKnows(context)
+    // A span that starts after now holds nothing anyone recorded, in either source.
+    const keepEmpty = historyKnown && (from === undefined || from <= end)
+    const { known } = await writableStore().binRecorded(context, from, end, now, keepEmpty)
+    deps.deleted()
+    return known || historyKnown
   }
 
   return {
     async getTracks(query: TracksRequest): Promise<TracksResponse> {
       const { tracks: matched, resolution: requested } = await matching(query)
       const gap = deps.segmentGap()
-      const selfContext = deps.selfContext()
       const features: TrackFeature[] = []
       for (const [context, all] of matched) {
-        const name = deps.contextName(context)
-        const feature = shapeFeature(all, gap, query, requested, {
-          context,
-          isSelf: context === selfContext,
-          // Omitted rather than empty: the spec says "where known".
-          ...(name === undefined ? {} : { contextName: name }),
-        })
+        const feature = shapeFeature(all, gap, query, requested, recordedIdentity(context))
         if (feature) {
           features.push(feature)
         }
@@ -407,10 +443,20 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     },
 
     async getTrack(id: string): Promise<TrackFeature | undefined> {
+      const recorded = recordedContext(id)
+      if (recorded !== undefined) {
+        // The whole recording, as an unbounded query for this one vessel
+        // returns it, with its times.
+        const context = resolveSelf(deps.selfContext())(recorded)
+        const query = { contexts: [context], times: true }
+        const { tracks } = await matching(query)
+        const points = tracks.get(context)
+        return points && shapeFeature(points, deps.segmentGap(), query, undefined, recordedIdentity(context))
+      }
       if (!isImportedId(id)) {
         return undefined
       }
-      const track = await importStore().getImport(id)
+      const track = await writableStore().getImport(id)
       if (!track) {
         return undefined
       }
@@ -422,14 +468,45 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
 
     async storeTrack(track: TrackImport): Promise<string> {
       const imported = toImportedTrack(track)
-      await importStore().storeImport(imported)
+      await writableStore().storeImport(imported)
       return imported.id
     },
 
     async deleteTrack(id: string): Promise<boolean> {
-      // Recorded tracks have no id: a history provider would refill a
-      // deleted one on the next query, and nothing here can stop it.
-      return isImportedId(id) ? await importStore().deleteImport(id) : false
+      const recorded = recordedContext(id)
+      if (recorded !== undefined) {
+        return deleteRecorded(resolveSelf(deps.selfContext())(recorded), undefined, undefined)
+      }
+      if (!isImportedId(id)) {
+        return false
+      }
+      return (await writableStore().binImport(id, undefined, Date.now())) !== undefined
+    },
+
+    async deleteTrackSpan(id: string, span: TrackSpan): Promise<boolean> {
+      const from = span.from?.epochMilliseconds
+      const to = span.to?.epochMilliseconds
+      const recorded = recordedContext(id)
+      if (recorded !== undefined) {
+        return deleteRecorded(resolveSelf(deps.selfContext())(recorded), from, to)
+      }
+      if (!isImportedId(id)) {
+        return false
+      }
+      const store = writableStore()
+      const track = await store.getImport(id)
+      if (!track) {
+        return false
+      }
+      if (!isTimed(track)) {
+        throw new TrackRejectedError('This track has no times, so no part of it can be addressed by time')
+      }
+      await store.binImport(
+        id,
+        { ...(from === undefined ? {} : { from }), ...(to === undefined ? {} : { to }) },
+        Date.now(),
+      )
+      return true
     },
   }
 }

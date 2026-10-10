@@ -46,6 +46,30 @@ function mutate(operation: Operation, target: SqliteTrackStore): boolean {
       return false
   }
 }
+/** Writes whose caller waits for their own commit: imports and the recycle bin. */
+const ACKNOWLEDGED = new Set<Operation['method']>([
+  'storeImport',
+  'binRecorded',
+  'binImport',
+  'restoreFromBin',
+  'purgeFromBin',
+])
+function acknowledge(operation: Operation, target: SqliteTrackStore): unknown {
+  switch (operation.method) {
+    case 'storeImport':
+      return target.storeImport(...operation.args)
+    case 'binRecorded':
+      return target.binRecorded(...operation.args)
+    case 'binImport':
+      return target.binImport(...operation.args)
+    case 'restoreFromBin':
+      return target.restoreFromBin(...operation.args)
+    case 'purgeFromBin':
+      return target.purgeFromBin(...operation.args)
+    default:
+      throw new Error('Unknown track operation')
+  }
+}
 const isWrite = (operation: Operation): boolean =>
   ['newPosition', 'recordName', 'initialTrack', 'prune'].includes(operation.method)
 try {
@@ -66,7 +90,7 @@ if (store) {
     try {
       for (let i = 0; i < operations.length;) {
         const operation = operations[i]!
-        if (operation.method === 'storeImport' || operation.method === 'deleteImport') {
+        if (ACKNOWLEDGED.has(operation.method)) {
           i++
           // Each in a transaction of its own, so a failure answers this caller
           // alone: a track that cannot be kept must not stop the recording.
@@ -76,13 +100,9 @@ if (store) {
           }
           try {
             let value: unknown
-            if (operation.method === 'storeImport') {
-              target.transaction(() => target.storeImport(...operation.args))
-            } else {
-              target.transaction(() => {
-                value = target.deleteImport(...operation.args)
-              })
-            }
+            target.transaction(() => {
+              value = acknowledge(operation, target)
+            })
             results.push({ id: operation.id, value })
           } catch (error) {
             if (error instanceof TransactionStateError) throw error
@@ -154,6 +174,12 @@ if (store) {
                 break
               case 'findImports':
                 value = target.findImports(...operation.args)
+                break
+              case 'binEntries':
+                value = target.binEntries()
+                break
+              case 'deletedSpans':
+                value = target.deletedSpans()
                 break
               default:
                 throw new Error('Unknown track operation')

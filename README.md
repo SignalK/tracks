@@ -57,12 +57,21 @@ only be found again by its id.
 
 ## Deleting tracks
 
-A recorded track cannot be deleted. The plugin's own store could drop its positions, but
-with a history provider installed the next query would fill the same window back in from
-the provider, and the History API offers no way to delete or hide data. A delete that comes
-back on the next query would be worse than none, so recorded tracks carry no id. A recorded
-track ends when the retention settings above drop it from the store, and when the
-provider's own retention drops it there.
+`DELETE /signalk/v2/api/tracks/<id>` deletes a track, and with `from`, `to` or both only the
+part recorded between them (on a Signal K server that accepts them; an older one refuses the
+request rather than deleting the whole track). Deleting needs administrator rights, or write
+access on a server with security turned off. The Tracks webapp offers both from each row.
+
+A recorded track has the id `tracks:recorded:<vessel context>`. Deleting it whole removes
+what was recorded up to now; the recording goes on, and what it records next is kept. With a
+history provider installed the deleted span is hidden in what the provider returns too, since
+the History API has no way to delete or hide data and the next query would otherwise fill it
+back in.
+
+Nothing deleted is gone at once. It goes to a recycle bin, listed in the Tracks webapp, where
+it can be restored or deleted for good, until it is purged after the number of days set in the plugin settings (180 by default). The
+retention settings above do not reach into the bin. Once a recorded span is purged its points
+are gone, but the span stays hidden in the provider's data for good.
 
 ## Glitch filtering
 

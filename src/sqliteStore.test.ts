@@ -615,18 +615,6 @@ describe('imported tracks', () => {
     store.close()
   })
 
-  it('deletes a track with its points and says whether there was one', () => {
-    const store = newStore()
-    store.storeImport(imported())
-    expect(store.deleteImport('imported:a')).toBe(true)
-    expect(store.getImport('imported:a')).toBeUndefined()
-    expect(store.deleteImport('imported:a')).toBe(false)
-    // Reusing the id proves no point outlived its track.
-    store.storeImport(imported({ segments: [[{ position: [1, 1], timestamp: t0 }]] }))
-    expect(store.getImport('imported:a')?.segments).toEqual([[{ position: [1, 1], timestamp: t0 }]])
-    store.close()
-  })
-
   it('narrows by context, leaving out imports that name none', () => {
     const store = newStore()
     store.storeImport(imported())
