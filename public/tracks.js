@@ -122,16 +122,22 @@ function deleteCell(properties) {
  * response with a Content-Disposition on it, and the server sets one. Doing it
  * by hand would mean holding a whole track in memory to build a blob.
  */
-function exportCell({ context, isSelf }) {
+function exportCell({ id, providerId, context, isSelf }) {
   const td = document.createElement('td')
-  if (typeof context !== 'string') {
+  const link = document.createElement('a')
+  // An import is exported as it was imported, never as the recording of the
+  // vessel it names; v1 does not know imports at all.
+  if (typeof id === 'string' && typeof providerId === 'string' && id.startsWith(`${providerId}:imported:`)) {
+    const trackId = id.slice(providerId.length + 1)
+    link.href = `../../plugins/tracks/imports/${encodeURIComponent(trackId)}/track.gpx`
+  } else if (typeof context === 'string') {
+    // `self` resolves server-side; using it keeps the URL short and avoids
+    // guessing how the own vessel's context should be spelled.
+    const vessel = isSelf ? 'self/track.gpx' : `vessels/${encodeURIComponent(context)}/track.gpx`
+    link.href = `../../signalk/v1/api/${vessel}?duration=${WINDOW_V1}`
+  } else {
     return td
   }
-  const link = document.createElement('a')
-  // `self` resolves server-side; using it keeps the URL short and avoids
-  // guessing how the own vessel's context should be spelled.
-  const vessel = isSelf ? 'self/track.gpx' : `vessels/${encodeURIComponent(context)}/track.gpx`
-  link.href = `../../signalk/v1/api/${vessel}?duration=${WINDOW_V1}`
   link.textContent = 'GPX'
   link.rel = 'nofollow'
   td.append(link)
