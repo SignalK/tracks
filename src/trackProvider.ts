@@ -343,9 +343,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
 }
 
 /**
- * One track as a Feature, shaped by the query: the `maxPoints` budget, then
- * segmentation and simplification, then the properties that describe what
- * was returned. Undefined when the budget leaves nothing to draw.
+ * One track as a Feature, or undefined when the budget leaves nothing to draw.
  *
  * `identity` is whatever names the track — context, vessel name — and comes
  * first, so the derived properties after it always describe the geometry
