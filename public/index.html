@@ -26,6 +26,15 @@
         </thead>
         <tbody></tbody>
       </table>
+      <section id="import" aria-labelledby="import-title">
+        <h2 id="import-title">Import</h2>
+        <form id="import-form">
+          <label>GPX file <input type="file" name="file" accept=".gpx,application/gpx+xml" required /></label>
+          <label><input type="checkbox" name="self" /> Tracks of my own vessel</label>
+          <button type="submit">Import</button>
+        </form>
+        <p id="import-status" role="status" hidden></p>
+      </section>
       <section id="bin" aria-labelledby="bin-title">
         <h2 id="bin-title">Recycle bin</h2>
         <p id="bin-status" role="status">Loading…</p>
@@ -69,5 +78,6 @@
     </dialog>
     <script type="module" src="./tracks.js"></script>
     <script type="module" src="./bin.js"></script>
+    <script type="module" src="./import.js"></script>
   </body>
 </html>

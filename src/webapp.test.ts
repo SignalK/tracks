@@ -4,6 +4,8 @@ import { trackLabel } from './utils.js'
 import { parseDuration } from './timeWindow.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '../public/bin.js'
+// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
+import { imported } from '../public/import.js'
 
 /**
  * The webapp ships as plain static files with no build step, so it cannot
@@ -696,5 +698,12 @@ describe('the recycle bin page', () => {
     expect(refusal(401)).toMatch(/administrator/)
     expect(refusal(403)).toMatch(/administrator/)
     expect(refusal(501)).toMatch(/cannot/)
+  })
+})
+
+describe('the import form', () => {
+  it('says how many tracks it imported, and any points it left out', () => {
+    expect(imported({ ids: ['a'], skippedPoints: 0 })).toBe('Imported 1 track.')
+    expect(imported({ ids: ['a', 'b'], skippedPoints: 3 })).toBe('Imported 2 tracks. 3 points without a time left out.')
   })
 })

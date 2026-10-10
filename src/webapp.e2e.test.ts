@@ -29,7 +29,7 @@ describe('the webapp is served by a real server', () => {
   })
 
   it('serves the script and stylesheet the page asks for', async () => {
-    for (const asset of ['tracks.js', 'bin.js', 'style.css']) {
+    for (const asset of ['tracks.js', 'bin.js', 'import.js', 'style.css']) {
       const res = await fetchApp(asset)
 
       expect(res.status, asset).toBe(200)
