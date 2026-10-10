@@ -334,7 +334,7 @@ export class AsyncTrackStore implements TrackStore {
     return this.enqueue('getFilteredTimedTracks', [params, selfPosition, undefined, query])
   }
   storeImport(track: ImportedTrack): Promise<void> {
-    return this.enqueue('storeImport', [track, Date.now()], 'acknowledged')
+    return this.enqueue('storeImport', [track], 'acknowledged')
   }
   deleteImport(id: string): Promise<boolean> {
     return this.enqueue('deleteImport', [id], 'acknowledged')

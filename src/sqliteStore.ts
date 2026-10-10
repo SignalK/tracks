@@ -179,6 +179,7 @@ export class SqliteTrackStore implements TrackStore {
   private readonly insert: StatementSync
   private readonly insertName: StatementSync
   private readonly selectName: StatementSync
+  private readonly selectImportedPoints: StatementSync
   private readonly maxCells: number
   private readonly segmentGap: number
   private readonly retention: number
@@ -242,13 +243,12 @@ export class SqliteTrackStore implements TrackStore {
         context     TEXT,
         name        TEXT,
         metadata    TEXT    NOT NULL,
-        start       INTEGER,
-        end         INTEGER,
+        first_time  INTEGER,
+        last_time   INTEGER,
         west        REAL    NOT NULL,
         south       REAL    NOT NULL,
         east        REAL    NOT NULL,
-        north       REAL    NOT NULL,
-        created     INTEGER NOT NULL
+        north       REAL    NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_imported_context ON imported_tracks(context);
       CREATE TABLE IF NOT EXISTS imported_points (
@@ -270,6 +270,9 @@ export class SqliteTrackStore implements TrackStore {
        WHERE excluded.timestamp >= names.timestamp`,
     )
     this.selectName = this.db.prepare('SELECT name FROM names WHERE context = ?')
+    this.selectImportedPoints = this.db.prepare(
+      'SELECT segment, timestamp, lat, lon FROM imported_points WHERE track_id = ? ORDER BY seq',
+    )
   }
 
   newPosition(context: Context, position: LatLngTuple, timestamp: number = Date.now()): void {
@@ -637,48 +640,47 @@ export class SqliteTrackStore implements TrackStore {
    * Keep an imported track. The caller mints the id; a second track under the
    * same id fails rather than replacing the first.
    */
-  storeImport(track: ImportedTrack, now = Date.now()): void {
+  storeImport(track: ImportedTrack): void {
     const points = track.segments.flat()
     if (points.length === 0) {
       throw new Error('An imported track needs at least one point')
     }
     let south = points[0]!.position[0]
     let north = south
-    let start: number | undefined
-    let end: number | undefined
+    let firstTime: number | undefined
+    let lastTime: number | undefined
     for (const { position, timestamp } of points) {
       south = Math.min(south, position[0])
       north = Math.max(north, position[0])
       if (timestamp !== undefined) {
-        start = start === undefined ? timestamp : Math.min(start, timestamp)
-        end = end === undefined ? timestamp : Math.max(end, timestamp)
+        firstTime = firstTime === undefined ? timestamp : Math.min(firstTime, timestamp)
+        lastTime = lastTime === undefined ? timestamp : Math.max(lastTime, timestamp)
       }
     }
     const [west, east] = longitudeSpan(points.map(({ position }) => position[1]))
     this.db
       .prepare(
-        `INSERT INTO imported_tracks (id, context, name, metadata, start, end, west, south, east, north, created)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO imported_tracks (id, context, name, metadata, first_time, last_time, west, south, east, north)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         track.id,
         track.context ?? null,
         track.name ?? null,
         JSON.stringify(track.metadata),
-        start ?? null,
-        end ?? null,
+        firstTime ?? null,
+        lastTime ?? null,
         west,
         south,
         east,
         north,
-        now,
       )
     const insert = this.db.prepare(
       'INSERT INTO imported_points (track_id, seq, segment, timestamp, lat, lon) VALUES (?, ?, ?, ?, ?, ?)',
     )
     let seq = 0
-    for (const [segment, points] of track.segments.entries()) {
-      for (const { position, timestamp } of points) {
+    for (const [segment, segmentPoints] of track.segments.entries()) {
+      for (const { position, timestamp } of segmentPoints) {
         insert.run(track.id, seq++, segment, timestamp ?? null, position[0], position[1])
       }
     }
@@ -695,7 +697,7 @@ export class SqliteTrackStore implements TrackStore {
     return row ? this.importFrom(row) : undefined
   }
 
-  /** Imported tracks the filter lets through, oldest import first. */
+  /** Imported tracks the filter lets through, in the order they were stored. */
   findImports(filter: ImportFilter = {}): ImportedTrack[] {
     const clauses: string[] = []
     const params: (string | number)[] = []
@@ -708,7 +710,11 @@ export class SqliteTrackStore implements TrackStore {
     }
     if (filter.window) {
       // The same end rule as a recorded track's window, applied to the span.
-      clauses.push('start IS NOT NULL', filter.window.inclusiveEnd ? 'start <= ?' : 'start < ?', 'end >= ?')
+      clauses.push(
+        'first_time IS NOT NULL',
+        filter.window.inclusiveEnd ? 'first_time <= ?' : 'first_time < ?',
+        'last_time >= ?',
+      )
       params.push(filter.window.to, filter.window.from)
     }
     if (filter.bbox) {
@@ -717,7 +723,7 @@ export class SqliteTrackStore implements TrackStore {
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
     let rows = this.db
-      .prepare(`SELECT * FROM imported_tracks ${where} ORDER BY created, id`)
+      .prepare(`SELECT * FROM imported_tracks ${where} ORDER BY rowid`)
       .all(...params) as unknown as ImportedRow[]
     // Longitude in JS rather than SQL: either box may cross the antimeridian.
     const box = filter.bbox
@@ -728,9 +734,12 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   private importFrom(row: ImportedRow): ImportedTrack {
-    const points = this.db
-      .prepare('SELECT segment, timestamp, lat, lon FROM imported_points WHERE track_id = ? ORDER BY seq')
-      .all(row.id) as unknown as { segment: number; timestamp: number | null; lat: number; lon: number }[]
+    const points = this.selectImportedPoints.all(row.id) as unknown as {
+      segment: number
+      timestamp: number | null
+      lat: number
+      lon: number
+    }[]
     const segments: ImportedPoint[][] = []
     let current: ImportedPoint[] | undefined
     let currentIndex: number | undefined
