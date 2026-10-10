@@ -252,11 +252,32 @@ describe('deleting a recorded track through the real HTTP routes', () => {
     )
   }
   let start: number
+  /**
+   * Whether the server routes a track id to its provider at all. Fetching
+   * and deleting by id arrived in SignalK/signalk-server#3038; a server
+   * without it answers every id with its own not-found page rather than the
+   * Track API's JSON, which says nothing about this plugin.
+   */
+  let routesIds = false
 
   beforeAll(async () => {
     start = Date.now() - 8 * MINUTE
     for (let i = 0; i < 4; i++) {
       await server.feed(VESSEL, [60.3 + i / 100, 25], start + i * MINUTE)
+    }
+    // The positions are written asynchronously after the delta arrives, so
+    // wait for all four rather than racing the store.
+    const deadline = Date.now() + 10_000
+    for (;;) {
+      const { status, body } = await server.apiV2(url())
+      routesIds = typeof body === 'object'
+      if (!routesIds || (status === 200 && (body as Feature).properties.pointCount === 4)) {
+        break
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`the recorded track never reached four points: ${status} ${JSON.stringify(body)}`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200))
     }
   })
 
@@ -264,6 +285,9 @@ describe('deleting a recorded track through the real HTTP routes', () => {
   // without it refuses from and to as unknown parameters, which says nothing
   // about this plugin, so the test steps aside there.
   it('moves a span to the recycle bin and restores it', async (context) => {
+    if (!routesIds) {
+      context.skip()
+    }
     expect(await pointCount()).toBe(4)
     const deleted = await server.apiV2(url(`?from=${iso(start + MINUTE)}&to=${iso(start + 2 * MINUTE)}`), {
       method: 'DELETE',
@@ -288,7 +312,10 @@ describe('deleting a recorded track through the real HTTP routes', () => {
 
   // A recording goes on after it is deleted, so the bin keeps it as the span
   // up to the delete rather than as a whole track.
-  it('deletes the whole track and purges it from the bin', async () => {
+  it('deletes the whole track and purges it from the bin', async (context) => {
+    if (!routesIds) {
+      context.skip()
+    }
     expect((await server.apiV2(url(), { method: 'DELETE' })).status).toBe(200)
     expect(await pointCount()).toBe(404)
     const entry = await binEntry()
@@ -301,7 +328,10 @@ describe('deleting a recorded track through the real HTTP routes', () => {
     expect(await pointCount()).toBe(404)
   })
 
-  it('answers 404 for a vessel nobody recorded', async () => {
+  it('answers 404 for a vessel nobody recorded', async (context) => {
+    if (!routesIds) {
+      context.skip()
+    }
     const id = encodeURIComponent('tracks:recorded:vessels.urn:mrn:imo:mmsi:000000001')
     expect((await server.apiV2(`/tracks/${id}`, { method: 'DELETE' })).status).toBe(404)
   })
