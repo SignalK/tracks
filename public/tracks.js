@@ -25,6 +25,9 @@
 const WINDOW_V2 = 'P30D'
 const WINDOW_V1 = '30d'
 
+/** This plugin's id, which the server stamps on its tracks as `providerId`. */
+const PROVIDER_ID = 'tracks'
+
 /**
  * Ceiling on the list request.
  *
@@ -122,16 +125,32 @@ function deleteCell(properties) {
  * response with a Content-Disposition on it, and the server sets one. Doing it
  * by hand would mean holding a whole track in memory to build a blob.
  */
-function exportCell({ context, isSelf }) {
+function exportCell({ id, providerId, context, isSelf }) {
   const td = document.createElement('td')
-  if (typeof context !== 'string') {
+  const link = document.createElement('a')
+  // A server older than the Track API's write routes leaves the provider
+  // prefix off the id.
+  const trackId =
+    typeof id === 'string' && typeof providerId === 'string' && id.startsWith(`${providerId}:`)
+      ? id.slice(providerId.length + 1)
+      : id
+  // An import is exported as it was imported, never as the recording of the
+  // vessel it names; v1 does not know imports at all. Only this plugin's own:
+  // another provider's ids mean nothing to its route.
+  if (
+    typeof trackId === 'string' &&
+    trackId.startsWith('imported:') &&
+    (providerId === undefined || providerId === PROVIDER_ID)
+  ) {
+    link.href = `../../plugins/tracks/imports/${encodeURIComponent(trackId)}/track.gpx`
+  } else if (typeof context === 'string') {
+    // `self` resolves server-side; using it keeps the URL short and avoids
+    // guessing how the own vessel's context should be spelled.
+    const vessel = isSelf ? 'self/track.gpx' : `vessels/${encodeURIComponent(context)}/track.gpx`
+    link.href = `../../signalk/v1/api/${vessel}?duration=${WINDOW_V1}`
+  } else {
     return td
   }
-  const link = document.createElement('a')
-  // `self` resolves server-side; using it keeps the URL short and avoids
-  // guessing how the own vessel's context should be spelled.
-  const vessel = isSelf ? 'self/track.gpx' : `vessels/${encodeURIComponent(context)}/track.gpx`
-  link.href = `../../signalk/v1/api/${vessel}?duration=${WINDOW_V1}`
   link.textContent = 'GPX'
   link.rel = 'nofollow'
   td.append(link)

@@ -1,6 +1,6 @@
 import { DOMParser } from '@xmldom/xmldom'
 import type { Document, Element } from '@xmldom/xmldom'
-import type { TimedPosition } from './types.js'
+import type { LatLngTuple, TimedPosition } from './types.js'
 
 /**
  * GPX 1.1 serialisation and parsing for recorded tracks.
@@ -28,6 +28,17 @@ export interface GpxTrack extends GpxTrackIdentity {
   segments: TimedPosition[][]
 }
 
+/** A point to write; one without a time is written without `<time>`. */
+export interface GpxPoint {
+  position: LatLngTuple
+  timestamp?: number
+}
+
+/** A track to write: a recorded one, or an import that may carry no times. */
+export interface GpxExportTrack extends GpxTrackIdentity {
+  segments: GpxPoint[][]
+}
+
 /**
  * Serialise tracks as a GPX 1.1 document.
  *
@@ -41,7 +52,7 @@ export interface GpxTrack extends GpxTrackIdentity {
  * identity; carrying the context means ours can, while staying readable by
  * anything else, since `<extensions>` is ignorable by specification.
  */
-export function toGpx(tracks: GpxTrack[], now: Date = new Date()): string {
+export function toGpx(tracks: GpxExportTrack[], now: Date = new Date()): string {
   const lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<gpx version="1.1" creator="@signalk/tracks-plugin" xmlns="http://www.topografix.com/GPX/1/1">',
@@ -68,7 +79,14 @@ export function toGpx(tracks: GpxTrack[], now: Date = new Date()): string {
     for (const points of segments) {
       lines.push('    <trkseg>')
       for (const { position, timestamp } of points) {
-        lines.push(`      <trkpt lat="${coordinate(position[LAT])}" lon="${coordinate(position[LNG])}">`)
+        const at = `lat="${coordinate(position[LAT])}" lon="${coordinate(position[LNG])}"`
+        // An imported track can have no times; a made-up one would place it
+        // in 1970 for every reader that imports it back.
+        if (timestamp === undefined) {
+          lines.push(`      <trkpt ${at}/>`)
+          continue
+        }
+        lines.push(`      <trkpt ${at}>`)
         // <time> is the only child, and GPX 1.1 fixes the order of trkpt's
         // children — a schema-validating reader rejects them out of sequence.
         lines.push(`        <time>${iso(timestamp)}</time>`)
