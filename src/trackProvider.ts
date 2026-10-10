@@ -2,15 +2,17 @@ import { Temporal } from '@js-temporal/polyfill'
 import { M_PER_DEG, simplify } from './simplify.js'
 import { segment, thin, thinToBudget } from './timeWindow.js'
 import type { TrackStore } from './store.js'
+import { decimate, isImportedId, isTimed, positionsOf, toImportedTrack } from './importedTracks.js'
 import type {
   TrackApi,
   TrackBoundingBox,
   TrackFeature,
+  TrackImport,
   TrackProperties,
   TracksRequest,
   TracksResponse,
 } from './trackApi.js'
-import type { GeoBounds, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
+import type { GeoBounds, ImportedTrack, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
 import { clipToBounds, createInBounds, longitudeSpan, toIsoTimes } from './utils.js'
 
 /**
@@ -284,6 +286,77 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     return { tracks: result, resolution }
   }
 
+  /**
+   * Imported tracks the query matches, each with the points it returns.
+   *
+   * The same filters as a recorded track, applied to the import's own points:
+   * a context names the vessel it was imported for, a window needs times, a
+   * box needs a point inside it and clips like a recorded track. Never
+   * reconciled with history, which knows nothing of an import.
+   */
+  const matchingImports = async (
+    query: TracksRequest,
+  ): Promise<{ track: ImportedTrack; points: TimedPosition[]; timed: boolean }[]> => {
+    const store = deps.store()
+    if (!store?.findImports) {
+      return []
+    }
+    const window = toTimeWindow(query)
+    const resolution = query.resolution ? totalMilliseconds(query.resolution) : undefined
+    const bounds = toGeoBounds(query.bbox)
+    const clipTo = query.clip === true ? bounds : null
+    const inBounds = bounds ? createInBounds(bounds) : undefined
+    const imports = await store.findImports({
+      ...(query.contexts?.length
+        ? { contexts: [...new Set(query.contexts.map(resolveSelf(deps.selfContext())))] }
+        : {}),
+      ...(window ? { window } : {}),
+      ...(bounds ? { bbox: bounds } : {}),
+    })
+    const result: { track: ImportedTrack; points: TimedPosition[]; timed: boolean }[] = []
+    for (const track of imports) {
+      const timed = isTimed(track)
+      // Matched on the points inside the window, as a recorded track is.
+      if (inBounds && !positionsOf(track, null, window).some(({ position }) => inBounds(position))) {
+        continue
+      }
+      let points = positionsOf(track, clipTo, window)
+      if (timed) {
+        points = thin(points, resolution)
+      }
+      if (points.length > 0) {
+        result.push({ track, points, timed })
+      }
+    }
+    return result
+  }
+
+  /** What names an imported track: its id, name and vessel, over what it was posted with. */
+  const importIdentity = (track: ImportedTrack): Omit<TrackProperties, 'pointCount'> => {
+    const contextName = track.context === undefined ? undefined : deps.contextName(track.context)
+    return {
+      ...track.metadata,
+      id: track.id,
+      ...(track.name === undefined ? {} : { name: track.name }),
+      ...(track.context === undefined
+        ? {}
+        : {
+            context: track.context,
+            isSelf: track.context === deps.selfContext(),
+            ...(contextName === undefined ? {} : { contextName }),
+          }),
+    }
+  }
+
+  /** The store, when it can keep imported tracks; an ordinary failure otherwise. */
+  const importStore = (): Required<Pick<TrackStore, 'storeImport' | 'deleteImport' | 'getImport'>> => {
+    const store = deps.store()
+    if (!store?.storeImport || !store.deleteImport || !store.getImport) {
+      throw new Error('Track storage is not available')
+    }
+    return store as Required<Pick<TrackStore, 'storeImport' | 'deleteImport' | 'getImport'>>
+  }
+
   return {
     async getTracks(query: TracksRequest): Promise<TracksResponse> {
       const { tracks: matched, resolution: requested } = await matching(query)
@@ -302,11 +375,61 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
           features.push(feature)
         }
       }
+      // Each import is a feature of its own, beside any recorded track of
+      // the same vessel: an import names a vessel, it does not join its
+      // recording. Its posted segments are the only breaks, so no gap rule.
+      const requestedForImports = query.resolution ? totalMilliseconds(query.resolution) : undefined
+      for (const { track, points, timed } of await matchingImports(query)) {
+        const feature = shapeFeature(
+          points,
+          0,
+          query,
+          timed ? requestedForImports : undefined,
+          importIdentity(track),
+          timed,
+        )
+        if (feature) {
+          features.push(feature)
+        }
+      }
       return { type: 'FeatureCollection', features }
     },
 
     async getTrackContexts(query: TracksRequest): Promise<string[]> {
-      return [...(await matching(query)).tracks.keys()]
+      const [recorded, imported] = await Promise.all([matching(query), matchingImports(query)])
+      const contexts = new Set(recorded.tracks.keys())
+      for (const { track } of imported) {
+        if (track.context !== undefined) {
+          contexts.add(track.context)
+        }
+      }
+      return [...contexts]
+    },
+
+    async getTrack(id: string): Promise<TrackFeature | undefined> {
+      if (!isImportedId(id)) {
+        return undefined
+      }
+      const track = await importStore().getImport(id)
+      if (!track) {
+        return undefined
+      }
+      // Returned whole and with its times, so it can be posted to another
+      // provider exactly as it was posted here.
+      const timed = isTimed(track)
+      return shapeFeature(positionsOf(track, null), 0, { times: timed }, undefined, importIdentity(track), timed)
+    },
+
+    async storeTrack(track: TrackImport): Promise<string> {
+      const imported = toImportedTrack(track)
+      await importStore().storeImport(imported)
+      return imported.id
+    },
+
+    async deleteTrack(id: string): Promise<boolean> {
+      // Recorded tracks have no id: a history provider would refill a
+      // deleted one on the next query, and nothing here can stop it.
+      return isImportedId(id) ? await importStore().deleteImport(id) : false
     },
   }
 }
@@ -323,15 +446,19 @@ function shapeFeature(
   gap: number,
   query: TracksRequest,
   requested: number | undefined,
-  identity: Pick<TrackProperties, 'context' | 'isSelf' | 'contextName'>,
+  identity: Omit<TrackProperties, 'pointCount'>,
+  timed = true,
 ): TrackFeature | undefined {
   // The budget is applied per track, after the store's own thinning: a
   // client that named both is asking for this spacing *and* no more than
-  // this many points, and the wider of the two wins.
+  // this many points, and the wider of the two wins. A track without times
+  // has no spacing to widen, so it is met by keeping evenly chosen points.
   const { points, resolution: appliedMs } =
     query.maxPoints === undefined
       ? { points: all, resolution: requested }
-      : thinToBudget(all, query.maxPoints, requested)
+      : timed
+        ? thinToBudget(all, query.maxPoints, requested)
+        : { points: decimate(all, query.maxPoints), resolution: undefined }
   if (points.length === 0) {
     return undefined
   }
@@ -366,8 +493,12 @@ function shapeFeature(
           },
     properties: {
       ...identity,
-      from: new Date(shaped[0]!.timestamp).toISOString(),
-      to: new Date(shaped[shaped.length - 1]!.timestamp).toISOString(),
+      ...(timed
+        ? {
+            from: new Date(shaped[0]!.timestamp).toISOString(),
+            to: new Date(shaped[shaped.length - 1]!.timestamp).toISOString(),
+          }
+        : {}),
       ...(bbox ? { bbox } : {}),
       pointCount: shaped.length,
       // The spacing actually applied, which is not always the one asked
@@ -380,7 +511,7 @@ function shapeFeature(
       // already as simple as it gets — so this reports what was applied
       // rather than implying the geometry differs from the stored one.
       ...(chosenEpsilon === undefined ? {} : { epsilon: chosenEpsilon }),
-      ...(query.times ? { coordTimes: segments.map(toIsoTimes) } : {}),
+      ...(query.times && timed ? { coordTimes: segments.map(toIsoTimes) } : {}),
     },
   }
 }

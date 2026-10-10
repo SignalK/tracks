@@ -34,6 +34,35 @@ The own vessel is kept indefinitely by default. Other vessels are kept for 30 da
 fix — a harbour puts hundreds of AIS targets past a receiver in a day, and keeping every one of them
 forever is rarely what anybody wants. Both are settings.
 
+## Imported tracks
+
+A client can store a track of its own, a GPX from a friend or a passage logged by another
+device, with `POST /signalk/v2/api/tracks` (Signal K server with
+[#3038](https://github.com/SignalK/signalk-server/pull/3038)). The body is a GeoJSON
+Feature, the shape a v2 query returns; the plugin answers with an id such as
+`tracks:imported:0f0f2a1e-…`, and `GET` or `DELETE /signalk/v2/api/tracks/<id>` fetch or
+delete it. Deleting needs administrator rights.
+
+An imported track is kept apart from the recording. It is listed by v2 queries like any
+other track, filtered by vessel, time window and area, but as a feature of its own even when
+it names a vessel the plugin also records. It is never merged with a history provider's data,
+never removed by the retention settings, and never returned by the v1 routes, which answer
+where vessels are now. Its own name and any other properties it was posted with come back as
+posted.
+
+A track needs times (`coordTimes`) or a vessel (`context`). One with neither is refused:
+it would match no time window, and a query across every vessel needs one, so it could
+only be found again by its id.
+
+## Deleting tracks
+
+A recorded track cannot be deleted. The plugin's own store could drop its positions, but
+with a history provider installed the next query would fill the same window back in from
+the provider, and the History API offers no way to delete or hide data. A delete that comes
+back on the next query would be worse than none, so recorded tracks carry no id. A recorded
+track ends when the retention settings above drop it from the store, and when the
+provider's own retention drops it there.
+
 ## Glitch filtering
 
 A receiver occasionally reports a position far from the vessel — a bad almanac, a multipath
