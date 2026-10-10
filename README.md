@@ -41,7 +41,8 @@ device, with `POST /signalk/v2/api/tracks` (Signal K server with
 [#3038](https://github.com/SignalK/signalk-server/pull/3038)). The body is a GeoJSON
 Feature, the shape a v2 query returns; the plugin answers with an id such as
 `tracks:imported:0f0f2a1e-…`, and `GET` or `DELETE /signalk/v2/api/tracks/<id>` fetch or
-delete it. Deleting needs administrator rights.
+delete it. Storing needs write access; deleting needs administrator rights, or write
+access on a server with security turned off.
 
 An imported track is kept apart from the recording. It is listed by v2 queries like any
 other track, filtered by vessel, time window and area, but as a feature of its own even when
