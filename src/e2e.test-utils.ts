@@ -191,9 +191,13 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
   const url = `http://localhost:${port}`
   // The server writes into its config dir while it shuts down, so removing
   // the dir before it has exited races those writes and fails ENOTEMPTY.
-  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+  // A child that failed to spawn emits 'error' and may never emit 'exit'.
+  const exited = new Promise<void>((resolve) => {
+    child.once('exit', () => resolve())
+    child.once('error', () => resolve())
+  })
   const stop = async () => {
-    if (child.exitCode === null && child.signalCode === null) {
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM')
       const timedOut = await Promise.race([exited.then(() => false), wait(STOP_TIMEOUT_MS).then(() => true)])
       if (timedOut) {
@@ -201,7 +205,8 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
         await exited
       }
     }
-    rmSync(configDir, { recursive: true, force: true })
+    // Retried, because a helper process the server started may outlive it briefly.
+    rmSync(configDir, { recursive: true, force: true, maxRetries: 3 })
   }
 
   const deadline = Date.now() + (options.timeoutSeconds ?? 60) * 1000
