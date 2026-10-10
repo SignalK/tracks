@@ -45,7 +45,8 @@ export interface E2EServer {
   apiV2: (path: string, init?: { method?: string; body?: unknown }) => Promise<{ status: number; body: unknown }>
   /** The server's own vessel context, as it resolved it. */
   selfContext: string
-  stop: () => void
+  /** Stop the server, resolving once it has exited and its config dir is gone. */
+  stop: () => Promise<void>
 }
 
 /** A port unlikely to collide with a dev server or the boat's own services. */
@@ -62,6 +63,9 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
  * response, which for a track query means reading the whole store.
  */
 const REQUEST_TIMEOUT_MS = 15_000
+
+/** How long a server gets to exit on SIGTERM before it is killed. */
+const STOP_TIMEOUT_MS = 10_000
 
 /**
  * Install the plugin into a throwaway config dir from a packed tarball.
@@ -178,8 +182,18 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
   child.stderr?.on('data', (d: Buffer) => log.push(d.toString()))
 
   const url = `http://localhost:${port}`
-  const stop = () => {
-    child.kill('SIGTERM')
+  // The server writes into its config dir while it shuts down, so removing
+  // the dir before it has exited races those writes and fails ENOTEMPTY.
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+  const stop = async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM')
+      const timedOut = await Promise.race([exited.then(() => false), wait(STOP_TIMEOUT_MS).then(() => true)])
+      if (timedOut) {
+        child.kill('SIGKILL')
+        await exited
+      }
+    }
     rmSync(configDir, { recursive: true, force: true })
   }
 
@@ -230,7 +244,7 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
     await wait(500)
   }
 
-  stop()
+  await stop()
   throw new Error(`signalk-server did not start within the timeout. Output:\n${log.join('')}`)
 }
 
