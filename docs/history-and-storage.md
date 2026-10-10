@@ -58,6 +58,14 @@ open, so History and v1 queries can still read committed tracks, including when
 storage is full. Startup, worker exit or an uncertain rollback fail the whole
 store. These errors remain visible instead of being replaced by healthy status.
 
+Imported tracks are kept in tables of their own and written differently from
+positions. Storing or deleting one waits for its commit, so the id it is given
+reads back at once. It runs in a transaction of its own, so an import that cannot
+be stored fails alone and recording carries on. It is admitted outside the limits
+above, so a large import neither pauses recording nor is dropped. Once recording
+writes have failed, imports are refused too. Retention never removes an imported
+track: it stays until it is deleted.
+
 Stopping unsubscribes input immediately, then returns a Promise that resolves
 only after accepted work drains, SQLite closes and the worker exits. Plugin
 lifecycle callers must await `stop()` before restarting or removing its data

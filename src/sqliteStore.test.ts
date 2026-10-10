@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { s2 } from 's2js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
 import { clipToBounds, splitAtAntimeridian } from './utils.js'
-import type { Context, GeoBounds, LatLngTuple, TimedPosition } from './types.js'
+import type { Context, GeoBounds, ImportedTrack, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
 
 const debug = Object.assign(() => {}, { enabled: false })
 const ctx = 'vessels.urn:mrn:signalk:uuid:test' as Context
@@ -570,5 +570,137 @@ describe('a transaction whose rollback fails', () => {
     }
     expect(thrown).toBeInstanceOf(TransactionStateError)
     expect(thrown).toMatchObject({ message: expect.stringContaining('disk I/O error') })
+  })
+})
+
+describe('imported tracks', () => {
+  const t0 = Date.parse('2026-06-01T00:00:00Z')
+  const imported = (overrides: Partial<ImportedTrack> = {}): ImportedTrack => ({
+    id: 'imported:a',
+    context: other,
+    name: 'Passage',
+    metadata: { colour: 'red', tags: ['race'] },
+    segments: [
+      [
+        { position: [60, 24], timestamp: t0 },
+        { position: [60.1, 24.1], timestamp: t0 + 60_000 },
+      ],
+      [{ position: [60.2, 24.2], timestamp: t0 + 3_600_000 }],
+    ],
+    ...overrides,
+  })
+
+  it('returns a stored track as it was stored', () => {
+    const store = newStore()
+    store.storeImport(imported())
+    expect(store.getImport('imported:a')).toEqual(imported())
+    store.close()
+  })
+
+  it('keeps a track with no times, and no context or name', () => {
+    const store = newStore()
+    const untimed = imported({ segments: [[{ position: [60, 24] }, { position: [61, 25] }]] })
+    delete untimed.context
+    delete untimed.name
+    store.storeImport(untimed)
+    expect(store.getImport('imported:a')).toEqual(untimed)
+    store.close()
+  })
+
+  it('refuses a second track under an id already taken', () => {
+    const store = newStore()
+    store.storeImport(imported())
+    expect(() => store.storeImport(imported({ name: 'Other' }))).toThrow()
+    expect(store.getImport('imported:a')?.name).toBe('Passage')
+    store.close()
+  })
+
+  it('deletes a track with its points and says whether there was one', () => {
+    const store = newStore()
+    store.storeImport(imported())
+    expect(store.deleteImport('imported:a')).toBe(true)
+    expect(store.getImport('imported:a')).toBeUndefined()
+    expect(store.deleteImport('imported:a')).toBe(false)
+    // Reusing the id proves no point outlived its track.
+    store.storeImport(imported({ segments: [[{ position: [1, 1], timestamp: t0 }]] }))
+    expect(store.getImport('imported:a')?.segments).toEqual([[{ position: [1, 1], timestamp: t0 }]])
+    store.close()
+  })
+
+  it('narrows by context, leaving out imports that name none', () => {
+    const store = newStore()
+    store.storeImport(imported())
+    const contextless = imported({ id: 'imported:b' })
+    delete contextless.context
+    store.storeImport(contextless)
+    expect(store.findImports().map(({ id }) => id)).toEqual(['imported:a', 'imported:b'])
+    expect(store.findImports({ contexts: [other] }).map(({ id }) => id)).toEqual(['imported:a'])
+    expect(store.findImports({ contexts: [ctx] })).toEqual([])
+    store.close()
+  })
+
+  it('matches a window on the time span, with the same end rule as recorded tracks', () => {
+    const store = newStore()
+    store.storeImport(imported())
+    store.storeImport(imported({ id: 'imported:untimed', segments: [[{ position: [60, 24] }]] }))
+    const ids = (window: TimeWindow) => store.findImports({ window }).map(({ id }) => id)
+    const end = t0 + 3_600_000
+    // Between the two segments: the span still overlaps.
+    expect(ids({ from: t0 + 120_000, to: t0 + 180_000 })).toEqual(['imported:a'])
+    expect(ids({ from: end + 1, to: end + 2 })).toEqual([])
+    expect(ids({ from: t0 - 2, to: t0 })).toEqual([])
+    expect(ids({ from: t0 - 2, to: t0, inclusiveEnd: true })).toEqual(['imported:a'])
+    expect(ids({ from: Number.NEGATIVE_INFINITY, to: end })).toEqual(['imported:a'])
+    store.close()
+  })
+
+  it('matches a box on the extent, including across the antimeridian', () => {
+    const store = newStore()
+    store.storeImport(imported())
+    store.storeImport(
+      imported({
+        id: 'imported:fiji',
+        segments: [
+          [
+            { position: [-17, 179.5], timestamp: t0 },
+            { position: [-17.1, -179.5], timestamp: t0 + 60_000 },
+          ],
+        ],
+      }),
+    )
+    const ids = (bbox: GeoBounds) => store.findImports({ bbox }).map(({ id }) => id)
+    expect(ids({ sw: [59, 23], ne: [61, 25] })).toEqual(['imported:a'])
+    expect(ids({ sw: [-18, 179.8], ne: [-16, -179.8] })).toEqual(['imported:fiji'])
+    expect(ids({ sw: [-18, -179.9], ne: [-16, -179] })).toEqual(['imported:fiji'])
+    expect(ids({ sw: [-18, 170], ne: [-16, 175] })).toEqual([])
+    expect(ids({ sw: [61, 23], ne: [62, 25] })).toEqual([])
+    store.close()
+  })
+
+  it('leaves imports alone when recorded tracks are pruned', () => {
+    const store = new SqliteTrackStore({ file: ':memory:', retention: 1 }, debug)
+    store.storeImport(imported())
+    store.newPosition(other, [60, 24], 1000)
+    store.prune(-1)
+    expect(store.getImport('imported:a')).toEqual(imported())
+    store.close()
+  })
+
+  it('adds its tables to a database an older version wrote', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tracks-imports-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const older = new DatabaseSync(file)
+      older.exec(
+        'CREATE TABLE positions (context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL)',
+      )
+      older.close()
+      const store = new SqliteTrackStore({ file }, debug)
+      store.storeImport(imported())
+      expect(store.getImport('imported:a')).toEqual(imported())
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

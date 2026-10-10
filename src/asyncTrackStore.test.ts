@@ -7,7 +7,7 @@ import type { Worker } from 'node:worker_threads'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AsyncTrackStore } from './asyncTrackStore.js'
 import { SqliteTrackStore } from './sqliteStore.js'
-import type { Debug, LatLngTuple } from './types.js'
+import type { Debug, ImportedTrack, LatLngTuple } from './types.js'
 
 const debug: Debug = Object.assign(() => undefined, { enabled: false })
 let dir: string
@@ -282,5 +282,55 @@ describe('worker-owned SQLite', () => {
       [62, 26],
     ])
     expect(await store.get('old')).toEqual([[63, 27]])
+  })
+})
+
+describe('imported tracks through the worker', () => {
+  const track = (id: string, points = 2): ImportedTrack => ({
+    id,
+    context: 'vessels.other',
+    metadata: { source: 'gpx' },
+    segments: [
+      Array.from({ length: points }, (_, i) => ({ position: [60, 24 + i / 1000] as LatLngTuple, timestamp: i })),
+    ],
+  })
+
+  it('resolves only once the track is stored, so it reads back at once', async () => {
+    const store = create()
+    await store.storeImport(track('imported:a'))
+    expect(await store.getImport('imported:a')).toEqual(track('imported:a'))
+    expect((await store.findImports({ contexts: ['vessels.other'] })).map(({ id }) => id)).toEqual(['imported:a'])
+    expect(await store.deleteImport('imported:a')).toBe(true)
+    expect(await store.getImport('imported:a')).toBeUndefined()
+  })
+
+  it('rejects a track that cannot be stored and keeps recording', async () => {
+    const errors: Error[] = []
+    const store = create((error) => errors.push(error))
+    const broken = track('imported:a')
+    broken.segments[0]![1]!.position = [NaN, 24]
+    await expect(store.storeImport(broken)).rejects.toThrow()
+    expect(await store.getImport('imported:a')).toBeUndefined()
+    store.newPosition('self', [60, 24], 100)
+    expect(await store.get('self')).toEqual([[60, 24]])
+    expect(errors).toEqual([])
+  })
+
+  it('stores a track larger than the recording budget without pausing recording', async () => {
+    const errors: Error[] = []
+    const store = create((error) => errors.push(error), { maxBytes: 128 })
+    await store.storeImport(track('imported:a', 1000))
+    store.newPosition('self', [60, 24], 100)
+    expect(await store.get('self')).toEqual([[60, 24]])
+    expect((await store.getImport('imported:a'))?.segments[0]).toHaveLength(1000)
+    expect(errors).toEqual([])
+  })
+
+  it('refuses imports once recording writes have failed', async () => {
+    const store = create()
+    store.newPosition('self', [NaN, 24], 100)
+    await expect(store.get('self')).rejects.toThrow()
+    await expect(store.storeImport(track('imported:a'))).rejects.toThrow()
+    await expect(store.deleteImport('imported:a')).rejects.toThrow()
   })
 })

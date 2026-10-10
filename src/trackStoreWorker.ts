@@ -66,6 +66,30 @@ if (store) {
     try {
       for (let i = 0; i < operations.length;) {
         const operation = operations[i]!
+        if (operation.method === 'storeImport' || operation.method === 'deleteImport') {
+          i++
+          // Each in a transaction of its own, so a failure answers this caller
+          // alone: a track that cannot be kept must not stop the recording.
+          if (writeFailure) {
+            results.push({ id: operation.id, error: writeFailure })
+            continue
+          }
+          try {
+            let value: unknown
+            if (operation.method === 'storeImport') {
+              target.transaction(() => target.storeImport(...operation.args))
+            } else {
+              target.transaction(() => {
+                value = target.deleteImport(...operation.args)
+              })
+            }
+            results.push({ id: operation.id, value })
+          } catch (error) {
+            if (error instanceof TransactionStateError) throw error
+            results.push({ id: operation.id, error: errorText(error) })
+          }
+          continue
+        }
         if (isWrite(operation)) {
           const first = i
           while (i < operations.length && isWrite(operations[i]!)) i++
@@ -124,6 +148,12 @@ if (store) {
                   debug,
                   operation.args[3],
                 )
+                break
+              case 'getImport':
+                value = target.getImport(...operation.args)
+                break
+              case 'findImports':
+                value = target.findImports(...operation.args)
                 break
               default:
                 throw new Error('Unknown track operation')
