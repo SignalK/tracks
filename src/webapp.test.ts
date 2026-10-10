@@ -619,8 +619,11 @@ describe('the webapp offers to delete a track', () => {
     expect((await deleteButton({ id: `tracks:recorded:${OTHER}`, providerId: 'tracks' }))?.textContent).toBe('Delete…')
   })
 
-  it('not for a track without an id', async () => {
+  // A server that predates `providerId:trackId` ids also predates deleting by them.
+  it('not for a track without an id the server can route', async () => {
     expect(await deleteButton({})).toBeUndefined()
+    expect(await deleteButton({ id: `recorded:${OTHER}`, providerId: 'tracks' })).toBeUndefined()
+    expect(await deleteButton({ id: `tracks:recorded:${OTHER}` })).toBeUndefined()
   })
 
   it('tells an import from the vessel’s recording', async () => {
@@ -641,7 +644,7 @@ describe('the webapp offers to delete a track', () => {
     const { tbody } = await render({
       body: {
         type: 'FeatureCollection',
-        features: [feature({ id: 'tracks:imported:a', name: 'Race day', pointCount: 2 })],
+        features: [feature({ id: 'tracks:imported:a', providerId: 'tracks', name: 'Race day', pointCount: 2 })],
       },
     })
     const cells = tbody.children[0]!.children
