@@ -125,10 +125,15 @@ function deleteCell(properties) {
 function exportCell({ id, providerId, context, isSelf }) {
   const td = document.createElement('td')
   const link = document.createElement('a')
+  // A server older than the Track API's write routes leaves the provider
+  // prefix off the id.
+  const trackId =
+    typeof id === 'string' && typeof providerId === 'string' && id.startsWith(`${providerId}:`)
+      ? id.slice(providerId.length + 1)
+      : id
   // An import is exported as it was imported, never as the recording of the
   // vessel it names; v1 does not know imports at all.
-  if (typeof id === 'string' && typeof providerId === 'string' && id.startsWith(`${providerId}:imported:`)) {
-    const trackId = id.slice(providerId.length + 1)
+  if (typeof trackId === 'string' && trackId.startsWith('imported:')) {
     link.href = `../../plugins/tracks/imports/${encodeURIComponent(trackId)}/track.gpx`
   } else if (typeof context === 'string') {
     // `self` resolves server-side; using it keeps the URL short and avoids

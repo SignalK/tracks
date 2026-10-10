@@ -588,6 +588,18 @@ describe('the webapp offers a GPX download', () => {
     expect(link.href).toBe('../../plugins/tracks/imports/imported%3Aa%20b/track.gpx')
   })
 
+  it('exports an import the API names without its provider', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [feature({ id: 'imported:a', context: OTHER, isSelf: false, name: 'Race day', pointCount: 2 })],
+      },
+    })
+
+    const link = tbody.children[0]!.children[4]!.children[0]!
+    expect(link.href).toBe('../../plugins/tracks/imports/imported%3Aa/track.gpx')
+  })
+
   // The list shows a bounded window, and the export must not quietly differ
   // from what the row says it contains.
   it('exports the same window the list shows', async () => {

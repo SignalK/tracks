@@ -1409,8 +1409,9 @@ export default function ThePlugin(app: App): Plugin {
               res.status(404).json({ message: `No imported track '${id}'` })
               return
             }
+            // A GPX file may carry an empty <name>; the vessel then names the track.
             const label =
-              track.name ??
+              track.name?.trim() ||
               (track.context === undefined
                 ? 'Imported track'
                 : trackLabel(
