@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { outsideSpans } from './recycleBin.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import type { Context, ImportedTrack } from './types.js'
 
@@ -207,5 +208,31 @@ describe('recycle bin: imported tracks', () => {
     store.storeImport({ ...passage(), segments: [[{ position: [1, 1], timestamp: t0 }]] })
     expect(store.getImport('imported:a')?.segments).toEqual([[{ position: [1, 1], timestamp: t0 }]])
     store.close()
+  })
+})
+
+describe('hiding deleted spans from history', () => {
+  const MIN = 60_000
+  const at = (timestamp: number, span?: number) => ({
+    position: [60, 24] as [number, number],
+    timestamp,
+    ...(span === undefined ? {} : { span }),
+  })
+
+  it('keeps fixes outside a span and drops those inside, bounds included', () => {
+    const kept = outsideSpans([at(t0 - 1), at(t0), at(t0 + MIN), at(t0 + MIN + 1)], [{ from: t0, to: t0 + MIN }])
+    expect(kept.map(({ timestamp }) => timestamp)).toEqual([t0 - 1, t0 + MIN + 1])
+  })
+
+  // The bucket's fix may be the deleted one even though the bucket starts before the span.
+  it('drops a history bucket that overlaps a span at all', () => {
+    const spans = [{ from: t0 + 30_000, to: t0 + 90_000 }]
+    const kept = outsideSpans([at(t0 - MIN, MIN), at(t0, MIN), at(t0 + MIN, MIN), at(t0 + 2 * MIN, MIN)], spans)
+    expect(kept.map(({ timestamp }) => timestamp)).toEqual([t0 - MIN, t0 + 2 * MIN])
+  })
+
+  it('reaches back to the start without a from', () => {
+    const kept = outsideSpans([at(t0 - DAY, MIN), at(t0 + MIN, MIN)], [{ to: t0 }])
+    expect(kept.map(({ timestamp }) => timestamp)).toEqual([t0 + MIN])
   })
 })

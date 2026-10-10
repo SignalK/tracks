@@ -774,6 +774,10 @@ export default function ThePlugin(app: App): Plugin {
     resolutionMs: number,
   ): ReturnType<typeof historyPositions> {
     const history = await historyPositions(app, context, window, resolutionMs, app.debug)
+    // Nothing to hide, and no reason to let a store error fail the read.
+    if (history.points.length === 0) {
+      return history
+    }
     const spans = await deletedSpansOf(context)
     return spans.length === 0 ? history : { ...history, points: outsideSpans(history.points, spans) }
   }
