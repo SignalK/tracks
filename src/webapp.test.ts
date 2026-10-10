@@ -1,11 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { trackLabel } from './utils.js'
 import { parseDuration } from './timeWindow.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '../public/bin.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
-import { imported } from '../public/import.js'
+import { imported, start as startImport } from '../public/import.js'
 
 /**
  * The webapp ships as plain static files with no build step, so it cannot
@@ -769,8 +769,42 @@ describe('the recycle bin page', () => {
 })
 
 describe('the import form', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   it('says how many tracks it imported, and any points it left out', () => {
     expect(imported({ ids: ['a'], skippedPoints: 0 })).toBe('Imported 1 track.')
     expect(imported({ ids: ['a', 'b'], skippedPoints: 3 })).toBe('Imported 2 tracks. 3 points without a time left out.')
+  })
+
+  // Each upload stores the file anew, so a second submit would import it twice.
+  it('sends one upload at a time, and allows another after a failure', async () => {
+    const button = { disabled: false }
+    const status = { textContent: '', hidden: true, dataset: {} as Record<string, string> }
+    let submit: (event: { preventDefault: () => void }) => Promise<void> = async () => {}
+    const form = {
+      elements: { file: { files: [{ name: 'a.gpx' }] }, self: { checked: false } },
+      querySelector: () => button,
+      addEventListener: (_type: string, handler: typeof submit) => {
+        submit = handler
+      },
+    }
+    let answer: (response: unknown) => void = () => {}
+    const fetch = vi.fn(() => new Promise((resolve) => (answer = resolve)))
+    vi.stubGlobal('document', { getElementById: (id: string) => (id === 'import-form' ? form : status) })
+    vi.stubGlobal('fetch', fetch)
+    startImport()
+
+    const event = { preventDefault: () => {} }
+    const first = submit(event)
+    await submit(event)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(button.disabled).toBe(true)
+
+    answer({ ok: false, status: 400, json: () => Promise.resolve({ message: 'No track found' }) })
+    await first
+    expect(status.textContent).toBe('No track found')
+    expect(button.disabled).toBe(false)
   })
 })

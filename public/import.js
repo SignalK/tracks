@@ -27,11 +27,16 @@ async function messageOf(response) {
   }
 }
 
-function start() {
+export function start() {
   const form = document.getElementById('import-form')
   const status = document.getElementById('import-status')
+  const button = form.querySelector('button[type="submit"]')
 
   function show(message, state) {
+    // A failed upload can be tried again; a successful one reloads the page.
+    if (state === 'error') {
+      button.disabled = false
+    }
     status.textContent = message
     status.hidden = false
     if (state) {
@@ -43,12 +48,18 @@ function start() {
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault()
+    // Each request stores the file anew, so a second click while one is in
+    // flight would import every track in it twice.
+    if (button.disabled) {
+      return
+    }
     const file = form.elements.file.files[0]
     if (!file) {
       show('Choose a GPX file first.', 'error')
       return
     }
     const query = form.elements.self.checked ? '?self=true' : ''
+    button.disabled = true
     show('Importing…')
     let response
     try {
