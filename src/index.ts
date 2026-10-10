@@ -25,7 +25,10 @@ import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
 import { fillFromHistory, reconcile } from './reconcile.js'
 import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
-import { toGpx } from './gpx.js'
+import { fromGpx, toGpx } from './gpx.js'
+import { fromGpxTrack } from './importedTracks.js'
+import { readText, UploadTooLargeError } from './upload.js'
+import { TrackRejectedError } from './trackApi.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type {
@@ -193,6 +196,15 @@ interface Plugin {
    * does not use this.
    */
   getTracks: () => TrackStore | undefined
+}
+
+/**
+ * The router the server hands `registerWithRouter`. Servers that let a plugin
+ * open a route to non-admin users add `access`; on older ones it is absent and
+ * every route stays admin-only.
+ */
+interface AccessRouter extends Router {
+  access?: (level: 'readwrite' | 'readonly') => Pick<Router, 'get' | 'post' | 'put' | 'delete'>
 }
 
 interface TracksPluginConfig {
@@ -1378,6 +1390,61 @@ export default function ThePlugin(app: App): Plugin {
         app.error(`Recycle bin: ${errorDetail(err)}`)
         res.status(500).json({ message: 'Track storage failed' })
       }
+
+      // Storing a track asks for write access, as the Track API's POST does.
+      // A server without per-route access keeps the route admin-only.
+      const writable = (router as AccessRouter).access?.('readwrite') ?? router
+      writable.post('/imports', (req: Request, res: Response) => {
+        const store = tracks
+        if (!store?.storeImport) {
+          notAvailable(res)
+          return
+        }
+        const storeImport = store.storeImport.bind(store)
+        // An import is kept apart from the recording even when it names the
+        // own vessel; `self` only says whose track it is.
+        const context = req.query.self === 'true' ? app.selfContext : undefined
+        void (async () => {
+          let text: string
+          try {
+            text = await readText(req)
+          } catch (err) {
+            if (err instanceof UploadTooLargeError) {
+              res.status(413).json({ message: err.message })
+            } else {
+              res.status(400).json({ message: 'The file could not be read' })
+            }
+            return
+          }
+          const read = fromGpx(text)
+          if (read.length === 0) {
+            res.status(400).json({ message: 'No track found: the file is not GPX, or has no track with points' })
+            return
+          }
+          let converted: ReturnType<typeof fromGpxTrack>[]
+          try {
+            // Every track is checked before any is stored, so a refused file
+            // leaves nothing half-imported behind.
+            converted = read.map((gpx) => fromGpxTrack(gpx, context ?? gpx.context))
+          } catch (err) {
+            res.status(400).json({ message: err instanceof TrackRejectedError ? err.message : String(err) })
+            return
+          }
+          try {
+            for (const { track } of converted) {
+              await storeImport(track)
+            }
+          } catch (err) {
+            app.error(`GPX import: ${errorDetail(err)}`)
+            res.status(500).json({ message: 'Track storage failed' })
+            return
+          }
+          res.status(201).json({
+            ids: converted.map(({ track }) => track.id),
+            skippedPoints: converted.reduce((sum, { skippedPoints }) => sum + skippedPoints, 0),
+          })
+        })()
+      })
 
       router.get('/recycle-bin', (_req: Request, res: Response) => {
         const store = tracks
