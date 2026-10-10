@@ -230,6 +230,13 @@ describe('an imported track through the real HTTP routes', () => {
     const listed = await server.apiV2(`/tracks?from=${from}&bbox=24.4,60.4,24.7,60.7`)
     expect((listed.body as Collection).features.map(({ properties }) => properties.id)).toEqual([id])
 
+    // The webapp's GPX link: the v2 id less its provider prefix.
+    const trackId = id.slice('tracks:'.length)
+    const gpx = await server.plugin(`/imports/${encodeURIComponent(trackId)}/track.gpx`)
+    expect(gpx.status).toBe(200)
+    expect(gpx.body).toContain('<name>Imported passage</name>')
+    expect(gpx.body).toContain('<trkpt lat="60.5" lon="24.5">')
+
     expect((await server.apiV2(`/tracks/${encodeURIComponent(id)}`, { method: 'DELETE' })).status).toBe(200)
     expect((await server.apiV2(`/tracks/${encodeURIComponent(id)}`)).status).toBe(404)
   })

@@ -28,6 +28,7 @@ import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js
 import { toGpx } from './gpx.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
+import { isImportedId } from './importedTracks.js'
 import type {
   BinEntry,
   Context,
@@ -193,6 +194,15 @@ interface Plugin {
    * does not use this.
    */
   getTracks: () => TrackStore | undefined
+}
+
+/**
+ * The router the server hands `registerWithRouter`. Servers that let a plugin
+ * open a route to non-admin users add `access`; on older ones it is absent and
+ * every route stays admin-only.
+ */
+interface AccessRouter extends Router {
+  access?: (level: 'readwrite' | 'readonly') => Pick<Router, 'get' | 'post' | 'put' | 'delete'>
 }
 
 interface TracksPluginConfig {
@@ -1379,6 +1389,59 @@ export default function ThePlugin(app: App): Plugin {
         res.status(500).json({ message: 'Track storage failed' })
       }
 
+      // Downloading a track asks for read access, as reading it through the
+      // Track API does. A server without per-route access keeps it admin-only.
+      const readable = (router as AccessRouter).access?.('readonly') ?? router
+      readable.get('/imports/:id/track.gpx', (req: Request, res: Response) => {
+        const store = tracks
+        if (!store?.getImport) {
+          notAvailable(res)
+          return
+        }
+        const id = String(req.params.id)
+        if (!isImportedId(id)) {
+          res.status(404).json({ message: `No imported track '${id}'` })
+          return
+        }
+        Promise.resolve(store.getImport(id))
+          .then((track) => {
+            if (!track) {
+              res.status(404).json({ message: `No imported track '${id}'` })
+              return
+            }
+            const label =
+              track.name ??
+              (track.context === undefined
+                ? 'Imported track'
+                : trackLabel(
+                    track.context,
+                    app.selfContext,
+                    remembering(() => tracks),
+                  ))
+            const filename = gpxFilename(label)
+            res.type('application/gpx+xml')
+            res.setHeader(
+              'Content-Disposition',
+              `attachment; filename="${asciiFilename(filename)}"; filename*=UTF-8''${rfc8187(filename)}`,
+            )
+            res.send(
+              toGpx([
+                {
+                  name: label,
+                  ...(track.context === undefined ? {} : { context: track.context }),
+                  segments: track.segments,
+                },
+              ]),
+            )
+          })
+          .catch((err: unknown) => {
+            app.error(`Could not export GPX for ${id}: ${errorDetail(err)}`)
+            if (!res.headersSent) {
+              res.status(500).json({ message: `Could not export the track ${id}` })
+            }
+          })
+      })
+
       router.get('/recycle-bin', (_req: Request, res: Response) => {
         const store = tracks
         if (!store?.binEntries) {
@@ -1486,7 +1549,7 @@ export default function ThePlugin(app: App): Plugin {
 }
 
 export { fromGpx, toGpx } from './gpx.js'
-export type { GpxTrack, GpxTrackIdentity } from './gpx.js'
+export type { GpxExportTrack, GpxPoint, GpxTrack, GpxTrackIdentity } from './gpx.js'
 export { Tracks, TrackAccumulator } from './tracks.js'
 export type { TracksConfig } from './tracks.js'
 export type { TrackStore } from './store.js'
