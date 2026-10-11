@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { GpxTrack } from './gpx.js'
 import { TrackRejectedError } from './trackApi.js'
 import type { TrackImport } from './trackApi.js'
 import type { GeoBounds, ImportedPoint, ImportedTrack, TimedPosition, TimeWindow } from './types.js'
@@ -43,6 +44,48 @@ export function toImportedTrack(track: TrackImport, id = `${IMPORTED_PREFIX}${ra
     ...(name === undefined ? {} : { name }),
     metadata,
     segments,
+  }
+}
+
+/**
+ * A track read from a GPX file, as this plugin stores it, with the number of
+ * points left out.
+ *
+ * `fromGpx` dates a point with no `<time>` to 0. A file with no times at all
+ * becomes an untimed import; a file with some keeps only its timed points,
+ * because an import is timed throughout or not at all, and its times are what
+ * let a query find it. `context` names the vessel in place of the file's own.
+ * Refused, like any import, when it ends up with neither times nor a vessel.
+ */
+export function fromGpxTrack(
+  gpx: GpxTrack,
+  context: string | undefined = gpx.context,
+  id = `${IMPORTED_PREFIX}${randomUUID()}`,
+): { track: ImportedTrack; skippedPoints: number } {
+  const all = gpx.segments.flat()
+  const timed = all.some(({ timestamp }) => timestamp !== 0)
+  if (!timed && context === undefined) {
+    throw new TrackRejectedError(
+      `Track '${gpx.name}' has neither times nor a vessel, so it could not be listed again; choose a vessel for it`,
+    )
+  }
+  const segments = gpx.segments
+    .map((points) =>
+      points
+        .filter(({ timestamp }) => !timed || timestamp !== 0)
+        .map(({ position, timestamp }): ImportedPoint => (timed ? { position, timestamp } : { position })),
+    )
+    .filter((points) => points.length > 0)
+  const kept = segments.reduce((sum, points) => sum + points.length, 0)
+  return {
+    track: {
+      id,
+      ...(context === undefined ? {} : { context }),
+      name: gpx.name,
+      metadata: {},
+      segments,
+    },
+    skippedPoints: all.length - kept,
   }
 }
 

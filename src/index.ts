@@ -25,7 +25,10 @@ import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
 import { fillFromHistory, reconcile } from './reconcile.js'
 import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
-import { toGpx } from './gpx.js'
+import { fromGpx, toGpx } from './gpx.js'
+import { fromGpxTrack } from './importedTracks.js'
+import { readText, UploadTooLargeError, UploadTypeError } from './upload.js'
+import { TrackRejectedError } from './trackApi.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type {
@@ -33,6 +36,7 @@ import type {
   Context,
   DeletedSpan,
   Debug,
+  ImportedTrack,
   LatLngTuple,
   LngLatTuple,
   Position,
@@ -194,6 +198,18 @@ interface Plugin {
    */
   getTracks: () => TrackStore | undefined
 }
+
+/**
+ * The router the server hands `registerWithRouter`. Servers that let a plugin
+ * open a route to non-admin users add `access`; on older ones it is absent and
+ * every route stays admin-only.
+ */
+interface AccessRouter extends Router {
+  access?: (level: 'readwrite' | 'readonly') => Pick<Router, 'get' | 'post' | 'put' | 'delete'>
+}
+
+/** The plugin's id, which the server also uses as its Track API provider id. */
+const PLUGIN_ID = 'tracks'
 
 interface TracksPluginConfig {
   resolution?: number
@@ -1336,6 +1352,39 @@ export default function ThePlugin(app: App): Plugin {
     // directly on the router admin-only: the same authority the Track API
     // asks to delete, which restoring and purging are part of.
     registerWithRouter: function (router: Router) {
+      /** An import as the webapp lists it, in the shape of a v2 track's properties. */
+      const importSummary = (track: ImportedTrack) => {
+        const name =
+          track.context === undefined
+            ? undefined
+            : contextName(
+                track.context,
+                remembering(() => tracks),
+              )
+        // A loop rather than Math.min(...): a long passage has more points than
+        // a call can take arguments.
+        let pointCount = 0
+        let from = Infinity
+        let to = -Infinity
+        for (const segment of track.segments) {
+          for (const { timestamp } of segment) {
+            pointCount++
+            if (timestamp !== undefined) {
+              from = Math.min(from, timestamp)
+              to = Math.max(to, timestamp)
+            }
+          }
+        }
+        return {
+          id: `${PLUGIN_ID}:${track.id}`,
+          providerId: PLUGIN_ID,
+          ...(track.name === undefined ? {} : { name: track.name }),
+          ...(track.context === undefined ? {} : { context: track.context, isSelf: track.context === app.selfContext }),
+          ...(name === undefined ? {} : { contextName: name }),
+          ...(from > to ? {} : { from: new Date(from).toISOString(), to: new Date(to).toISOString() }),
+          pointCount,
+        }
+      }
       const binEntryJson = (entry: BinEntry) => {
         const name =
           entry.context === undefined
@@ -1378,6 +1427,84 @@ export default function ThePlugin(app: App): Plugin {
         app.error(`Recycle bin: ${errorDetail(err)}`)
         res.status(500).json({ message: 'Track storage failed' })
       }
+
+      // Every import, whatever its time span: the webapp lists the last 30 days
+      // through the Track API, which an old passage or an untimed track never
+      // matches, so without this an imported file could not be found again.
+      // Listing asks for read access, as reading the Track API does.
+      const readable = (router as AccessRouter).access?.('readonly') ?? router
+      readable.get('/imports', (_req: Request, res: Response) => {
+        const store = tracks
+        if (!store?.findImports) {
+          notAvailable(res)
+          return
+        }
+        Promise.resolve(store.findImports())
+          .then((imports) => res.json(imports.map(importSummary)))
+          .catch((err: unknown) => {
+            app.error(`Listing imports: ${errorDetail(err)}`)
+            res.status(500).json({ message: 'Track storage failed' })
+          })
+      })
+
+      // Storing a track asks for write access, as the Track API's POST does.
+      // A server without per-route access keeps the route admin-only.
+      const writable = (router as AccessRouter).access?.('readwrite') ?? router
+      writable.post('/imports', (req: Request, res: Response) => {
+        const store = tracks
+        if (!store?.storeImport) {
+          notAvailable(res)
+          return
+        }
+        const storeImport = store.storeImport.bind(store)
+        // An import is kept apart from the recording even when it names the
+        // own vessel; `self` only says whose track it is.
+        const context = req.query.self === 'true' ? app.selfContext : undefined
+        void (async () => {
+          let text: string
+          try {
+            text = await readText(req)
+          } catch (err) {
+            if (err instanceof UploadTooLargeError) {
+              res.status(413).json({ message: err.message })
+            } else if (err instanceof UploadTypeError) {
+              res.status(415).json({ message: err.message })
+            } else {
+              res.status(400).json({ message: 'The file could not be read' })
+            }
+            return
+          }
+          const read = fromGpx(text)
+          if (read.length === 0) {
+            res.status(400).json({ message: 'No track found: the file is not GPX, or has no track with points' })
+            return
+          }
+          let converted: ReturnType<typeof fromGpxTrack>[]
+          try {
+            // Every track is checked before any is stored, so a refused file
+            // leaves nothing half-imported behind.
+            converted = read.map((gpx) => fromGpxTrack(gpx, context ?? gpx.context))
+          } catch (err) {
+            res.status(400).json({ message: err instanceof TrackRejectedError ? err.message : String(err) })
+            return
+          }
+          try {
+            for (const { track } of converted) {
+              await storeImport(track)
+            }
+          } catch (err) {
+            app.error(`GPX import: ${errorDetail(err)}`)
+            res.status(500).json({ message: 'Track storage failed' })
+            return
+          }
+          res.status(201).json({
+            // As the Track API names them on a server with its write routes,
+            // so a client can fetch or delete them there.
+            ids: converted.map(({ track }) => `${PLUGIN_ID}:${track.id}`),
+            skippedPoints: converted.reduce((sum, { skippedPoints }) => sum + skippedPoints, 0),
+          })
+        })()
+      })
 
       router.get('/recycle-bin', (_req: Request, res: Response) => {
         const store = tracks
@@ -1423,7 +1550,7 @@ export default function ThePlugin(app: App): Plugin {
 
     getTracks: () => tracks,
 
-    id: 'tracks',
+    id: PLUGIN_ID,
     name: 'Tracks',
     // On by default: a track recorder that records nothing until someone finds
     // and enables it loses exactly the passage the user wanted kept.
