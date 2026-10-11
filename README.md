@@ -70,8 +70,8 @@ skipped, and the answer says how many. The route needs write access on a Signal 
 lets a plugin say so, and administrator rights on an older one.
 
 The webapp lists every imported track, however old and whether or not it has times, next to
-the last 30 days of recorded ones, so a passage imported from years ago can be found and deleted
-there. `GET /plugins/tracks/imports` returns that list.
+the last 30 days of recorded ones, so a passage imported from years ago can be found there. It
+can be deleted there on a Signal K server that deletes tracks by id. `GET /plugins/tracks/imports` returns that list.
 
 ## Deleting tracks
 
