@@ -230,6 +230,13 @@ describe('an imported track through the real HTTP routes', () => {
     const listed = await server.apiV2(`/tracks?from=${from}&bbox=24.4,60.4,24.7,60.7`)
     expect((listed.body as Collection).features.map(({ properties }) => properties.id)).toEqual([id])
 
+    // The webapp's GPX link: the v2 id less its provider prefix.
+    const trackId = id.slice('tracks:'.length)
+    const gpx = await server.plugin(`/imports/${encodeURIComponent(trackId)}/track.gpx`)
+    expect(gpx.status).toBe(200)
+    expect(gpx.body).toContain('<name>Imported passage</name>')
+    expect(gpx.body).toContain('<trkpt lat="60.5" lon="24.5">')
+
     expect((await server.apiV2(`/tracks/${encodeURIComponent(id)}`, { method: 'DELETE' })).status).toBe(200)
     expect((await server.apiV2(`/tracks/${encodeURIComponent(id)}`)).status).toBe(404)
   })
@@ -363,5 +370,11 @@ describe('a GPX file through the import route', () => {
     const all = await server.plugin('/imports')
     expect(all.status).toBe(200)
     expect((all.body as { id: string; name: string }[]).find((entry) => entry.id === id)?.name).toBe('Old passage')
+
+    // Its export, on every server: the route belongs to the plugin, not the Track API.
+    const exported = await server.plugin(`/imports/${encodeURIComponent(local)}/track.gpx`)
+    expect(exported.status).toBe(200)
+    expect(exported.body).toContain('<name>Old passage</name>')
+    expect((exported.body as string).match(/<trkpt /g)).toHaveLength(3)
   })
 })
