@@ -196,7 +196,12 @@ function localId(properties) {
  */
 async function namesByProvider(listed, unlisted, signal) {
   if (listed.length > 0) {
-    return listed.some((properties) => typeof properties?.providerId === 'string')
+    return listed.some(
+      (properties) =>
+        typeof properties?.providerId === 'string' &&
+        typeof properties.id === 'string' &&
+        properties.id.startsWith(`${properties.providerId}:`),
+    )
   }
   if (unlisted.length === 0) {
     return false

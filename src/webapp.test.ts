@@ -688,6 +688,29 @@ describe('the webapp lists every import', () => {
     expect(tbody.children[1]!.children.at(-1)!.children).toHaveLength(0)
   })
 
+  // A provider id alone does not show the server names tracks by it.
+  it('offers no delete for an import when listed ids carry no provider prefix', async () => {
+    const { tbody } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [
+            feature({
+              id: `recorded:${SELF}`,
+              providerId: 'tracks',
+              context: SELF,
+              isSelf: true,
+              to: '2026-09-01T00:00:00Z',
+              pointCount: 2,
+            }),
+          ],
+        },
+      },
+      { imports: [old] },
+    )
+    expect(tbody.children[1]!.children.at(-1)!.children).toHaveLength(0)
+  })
+
   it('offers delete for an import on a server that names tracks by provider', async () => {
     const { tbody } = await render(
       {
