@@ -29,7 +29,9 @@ export const QUESTDB_URL = process.env.QUESTDB_URL ?? 'http://localhost:9000'
 
 export interface RequestOptions {
   method?: string
+  /** Sent as JSON, unless `contentType` says it is already text of that type. */
   body?: unknown
+  contentType?: string
 }
 
 export interface E2EServer {
@@ -253,7 +255,9 @@ async function request(url: string, init?: RequestOptions): Promise<{ status: nu
     ...(init?.method ? { method: init.method } : {}),
     ...(init?.body === undefined
       ? {}
-      : { body: JSON.stringify(init.body), headers: { 'Content-Type': 'application/json' } }),
+      : init.contentType === undefined
+        ? { body: JSON.stringify(init.body), headers: { 'Content-Type': 'application/json' } }
+        : { body: String(init.body), headers: { 'Content-Type': init.contentType } }),
   })
   const text = await r.text()
   try {

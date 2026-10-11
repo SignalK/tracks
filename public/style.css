@@ -62,13 +62,22 @@ h2 {
   margin: 2rem 0 0.25rem;
 }
 
-#bin-status {
+#import-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+
+#bin-status,
+#import-status {
   color: GrayText;
   margin: 0 0 1rem;
 }
 
 .error,
-#bin-status[data-state='error'] {
+#bin-status[data-state='error'],
+#import-status[data-state='error'] {
   color: crimson;
 }
 

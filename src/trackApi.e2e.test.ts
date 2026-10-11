@@ -336,3 +336,32 @@ describe('deleting a recorded track through the real HTTP routes', () => {
     expect((await server.apiV2(`/tracks/${id}`, { method: 'DELETE' })).status).toBe(404)
   })
 })
+
+describe('a GPX file through the import route', () => {
+  it('is stored and listed with the own vessel as its owner', async () => {
+    const start = Date.now() - 20 * MINUTE
+    const point = (i: number) =>
+      `<trkpt lat="${61 + i / 100}" lon="23"><time>${new Date(start + i * MINUTE).toISOString()}</time></trkpt>`
+    const gpx = `<?xml version="1.0"?><gpx version="1.1" creator="e2e" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Old passage</name><trkseg>${[0, 1, 2].map(point).join('')}</trkseg></trk></gpx>`
+    const imported = await server.plugin('/imports?self=true', {
+      method: 'POST',
+      body: gpx,
+      contentType: 'application/gpx+xml',
+    })
+    expect(imported.status).toBe(201)
+    const [id] = (imported.body as { ids: string[] }).ids
+
+    const listed = await server.apiV2(`/tracks?duration=PT1H&bbox=22.9,60.9,23.1,61.1`)
+    // The route names the track as the Track API does on a server that
+    // prefixes ids with the provider; an older one lists it bare.
+    const local = id!.replace(/^tracks:/, '')
+    const features = (listed.body as Collection).features.filter(({ properties }) => properties.id?.endsWith(local))
+    expect(features.map(({ properties }) => [properties.context, properties.isSelf, properties.pointCount])).toEqual([
+      [server.selfContext, true, 3],
+    ])
+    // The webapp's list of every import, through the server's own access check.
+    const all = await server.plugin('/imports')
+    expect(all.status).toBe(200)
+    expect((all.body as { id: string; name: string }[]).find((entry) => entry.id === id)?.name).toBe('Old passage')
+  })
+})

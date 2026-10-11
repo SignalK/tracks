@@ -1,9 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { trackLabel } from './utils.js'
 import { parseDuration } from './timeWindow.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '../public/bin.js'
+// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
+import { imported, start as startImport } from '../public/import.js'
 
 /**
  * The webapp ships as plain static files with no build step, so it cannot
@@ -178,7 +180,7 @@ const element = (tagName: string): StubElement => {
 
 async function render(
   response: { status?: number; ok?: boolean; body?: unknown } | Error | 'stall' | 'stall-body',
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; imports?: unknown[]; byId?: boolean } = {},
 ) {
   const status = element('p')
   const tbody = element('tbody')
@@ -207,6 +209,19 @@ async function render(
   await run(
     document,
     (url: string, init: { signal?: AbortSignal }) => {
+      // Every import, from the plugin's own route; a server without it answers 404.
+      if (url.endsWith('/plugins/tracks/imports')) {
+        return Promise.resolve(
+          options.imports === undefined
+            ? { status: 404, ok: false, json: () => Promise.reject(new Error('not JSON')) }
+            : { status: 200, ok: true, json: () => Promise.resolve(options.imports) },
+        )
+      }
+      // One track by its id, which only a server with the write routes serves.
+      if (url.includes('/signalk/v2/api/tracks/')) {
+        const ok = options.byId ?? true
+        return Promise.resolve({ status: ok ? 200 : 404, ok, json: () => Promise.resolve({}) })
+      }
       requested.push(url)
       if (response === 'stall-body') {
         return Promise.resolve({
@@ -595,6 +610,145 @@ describe('the webapp offers a GPX download', () => {
   })
 })
 
+// The list reaches back 30 days through the Track API, which an old passage
+// or an untimed track never matches; an imported file must still be findable.
+describe('the webapp lists every import', () => {
+  const old = {
+    id: 'tracks:imported:old',
+    providerId: 'tracks',
+    name: 'Passage 2019',
+    from: '2019-06-01T00:00:00Z',
+    to: '2019-06-02T00:00:00Z',
+    pointCount: 40,
+  }
+
+  it('adds an import the window misses', async () => {
+    const { tbody, status } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [feature({ context: SELF, isSelf: true, to: '2026-09-01T00:00:00Z', pointCount: 2 })],
+        },
+      },
+      { imports: [old] },
+    )
+    expect(tbody.children).toHaveLength(2)
+    expect(tbody.children[1]!.children[0]!.textContent).toBe('No vessel')
+    expect(status.textContent).toBe('2 tracks: the last 30 days, and every import.')
+  })
+
+  it('lists an import the window also returned once', async () => {
+    const recent = { ...old, from: '2026-09-01T00:00:00Z', to: '2026-09-01T01:00:00Z' }
+    const { tbody, status } = await render(
+      { body: { type: 'FeatureCollection', features: [feature(recent)] } },
+      { imports: [recent] },
+    )
+    expect(tbody.children).toHaveLength(1)
+    expect(status.textContent).toBe('1 track in the last 30 days.')
+  })
+
+  // A server without the Track API's write routes names a track without its
+  // provider; the same import must still be listed once.
+  it('lists an import once when the API names it without its provider', async () => {
+    const recent = { ...old, from: '2026-09-01T00:00:00Z', to: '2026-09-01T01:00:00Z' }
+    const { tbody } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [feature({ ...recent, id: 'imported:old', providerId: undefined })],
+        },
+      },
+      { imports: [recent] },
+    )
+    expect(tbody.children).toHaveLength(1)
+  })
+
+  // The v1 route exports a vessel's recording, which an import is not part of.
+  it('offers no recording export for an import that names a vessel', async () => {
+    const { tbody } = await render(
+      { body: { type: 'FeatureCollection', features: [] } },
+      { imports: [{ ...old, context: SELF, isSelf: true }] },
+    )
+    expect(tbody.children[0]!.children[4]!.children).toHaveLength(0)
+  })
+
+  // A server that names tracks without their provider cannot delete by id.
+  it('offers no delete for an import on a server that names tracks without their provider', async () => {
+    const { tbody } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [
+            feature({ id: `recorded:${SELF}`, context: SELF, isSelf: true, to: '2026-09-01T00:00:00Z', pointCount: 2 }),
+          ],
+        },
+      },
+      { imports: [old] },
+    )
+    expect(tbody.children[1]!.children.at(-1)!.children).toHaveLength(0)
+  })
+
+  // A provider id alone does not show the server names tracks by it.
+  it('offers no delete for an import when listed ids carry no provider prefix', async () => {
+    const { tbody } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [
+            feature({
+              id: `recorded:${SELF}`,
+              providerId: 'tracks',
+              context: SELF,
+              isSelf: true,
+              to: '2026-09-01T00:00:00Z',
+              pointCount: 2,
+            }),
+          ],
+        },
+      },
+      { imports: [old] },
+    )
+    expect(tbody.children[1]!.children.at(-1)!.children).toHaveLength(0)
+  })
+
+  it('offers delete for an import on a server that names tracks by provider', async () => {
+    const { tbody } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [
+            feature({
+              id: `tracks:recorded:${SELF}`,
+              providerId: 'tracks',
+              context: SELF,
+              isSelf: true,
+              to: '2026-09-01T00:00:00Z',
+              pointCount: 2,
+            }),
+          ],
+        },
+      },
+      { imports: [old] },
+    )
+    expect(tbody.children[1]!.children.at(-1)!.children[0]!.textContent).toBe('Delete…')
+  })
+
+  // With nothing listed, the server is asked for one import by its full name.
+  it('asks whether the server deletes by id when the window has nothing', async () => {
+    const deletable = async (byId: boolean) => {
+      const { tbody } = await render({ body: { type: 'FeatureCollection', features: [] } }, { imports: [old], byId })
+      return tbody.children[0]!.children.at(-1)!.children.length
+    }
+    expect(await deletable(true)).toBe(1)
+    expect(await deletable(false)).toBe(0)
+  })
+
+  it('shows an old import when the window has nothing', async () => {
+    const { tbody } = await render({ body: { type: 'FeatureCollection', features: [] } }, { imports: [old] })
+    expect(tbody.children).toHaveLength(1)
+  })
+})
+
 describe('the webapp offers to delete a track', () => {
   const deleteButton = async (properties: Record<string, unknown>) => {
     const { tbody } = await render({
@@ -696,5 +850,46 @@ describe('the recycle bin page', () => {
     expect(refusal(401)).toMatch(/administrator/)
     expect(refusal(403)).toMatch(/administrator/)
     expect(refusal(501)).toMatch(/cannot/)
+  })
+})
+
+describe('the import form', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('says how many tracks it imported, and any points it left out', () => {
+    expect(imported({ ids: ['a'], skippedPoints: 0 })).toBe('Imported 1 track.')
+    expect(imported({ ids: ['a', 'b'], skippedPoints: 3 })).toBe('Imported 2 tracks. 3 points without a time left out.')
+  })
+
+  // Each upload stores the file anew, so a second submit would import it twice.
+  it('sends one upload at a time, and allows another after a failure', async () => {
+    const button = { disabled: false }
+    const status = { textContent: '', hidden: true, dataset: {} as Record<string, string> }
+    let submit: (event: { preventDefault: () => void }) => Promise<void> = async () => {}
+    const form = {
+      elements: { file: { files: [{ name: 'a.gpx' }] }, self: { checked: false } },
+      querySelector: () => button,
+      addEventListener: (_type: string, handler: typeof submit) => {
+        submit = handler
+      },
+    }
+    let answer: (response: unknown) => void = () => {}
+    const fetch = vi.fn(() => new Promise((resolve) => (answer = resolve)))
+    vi.stubGlobal('document', { getElementById: (id: string) => (id === 'import-form' ? form : status) })
+    vi.stubGlobal('fetch', fetch)
+    startImport()
+
+    const event = { preventDefault: () => {} }
+    const first = submit(event)
+    await submit(event)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(button.disabled).toBe(true)
+
+    answer({ ok: false, status: 400, json: () => Promise.resolve({ message: 'No track found' }) })
+    await first
+    expect(status.textContent).toBe('No track found')
+    expect(button.disabled).toBe(false)
   })
 })
