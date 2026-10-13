@@ -80,10 +80,10 @@ describe('toImportedTrack', () => {
     expect(segments[1]!.map(({ timestamp }) => timestamp)).toEqual([t0 - 1000, t0 - 500])
   })
 
-  it('refuses a track with neither times nor a vessel', () => {
+  it('keeps a track with neither times nor a vessel', () => {
     const track = passage({}, false)
     delete track.properties.context
-    expect(() => toImportedTrack(track)).toThrow(expect.objectContaining({ isTrackRejected: true }))
+    expect(toImportedTrack(track)).not.toHaveProperty('context')
   })
 
   it('accepts a track without times when it names a vessel', () => {
@@ -291,12 +291,16 @@ describe('imported tracks through the Track API', () => {
     }
   })
 
-  it('refuses a track with neither times nor a vessel as the client’s error', async () => {
+  it('keeps a track with neither times nor a vessel, returned by its id', async () => {
     const h = createHarness()
     try {
-      const track = passage({}, false)
-      delete track.properties.context
-      await expect(providerOf(h).storeTrack(track)).rejects.toMatchObject({ isTrackRejected: true })
+      const provider = providerOf(h)
+      const bare = passage({}, false)
+      delete bare.properties.context
+      const id = await provider.storeTrack(bare)
+      const track = await provider.getTrack!(id)
+      expect(track?.properties).toMatchObject({ id, imported: true })
+      expect(track?.properties).not.toHaveProperty('context')
     } finally {
       await h.stop()
     }

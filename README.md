@@ -52,9 +52,9 @@ where vessels are now. Its own name and any other properties it was posted with 
 posted. It carries `imported: true`, which a recorded track does not, so a client drawing a
 vessel's recording can leave the import out of it.
 
-A track needs times (`coordTimes`) or a vessel (`context`). One with neither is refused:
-it would match no time window, and a query across every vessel needs one, so it could
-only be found again by its id.
+A track with neither times (`coordTimes`) nor a vessel (`context`) is kept too. No time
+window or vessel query matches it, but `GET /plugins/tracks/imports` lists it with every other
+import, and `GET /signalk/v2/api/tracks/<id>` returns it.
 
 ### Importing a GPX file
 
@@ -65,9 +65,7 @@ becomes an imported track as above. Ticking **Tracks of my own vessel** (`?self=
 them under the own vessel; otherwise a track names a vessel only if the file says which, as
 the plugin's own GPX export does.
 
-A file with a track that cannot be kept is refused whole: if any track in it has neither times
-nor a vessel, nothing is stored and the reason is shown. In a timed track, points without a time are
-skipped, and the answer says how many. The route needs write access on a Signal K server that
+In a timed track, points without a time are skipped, and the answer says how many. The route needs write access on a Signal K server that
 lets a plugin say so, and administrator rights on an older one.
 
 The webapp lists every imported track, however old and whether or not it has times, next to
