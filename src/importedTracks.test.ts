@@ -145,6 +145,7 @@ describe('imported tracks through the Track API', () => {
       expect(feature?.geometry?.coordinates).toEqual(passage().geometry.coordinates)
       expect(feature?.properties).toMatchObject({
         id,
+        imported: true,
         name: 'Race day',
         context: OTHER_CONTEXT,
         isSelf: false,
@@ -203,6 +204,7 @@ describe('imported tracks through the Track API', () => {
       const id = await provider.storeTrack(passage())
       const { features } = await provider.getTracks({ ...day, contexts: [OTHER_CONTEXT] })
       expect(features.map(({ properties }) => properties.id)).toEqual([`recorded:${OTHER_CONTEXT}`, id])
+      expect(features.map(({ properties }) => properties.imported)).toEqual([undefined, true])
       expect(await provider.getTrackContexts({ ...day, contexts: [OTHER_CONTEXT] })).toEqual([OTHER_CONTEXT])
     } finally {
       await h.stop()

@@ -338,12 +338,16 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     return result
   }
 
-  /** What names an imported track: its id, name and vessel, over what it was posted with. */
+  /**
+   * What names an imported track: its id, name and vessel, over what it was posted with.
+   * `imported` tells it apart from the recording of the same vessel, which it is listed beside.
+   */
   const importIdentity = (track: ImportedTrack): Omit<TrackProperties, 'pointCount'> => {
     const contextName = track.context === undefined ? undefined : deps.contextName(track.context)
     return {
       ...track.metadata,
       id: track.id,
+      imported: true,
       ...(track.name === undefined ? {} : { name: track.name }),
       ...(track.context === undefined
         ? {}

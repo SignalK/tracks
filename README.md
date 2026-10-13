@@ -49,7 +49,8 @@ other track, filtered by vessel, time window and area, but as a feature of its o
 it names a vessel the plugin also records. It is never merged with a history provider's data,
 never removed by the retention settings, and never returned by the v1 routes, which answer
 where vessels are now. Its own name and any other properties it was posted with come back as
-posted.
+posted. It carries `imported: true`, which a recorded track does not, so a client drawing a
+vessel's recording can leave the import out of it.
 
 A track needs times (`coordTimes`) or a vessel (`context`). One with neither is refused:
 it would match no time window, and a query across every vessel needs one, so it could
