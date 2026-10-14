@@ -52,6 +52,14 @@ where vessels are now. Its own name and any other properties it was posted with 
 posted. It carries `imported: true`, which a recorded track does not, so a client drawing a
 vessel's recording can leave the import out of it.
 
+A timed track of the own vessel is the exception: it is the boat's own passage, logged before
+the plugin was installed or by another plotter, so it is written into the own vessel's
+recording instead of being kept as an import, and the answer is the recording's id,
+`tracks:recorded:<context>`. It replaces what was recorded over the same time: those
+positions, and any history provider's data there, go to the recycle bin first, one entry per
+segment, and can be restored from it. An untimed track of the own vessel stays an import,
+since it cannot be placed in time.
+
 A track with neither times (`coordTimes`) nor a vessel (`context`) is kept too. No time
 window or vessel query matches it, but `GET /plugins/tracks/imports` lists it with every other
 import, and `GET /signalk/v2/api/tracks/<id>` returns it.
@@ -61,8 +69,9 @@ import, and `GET /signalk/v2/api/tracks/<id>` returns it.
 The Tracks webapp imports a GPX file from the **Import** form, and a client can do the same
 with `POST /plugins/tracks/imports`, the file as the request body with `Content-Type:
 application/gpx+xml`. Each track in the file becomes an imported track as above. Ticking
-**Tracks of my own vessel** (`?self=true`) files them under the own vessel; otherwise a track
-names a vessel only if the file says which, as the plugin's own GPX export does.
+**Tracks of my own vessel** (`?self=true`) files them under the own vessel, which writes a
+timed one into the recording; otherwise a track names a vessel only if the file says which, as
+the plugin's own GPX export does.
 
 In a timed track, points without a time are skipped, and the answer says how many. The route
 needs write access on a Signal K server that lets a plugin say so, and administrator rights on

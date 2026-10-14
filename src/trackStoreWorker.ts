@@ -50,6 +50,7 @@ function mutate(operation: Operation, target: SqliteTrackStore): boolean {
 const ACKNOWLEDGED = new Set<Operation['method']>([
   'storeImport',
   'binRecorded',
+  'recordTrack',
   'binImport',
   'restoreFromBin',
   'purgeFromBin',
@@ -60,6 +61,8 @@ function acknowledge(operation: Operation, target: SqliteTrackStore): unknown {
       return target.storeImport(...operation.args)
     case 'binRecorded':
       return target.binRecorded(...operation.args)
+    case 'recordTrack':
+      return target.recordTrack(...operation.args)
     case 'binImport':
       return target.binImport(...operation.args)
     case 'restoreFromBin':

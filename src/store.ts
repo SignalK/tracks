@@ -148,6 +148,16 @@ export interface TrackStore {
     deletedAt: number,
     keepEmpty: boolean,
   ): { id?: number; known: boolean } | Promise<{ id?: number; known: boolean }>
+  /**
+   * Write a track imported for a vessel into its recording, binning what was
+   * recorded over the same time; resolves to the bin entries made.
+   */
+  recordTrack?(
+    context: Context,
+    segments: TimedPosition[][],
+    deletedAt: number,
+    keepEmpty: boolean,
+  ): number[] | Promise<number[]>
   binImport?(
     importId: string,
     span: { from?: number; to?: number } | undefined,

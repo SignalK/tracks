@@ -2,7 +2,16 @@ import { SelfPositionUnavailableError } from './utils.js'
 import { Worker } from 'node:worker_threads'
 import type { TrackStore } from './store.js'
 import type { SqliteTrackStore, SqliteStoreConfig } from './sqliteStore.js'
-import type { Debug, Context, ImportedTrack, ImportFilter, LatLngTuple, TimeWindow, TrackParams } from './types.js'
+import type {
+  Debug,
+  Context,
+  ImportedTrack,
+  ImportFilter,
+  LatLngTuple,
+  TimedPosition,
+  TimeWindow,
+  TrackParams,
+} from './types.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { Operation, StoreMethod, WorkerMessage } from './trackStoreProtocol.js'
 interface Pending {
@@ -338,6 +347,9 @@ export class AsyncTrackStore implements TrackStore {
   }
   binRecorded(context: Context, from: number | undefined, to: number, deletedAt: number, keepEmpty: boolean) {
     return this.enqueue('binRecorded', [context, from, to, deletedAt, keepEmpty], 'acknowledged')
+  }
+  recordTrack(context: Context, segments: TimedPosition[][], deletedAt: number, keepEmpty: boolean) {
+    return this.enqueue('recordTrack', [context, segments, deletedAt, keepEmpty], 'acknowledged')
   }
   binImport(importId: string, span: { from?: number; to?: number } | undefined, deletedAt: number) {
     return this.enqueue('binImport', [importId, span, deletedAt], 'acknowledged')

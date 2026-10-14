@@ -16,7 +16,7 @@
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
 import { join } from 'node:path'
-import { createTrackProvider } from './trackProvider.js'
+import { createTrackProvider, keepTrack } from './trackProvider.js'
 import { outsideSpans, recordedId } from './recycleBin.js'
 import type { TrackApi } from './trackApi.js'
 import { AsyncTrackStore } from './asyncTrackStore.js'
@@ -1451,13 +1451,13 @@ export default function ThePlugin(app: App): Plugin {
       const writable = (router as AccessRouter).access?.('readwrite') ?? router
       writable.post('/imports', (req: Request, res: Response) => {
         const store = tracks
-        if (!store?.storeImport) {
+        if (!store?.storeImport || !store.recordTrack) {
           notAvailable(res)
           return
         }
-        const storeImport = store.storeImport.bind(store)
-        // An import is kept apart from the recording even when it names the
-        // own vessel; `self` only says whose track it is.
+        const writableStore = { storeImport: store.storeImport.bind(store), recordTrack: store.recordTrack.bind(store) }
+        // `self` files the tracks under the own vessel, which writes a timed
+        // one into the recording (see keepTrack).
         const context = req.query.self === 'true' ? app.selfContext : undefined
         void (async () => {
           let text: string
@@ -1479,9 +1479,19 @@ export default function ThePlugin(app: App): Plugin {
             return
           }
           const converted = read.map((gpx) => fromGpxTrack(gpx, context ?? gpx.context))
+          const ids: string[] = []
           try {
             for (const { track } of converted) {
-              await storeImport(track)
+              ids.push(
+                await keepTrack(track, {
+                  store: writableStore,
+                  selfContext: app.selfContext,
+                  historyKnows: (vessel) => historyKnowsContext(app, vessel, app.debug, knownContexts),
+                  deleted: () => {
+                    deletedSpans = undefined
+                  },
+                }),
+              )
             }
           } catch (err) {
             app.error(`GPX import: ${errorDetail(err)}`)
@@ -1491,7 +1501,7 @@ export default function ThePlugin(app: App): Plugin {
           res.status(201).json({
             // As the Track API names them on a server with its write routes,
             // so a client can fetch or delete them there.
-            ids: converted.map(({ track }) => `${PLUGIN_ID}:${track.id}`),
+            ids: ids.map((id) => `${PLUGIN_ID}:${id}`),
             skippedPoints: converted.reduce((sum, { skippedPoints }) => sum + skippedPoints, 0),
           })
         })()
