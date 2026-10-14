@@ -60,13 +60,13 @@ import, and `GET /signalk/v2/api/tracks/<id>` returns it.
 
 The Tracks webapp imports a GPX file from the **Import** form, and a client can do the same
 with `POST /plugins/tracks/imports`, the file as the request body with `Content-Type:
-application/gpx+xml`. Each track in the file
-becomes an imported track as above. Ticking **Tracks of my own vessel** (`?self=true`) files
-them under the own vessel; otherwise a track names a vessel only if the file says which, as
-the plugin's own GPX export does.
+application/gpx+xml`. Each track in the file becomes an imported track as above. Ticking
+**Tracks of my own vessel** (`?self=true`) files them under the own vessel; otherwise a track
+names a vessel only if the file says which, as the plugin's own GPX export does.
 
-In a timed track, points without a time are skipped, and the answer says how many. The route needs write access on a Signal K server that
-lets a plugin say so, and administrator rights on an older one.
+In a timed track, points without a time are skipped, and the answer says how many. The route
+needs write access on a Signal K server that lets a plugin say so, and administrator rights on
+an older one.
 
 The webapp lists every imported track, however old and whether or not it has times, next to
 the last 30 days of recorded ones, so a passage imported from years ago can be found there. It
