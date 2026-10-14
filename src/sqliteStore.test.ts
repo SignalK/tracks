@@ -675,6 +675,18 @@ describe('imported tracks', () => {
     store.close()
   })
 
+  it('refuses the id of an import in the recycle bin, and writes nothing', () => {
+    const store = newStore()
+    store.storeImport(imported())
+    store.binImport('imported:a', undefined, t0)
+    expect(() => store.storeImport(imported({ name: 'Other' }))).toThrow()
+    expect(store.getImport('imported:a')).toBeUndefined()
+    const [entry] = store.binEntries()
+    expect(store.restoreFromBin(entry!.id)).toBe('restored')
+    expect(store.getImport('imported:a')?.name).toBe('Passage')
+    store.close()
+  })
+
   it('keeps when each track was stored', () => {
     const store = newStore()
     const before = Date.now()

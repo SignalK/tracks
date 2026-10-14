@@ -740,6 +740,11 @@ export class SqliteTrackStore implements TrackStore {
     if (points.length === 0) {
       throw new Error('An imported track needs at least one point')
     }
+    // Checked before the first write: an id whose import is in the recycle
+    // bin has no imported_tracks row to collide with, only its kept time.
+    if (this.db.prepare('SELECT 1 AS found FROM import_times WHERE id = ?').get(track.id)) {
+      throw new Error(`An import with id ${track.id} already exists`)
+    }
     let south = points[0]!.position[0]
     let north = south
     let firstTime: number | undefined
