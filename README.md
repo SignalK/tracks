@@ -49,8 +49,9 @@ other track, filtered by vessel, time window and area, but as a feature of its o
 it names a vessel the plugin also records. It is never merged with a history provider's data,
 never removed by the retention settings, and never returned by the v1 routes, which answer
 where vessels are now. Its own name and any other properties it was posted with come back as
-posted. It carries `imported: true`, which a recorded track does not, so a client drawing a
-vessel's recording can leave the import out of it.
+posted. It carries `imported`, the time it was stored, which a recorded track does not, so a
+client drawing a vessel's recording can leave the import out of it. Imports stored by a version
+before that time was kept are dated to the first start of a version that keeps it.
 
 A timed track of the own vessel is the exception: it is the boat's own passage, logged before
 the plugin was installed or by another plotter, so it is written into the own vessel's

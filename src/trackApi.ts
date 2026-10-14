@@ -63,8 +63,8 @@ export interface TrackProperties {
   contextName?: string
   /** The track's own name, as an imported GPX `<trk><name>` carries. */
   name?: string
-  /** Set on a track a client stored, absent on a recorded one. */
-  imported?: true
+  /** When a client stored the track, as an ISO 8601 time; absent on a recorded one. */
+  imported?: string
   /** Absent, with `to`, for a track whose points carry no times. */
   from?: string
   to?: string

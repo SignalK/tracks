@@ -589,11 +589,12 @@ describe('imported tracks', () => {
     ],
     ...overrides,
   })
+  const stored = (track: ImportedTrack) => ({ ...track, importedAt: expect.any(Number) as number })
 
   it('returns a stored track as it was stored', () => {
     const store = newStore()
     store.storeImport(imported())
-    expect(store.getImport('imported:a')).toEqual(imported())
+    expect(store.getImport('imported:a')).toEqual(stored(imported()))
     store.close()
   })
 
@@ -603,7 +604,7 @@ describe('imported tracks', () => {
     delete untimed.context
     delete untimed.name
     store.storeImport(untimed)
-    expect(store.getImport('imported:a')).toEqual(untimed)
+    expect(store.getImport('imported:a')).toEqual(stored(untimed))
     store.close()
   })
 
@@ -670,8 +671,44 @@ describe('imported tracks', () => {
     store.storeImport(imported())
     store.newPosition(other, [60, 24], 1000)
     store.prune(-1)
-    expect(store.getImport('imported:a')).toEqual(imported())
+    expect(store.getImport('imported:a')).toEqual(stored(imported()))
     store.close()
+  })
+
+  it('keeps when each track was stored', () => {
+    const store = newStore()
+    const before = Date.now()
+    store.storeImport(imported())
+    const importedAt = store.getImport('imported:a')!.importedAt
+    expect(importedAt).toBeGreaterThanOrEqual(before)
+    expect(importedAt).toBeLessThanOrEqual(Date.now())
+    expect(store.findImports().map((track) => track.importedAt)).toEqual([importedAt])
+    store.close()
+  })
+
+  it('dates imports an older version stored to the first start that keeps the time', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tracks-imports-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const first = new SqliteTrackStore({ file }, debug)
+      first.storeImport(imported())
+      first.storeImport(imported({ id: 'imported:b' }))
+      first.binImport('imported:b', undefined, t0)
+      first.close()
+      const older = new DatabaseSync(file)
+      older.exec('DROP TABLE import_times')
+      older.close()
+
+      const before = Date.now()
+      const store = new SqliteTrackStore({ file }, debug)
+      expect(store.getImport('imported:a')?.importedAt).toBeGreaterThanOrEqual(before)
+      const [entry] = store.binEntries()
+      expect(store.restoreFromBin(entry!.id)).toBe('restored')
+      expect(store.getImport('imported:b')?.importedAt).toBeGreaterThanOrEqual(before)
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('adds its tables to a database an older version wrote', () => {
@@ -685,7 +722,7 @@ describe('imported tracks', () => {
       older.close()
       const store = new SqliteTrackStore({ file }, debug)
       store.storeImport(imported())
-      expect(store.getImport('imported:a')).toEqual(imported())
+      expect(store.getImport('imported:a')).toEqual(stored(imported()))
       store.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
