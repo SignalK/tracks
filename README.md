@@ -55,10 +55,11 @@ vessel's recording can leave the import out of it.
 A timed track of the own vessel is the exception: it is the boat's own passage, logged before
 the plugin was installed or by another plotter, so it is written into the own vessel's
 recording instead of being kept as an import, and the answer is the recording's id,
-`tracks:recorded:<context>`. It replaces what was recorded over the same time: those
-positions, and any history provider's data there, go to the recycle bin first, one entry per
-segment, and can be restored from it. An untimed track of the own vessel stays an import,
-since it cannot be placed in time.
+`tracks:recorded:<context>`. It replaces what was recorded over the same time: the positions
+this plugin stored there go to the recycle bin first, one entry per segment, and a history
+provider's data over that time is hidden while the entry is there. Restoring the entry brings
+both back. An untimed track of the own vessel stays an import, since it cannot be placed in
+time.
 
 A track with neither times (`coordTimes`) nor a vessel (`context`) is kept too. No time
 window or vessel query matches it, but `GET /plugins/tracks/imports` lists it with every other
