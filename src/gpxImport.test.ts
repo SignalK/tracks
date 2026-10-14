@@ -8,7 +8,6 @@ import type { GpxTrack } from './gpx.js'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { TestHarness } from './harness.test-utils.js'
 import { fromGpxTrack } from './importedTracks.js'
-import { TrackRejectedError } from './trackApi.js'
 import { readText, UploadTooLargeError, UploadTypeError } from './upload.js'
 
 const t0 = Date.UTC(2025, 6, 1, 12)
@@ -57,8 +56,10 @@ describe('a GPX track as an import', () => {
     expect(skippedPoints).toBe(1)
   })
 
-  it('refuses a track with neither times nor a vessel', () => {
-    expect(() => fromGpxTrack(gpxTrack([undefined]))).toThrow(TrackRejectedError)
+  it('keeps a track with neither times nor a vessel', () => {
+    const { track } = fromGpxTrack(gpxTrack([undefined]))
+    expect(track).not.toHaveProperty('context')
+    expect(track.segments[0]).toHaveLength(1)
   })
 })
 
@@ -166,12 +167,15 @@ describe('the GPX upload route', () => {
       })
     }))
 
-  it('stores nothing from a file with one track it cannot keep', () =>
+  it('keeps a track with neither times nor a vessel beside a timed one', () =>
     withHarness(async (h) => {
       const res = await upload(h, gpxFile(trk('Fine', [t0]) + trk('Untimed', [undefined])))
-      expect(res.status).toBe(400)
-      expect((res.body as { message: string }).message).toContain('Untimed')
-      expect(await listed(h)).toEqual([])
+      expect(res.status).toBe(201)
+      const { ids } = res.body as { ids: string[] }
+      const names = await Promise.all(
+        ids.map(async (id) => (await h.trackProvider()!.getTrack!(local(id)))?.properties.name),
+      )
+      expect(names).toEqual(['Fine', 'Untimed'])
     }))
 
   // The server's form parser reads a body sent as curl's default type.

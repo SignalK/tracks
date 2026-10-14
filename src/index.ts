@@ -28,7 +28,6 @@ import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js
 import { fromGpx, toGpx } from './gpx.js'
 import { fromGpxTrack, isImportedId } from './importedTracks.js'
 import { readText, UploadTooLargeError, UploadTypeError } from './upload.js'
-import { TrackRejectedError } from './trackApi.js'
 import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type {
@@ -1479,15 +1478,7 @@ export default function ThePlugin(app: App): Plugin {
             res.status(400).json({ message: 'No track found: the file is not GPX, or has no track with points' })
             return
           }
-          let converted: ReturnType<typeof fromGpxTrack>[]
-          try {
-            // Every track is checked before any is stored, so a refused file
-            // leaves nothing half-imported behind.
-            converted = read.map((gpx) => fromGpxTrack(gpx, context ?? gpx.context))
-          } catch (err) {
-            res.status(400).json({ message: err instanceof TrackRejectedError ? err.message : String(err) })
-            return
-          }
+          const converted = read.map((gpx) => fromGpxTrack(gpx, context ?? gpx.context))
           try {
             for (const { track } of converted) {
               await storeImport(track)

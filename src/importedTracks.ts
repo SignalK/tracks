@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto'
 import type { GpxTrack } from './gpx.js'
-import { TrackRejectedError } from './trackApi.js'
 import type { TrackImport } from './trackApi.js'
 import type { GeoBounds, ImportedPoint, ImportedTrack, TimedPosition, TimeWindow } from './types.js'
 import { clipToBounds } from './utils.js'
@@ -20,17 +19,11 @@ export const isImportedId = (id: string): boolean => id.startsWith(IMPORTED_PREF
  * thinning and window code assume time order, and a segment boundary is a gap
  * in recording, so segments are never merged or reordered.
  *
- * Refuses a track with neither times nor a vessel. Such a track answers no
- * time window, and the server refuses a query across all vessels without one,
- * so it could only ever be found again by an id the client would have to keep.
+ * A track with neither times nor a vessel answers no time window and no
+ * vessel query; the plugin's import list and its id are what find it again.
  */
 export function toImportedTrack(track: TrackImport, id = `${IMPORTED_PREFIX}${randomUUID()}`): ImportedTrack {
   const { coordTimes, name, context, ...metadata } = track.properties
-  if (coordTimes === undefined && context === undefined) {
-    throw new TrackRejectedError(
-      'A track with neither coordTimes nor a context could not be listed again; send one of them',
-    )
-  }
   const segments = track.geometry.coordinates.map((segment, i): ImportedPoint[] => {
     const points = segment.map(([lon, lat], j): ImportedPoint => {
       const time = coordTimes?.[i]?.[j]
@@ -55,7 +48,6 @@ export function toImportedTrack(track: TrackImport, id = `${IMPORTED_PREFIX}${ra
  * becomes an untimed import; a file with some keeps only its timed points,
  * because an import is timed throughout or not at all, and its times are what
  * let a query find it. `context` names the vessel in place of the file's own.
- * Refused, like any import, when it ends up with neither times nor a vessel.
  */
 export function fromGpxTrack(
   gpx: GpxTrack,
@@ -64,11 +56,6 @@ export function fromGpxTrack(
 ): { track: ImportedTrack; skippedPoints: number } {
   const all = gpx.segments.flat()
   const timed = all.some(({ timestamp }) => timestamp !== 0)
-  if (!timed && context === undefined) {
-    throw new TrackRejectedError(
-      `Track '${gpx.name}' has neither times nor a vessel, so it could not be listed again; choose a vessel for it`,
-    )
-  }
   const segments = gpx.segments
     .map((points) =>
       points
