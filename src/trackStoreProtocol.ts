@@ -14,6 +14,7 @@ export type StoreMethod =
   | 'getImport'
   | 'findImports'
   | 'binRecorded'
+  | 'recordTrack'
   | 'binImport'
   | 'restoreFromBin'
   | 'purgeFromBin'

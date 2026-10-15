@@ -148,12 +148,14 @@ describe('the GPX upload route', () => {
       )
     }))
 
-  it('names the own vessel when asked to', () =>
+  it('writes a timed track of the own vessel into its recording', () =>
     withHarness(async (h) => {
       const res = await upload(h, gpxFile(trk('Morning', [t0, t0 + MINUTE])), '?self=true')
       expect(res.status).toBe(201)
+      expect((res.body as { ids: string[] }).ids).toEqual([`tracks:recorded:${SELF_CONTEXT}`])
       const [properties] = await listed(h)
-      expect(properties).toMatchObject({ context: SELF_CONTEXT, isSelf: true, name: 'Morning' })
+      expect(properties).toMatchObject({ id: `recorded:${SELF_CONTEXT}`, context: SELF_CONTEXT, isSelf: true })
+      expect(properties).not.toHaveProperty('imported')
     }))
 
   it('stores an untimed track for the own vessel', () =>
@@ -203,7 +205,7 @@ describe('the import listing route', () => {
   it('lists every import as the webapp shows a track', () =>
     withHarness(async (h) => {
       const old = Date.UTC(2019, 5, 1)
-      const timed = await upload(h, gpxFile(trk('Passage 2019', [old, old + MINUTE])), '?self=true')
+      const timed = await upload(h, gpxFile(trk('Passage 2019', [old, old + MINUTE])))
       const untimed = await upload(h, gpxFile(trk('Plan', [undefined, undefined, undefined])), '?self=true')
       const res = await request(h.app).get('/plugins/tracks/imports').expect(200)
       expect(res.body).toEqual(
@@ -212,8 +214,6 @@ describe('the import listing route', () => {
             id: (timed.body as { ids: string[] }).ids[0],
             providerId: 'tracks',
             name: 'Passage 2019',
-            context: SELF_CONTEXT,
-            isSelf: true,
             from: iso(old),
             to: iso(old + MINUTE),
             pointCount: 2,

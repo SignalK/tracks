@@ -359,12 +359,14 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     }
   }
 
-  type WritableStore = Required<Pick<TrackStore, 'storeImport' | 'getImport' | 'binImport' | 'binRecorded'>>
+  type WritableStore = Required<
+    Pick<TrackStore, 'storeImport' | 'recordTrack' | 'getImport' | 'binImport' | 'binRecorded'>
+  >
 
   /** The store, when it can keep and delete tracks; an ordinary failure otherwise. */
   const writableStore = (): WritableStore => {
     const store = deps.store()
-    if (!store?.storeImport || !store.getImport || !store.binImport || !store.binRecorded) {
+    if (!store?.storeImport || !store.recordTrack || !store.getImport || !store.binImport || !store.binRecorded) {
       throw new Error('Track storage is not available')
     }
     return store as WritableStore
@@ -471,9 +473,12 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     },
 
     async storeTrack(track: TrackImport): Promise<string> {
-      const imported = toImportedTrack(track)
-      await writableStore().storeImport(imported)
-      return imported.id
+      return keepTrack(toImportedTrack(track), {
+        store: writableStore(),
+        selfContext: deps.selfContext(),
+        historyKnows: deps.historyKnows,
+        deleted: deps.deleted,
+      })
     },
 
     async deleteTrack(id: string): Promise<boolean> {
@@ -679,6 +684,39 @@ function extentEpsilon([west, south, east, north]: TrackBoundingBox): number {
   // untouched. One metre is below any GPS's own noise, so applying it as a
   // minimum cannot alter a track that actually went somewhere.
   return Math.max(diagonal / AUTO_EPSILON_DIVISOR, MIN_AUTO_EPSILON)
+}
+
+export interface KeepTrackDeps {
+  store: Required<Pick<TrackStore, 'storeImport' | 'recordTrack'>>
+  selfContext: string
+  historyKnows: (context: string) => Promise<boolean>
+  deleted: () => void
+}
+
+/**
+ * Keep a client's track, resolving to the id that addresses it.
+ *
+ * A timed track of the own vessel is the vessel's own passage, from before
+ * the plugin recorded it or from another plotter, so it is written into the
+ * recording in place of what was recorded over the same time and answers
+ * as `recorded:<context>`. Everything else is kept as an import: another
+ * vessel's track is not this boat's recording, and an untimed one cannot be
+ * placed in it.
+ */
+export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps): Promise<string> {
+  const context = track.context === undefined ? undefined : resolveSelf(deps.selfContext)(track.context)
+  if (context === deps.selfContext && isTimed(track)) {
+    const segments = track.segments.map((points) =>
+      points.map(({ position, timestamp }): TimedPosition => ({ position, timestamp: timestamp! })),
+    )
+    // As a delete does: the binned span has to hide what a history provider
+    // holds there too, or the provider would draw the old passage beside it.
+    await deps.store.recordTrack(context, segments, Date.now(), await deps.historyKnows(context))
+    deps.deleted()
+    return recordedId(context)
+  }
+  await deps.store.storeImport(track)
+  return track.id
 }
 
 /** v2 accepts the `self` alias; the store keys on the qualified context. */

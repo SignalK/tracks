@@ -64,7 +64,10 @@ reads back at once. It runs in a transaction of its own, so an import that canno
 be stored fails alone and recording carries on. It is admitted outside the limits
 above, so a large import neither pauses recording nor is dropped. Once recording
 writes have failed, imports are refused too. Retention never removes an imported
-track: it stays until it is deleted.
+track: it stays until it is deleted. A timed track imported for the own vessel is
+the exception: it is written into the recording, in place of what was recorded
+over the same time, which goes to the recycle bin first, and from then on it is
+part of the recording like any position.
 
 Deleting a track, or part of one, moves its points into recycle bin tables in the
 same database, and restoring moves them back; both are written as imports are.

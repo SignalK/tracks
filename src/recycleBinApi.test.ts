@@ -288,3 +288,82 @@ describe('recycle bin routes', () => {
       { config: { recycleBinDays: 7 } },
     ))
 })
+
+describe('an import of the own vessel', () => {
+  const ownPassage = (times: number[], context: string = SELF_CONTEXT): TrackImport => ({
+    type: 'Feature',
+    geometry: { type: 'MultiLineString', coordinates: [times.map((_, i) => [25, 61 + i / 100])] },
+    properties: { coordTimes: [times.map(iso)], name: 'Before the plugin', context },
+  })
+
+  it('replaces what was recorded over its time, binned so it can be restored', () =>
+    withHarness(async (h) => {
+      seedFour(h)
+      const provider = providerOf(h)
+      const id = await provider.storeTrack(ownPassage([t0 + MINUTE, t0 + 2 * MINUTE - 10_000]))
+      expect(id).toBe(`recorded:${SELF_CONTEXT}`)
+      expect(await timesOf(provider, SELF_CONTEXT)).toEqual([
+        iso(t0),
+        iso(t0 + MINUTE),
+        iso(t0 + 2 * MINUTE - 10_000),
+        iso(t0 + 2 * MINUTE),
+        iso(t0 + 3 * MINUTE),
+      ])
+      const bin = await request(h.app).get('/plugins/tracks/recycle-bin').expect(200)
+      expect(bin.body).toEqual([expect.objectContaining({ trackId: id, kind: 'recorded', pointCount: 1 })])
+      const imports = await request(h.app).get('/plugins/tracks/imports').expect(200)
+      expect(imports.body).toEqual([])
+    }))
+
+  it('fills a stretch nothing recorded and accepts the self alias', () =>
+    withHarness(async (h) => {
+      const provider = providerOf(h)
+      const id = await provider.storeTrack(ownPassage([t0, t0 + MINUTE], 'vessels.self'))
+      expect(id).toBe(`recorded:${SELF_CONTEXT}`)
+      expect(await timesOf(provider, SELF_CONTEXT)).toEqual([iso(t0), iso(t0 + MINUTE)])
+      const bin = await request(h.app).get('/plugins/tracks/recycle-bin').expect(200)
+      expect(bin.body).toEqual([])
+    }))
+
+  it('keeps an untimed track of the own vessel as an import', () =>
+    withHarness(async (h) => {
+      const provider = providerOf(h)
+      const untimed = ownPassage([t0, t0 + MINUTE])
+      delete untimed.properties.coordTimes
+      expect(await provider.storeTrack(untimed)).toMatch(/^imported:/)
+    }))
+})
+
+describe('an import of the own vessel with a history provider installed', () => {
+  const history = {
+    contexts: [SELF_CONTEXT],
+    rows: [0, 1, 2, 3].map((i) => [iso(t0 + i * MINUTE), [24, 60 + i / 100]]),
+  }
+
+  it('hides the history it replaces', () =>
+    withHarness(
+      async (h) => {
+        const provider = providerOf(h)
+        await provider.storeTrack({
+          type: 'Feature',
+          geometry: {
+            type: 'MultiLineString',
+            coordinates: [
+              [
+                [25, 61],
+                [25, 61.01],
+              ],
+            ],
+          },
+          properties: {
+            coordTimes: [[iso(t0 + MINUTE), iso(t0 + 2 * MINUTE)]],
+            context: SELF_CONTEXT,
+          },
+        })
+        const { features } = await provider.getTracks({ ...lastHours, contexts: [SELF_CONTEXT], times: true })
+        const lats = features.flatMap(({ geometry }) => (geometry?.coordinates ?? []).flat().map(([, lat]) => lat))
+        expect(lats).toEqual([60, 61, 61.01, 60.03])
+      },
+      { history },
+    ))
+})

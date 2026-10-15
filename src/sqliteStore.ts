@@ -764,6 +764,31 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   /**
+   * Write a track imported for a vessel into its recording, in place of what
+   * was recorded over the same time. The positions within each segment's
+   * span go to the recycle bin first, one entry per segment, so a restore
+   * brings them back beside the import. Every span is binned before any point
+   * is written, so segments that overlap in time cannot bin each other.
+   * Resolves to the bin entries made.
+   */
+  recordTrack(context: Context, segments: TimedPosition[][], deletedAt: number, keepEmpty: boolean): number[] {
+    const binned: number[] = []
+    for (const points of segments) {
+      const first = points[0]
+      const last = points.at(-1)
+      if (first === undefined || last === undefined) continue
+      const { id } = this.binRecorded(context, first.timestamp, last.timestamp, deletedAt, keepEmpty)
+      if (id !== undefined) binned.push(id)
+    }
+    for (const points of segments) {
+      for (const { position, timestamp } of points) {
+        this.store(context, position, timestamp)
+      }
+    }
+    return binned
+  }
+
+  /**
    * Move a vessel's positions recorded within `[from, to]` into the recycle
    * bin, resolving to the entry's id and whether the store held the vessel at
    * all.
