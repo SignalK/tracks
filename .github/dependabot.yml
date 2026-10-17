@@ -8,6 +8,12 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    # The Signal K server runs express 4, and the tests must route the way it does.
+    ignore:
+      - dependency-name: express
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@types/express'
+        update-types: ['version-update:semver-major']
     groups:
       minor-and-patch:
         update-types:
