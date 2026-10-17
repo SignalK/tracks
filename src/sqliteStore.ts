@@ -339,12 +339,13 @@ export class SqliteTrackStore implements TrackStore {
       CREATE INDEX IF NOT EXISTS idx_binned_imported_points ON binned_imported_points(bin_id);
     `)
     // Imports kept before their time was: dated to the first start that knew to.
+    const now = Date.now()
     this.db
       .prepare(
         `INSERT OR IGNORE INTO import_times (id, imported_at)
          SELECT id, ? FROM imported_tracks UNION SELECT id, ? FROM binned_imported_tracks`,
       )
-      .run(Date.now(), Date.now())
+      .run(now, now)
     this.insert = this.db.prepare('INSERT INTO positions (context, timestamp, lat, lon, s2cell) VALUES (?, ?, ?, ?, ?)')
     // Newer wins: a corrected or changed name replaces what is stored, while
     // an older observation arriving late leaves it alone.

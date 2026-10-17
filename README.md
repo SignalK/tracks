@@ -81,7 +81,7 @@ an older one.
 
 The webapp lists every imported track, however old and whether or not it has times, next to
 the last 30 days of recorded ones, so a passage imported from years ago can be found there. It
-can be deleted there on a Signal K server that deletes tracks by id. `GET /plugins/tracks/imports` returns every imported track, and no recorded ones.
+can be deleted there on a Signal K server that deletes tracks by id. `GET /plugins/tracks/imports` returns every imported track, and no recorded ones, each with `imported`, the time it was stored.
 
 The Tracks webapp exports an imported track as GPX from its row, as it was imported. A client
 can download the same file from `GET /plugins/tracks/imports/<id>/track.gpx`, with the id less
