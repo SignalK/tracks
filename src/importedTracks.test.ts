@@ -139,13 +139,16 @@ describe('imported tracks through the Track API', () => {
     const h = createHarness()
     try {
       const provider = providerOf(h)
+      const before = Date.now()
       const id = await provider.storeTrack(passage())
       expect(id).toMatch(/^imported:[0-9a-f-]{36}$/)
       const feature = await provider.getTrack(id)
       expect(feature?.geometry?.coordinates).toEqual(passage().geometry.coordinates)
+      const importedAt = Date.parse(String(feature?.properties.imported))
+      expect(importedAt).toBeGreaterThanOrEqual(before)
+      expect(importedAt).toBeLessThanOrEqual(Date.now())
       expect(feature?.properties).toMatchObject({
         id,
-        imported: true,
         name: 'Race day',
         context: OTHER_CONTEXT,
         isSelf: false,
@@ -204,7 +207,7 @@ describe('imported tracks through the Track API', () => {
       const id = await provider.storeTrack(passage())
       const { features } = await provider.getTracks({ ...day, contexts: [OTHER_CONTEXT] })
       expect(features.map(({ properties }) => properties.id)).toEqual([`recorded:${OTHER_CONTEXT}`, id])
-      expect(features.map(({ properties }) => properties.imported)).toEqual([undefined, true])
+      expect(features.map(({ properties }) => typeof properties.imported)).toEqual(['undefined', 'string'])
       expect(await provider.getTrackContexts({ ...day, contexts: [OTHER_CONTEXT] })).toEqual([OTHER_CONTEXT])
     } finally {
       await h.stop()
@@ -299,7 +302,7 @@ describe('imported tracks through the Track API', () => {
       delete bare.properties.context
       const id = await provider.storeTrack(bare)
       const track = await provider.getTrack!(id)
-      expect(track?.properties).toMatchObject({ id, imported: true })
+      expect(track?.properties).toMatchObject({ id, imported: expect.any(String) })
       expect(track?.properties).not.toHaveProperty('context')
     } finally {
       await h.stop()

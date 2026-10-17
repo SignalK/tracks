@@ -15,7 +15,7 @@ import type {
   TracksRequest,
   TracksResponse,
 } from './trackApi.js'
-import type { GeoBounds, ImportedTrack, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
+import type { GeoBounds, ImportedTrack, LatLngTuple, StoredImport, TimedPosition, TimeWindow } from './types.js'
 import { clipToBounds, createInBounds, longitudeSpan, toIsoTimes } from './utils.js'
 
 /**
@@ -303,7 +303,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
    */
   const matchingImports = async (
     query: TracksRequest,
-  ): Promise<{ track: ImportedTrack; points: TimedPosition[]; timed: boolean }[]> => {
+  ): Promise<{ track: StoredImport; points: TimedPosition[]; timed: boolean }[]> => {
     const store = deps.store()
     if (!store?.findImports) {
       return []
@@ -320,7 +320,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
       ...(window ? { window } : {}),
       ...(bounds ? { bbox: bounds } : {}),
     })
-    const result: { track: ImportedTrack; points: TimedPosition[]; timed: boolean }[] = []
+    const result: { track: StoredImport; points: TimedPosition[]; timed: boolean }[] = []
     for (const track of imports) {
       const timed = isTimed(track)
       // Matched on the points inside the window, as a recorded track is.
@@ -340,14 +340,14 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
 
   /**
    * What names an imported track: its id, name and vessel, over what it was posted with.
-   * `imported` tells it apart from the recording of the same vessel, which it is listed beside.
+   * `imported`, when it was kept, tells it apart from the recording of the same vessel, which it is listed beside.
    */
-  const importIdentity = (track: ImportedTrack): Omit<TrackProperties, 'pointCount'> => {
+  const importIdentity = (track: StoredImport): Omit<TrackProperties, 'pointCount'> => {
     const contextName = track.context === undefined ? undefined : deps.contextName(track.context)
     return {
       ...track.metadata,
       id: track.id,
-      imported: true,
+      imported: new Date(track.importedAt).toISOString(),
       ...(track.name === undefined ? {} : { name: track.name }),
       ...(track.context === undefined
         ? {}

@@ -36,6 +36,7 @@ const passage = (): ImportedTrack => ({
     ],
   ],
 })
+const stored = (track: ImportedTrack) => ({ ...track, importedAt: expect.any(Number) as number })
 
 describe('recycle bin: recorded tracks', () => {
   it('moves a span out of the track and restores it', async () => {
@@ -123,6 +124,7 @@ describe('recycle bin: imported tracks', () => {
   it('moves a whole import out and restores it as it was', () => {
     const store = newStore()
     store.storeImport(passage())
+    const importedAt = store.getImport('imported:a')!.importedAt
     const id = store.binImport('imported:a', undefined, t0 + DAY)!
     expect(store.getImport('imported:a')).toBeUndefined()
     expect(store.findImports()).toEqual([])
@@ -138,7 +140,7 @@ describe('recycle bin: imported tracks', () => {
       },
     ])
     expect(store.restoreFromBin(id)).toBe('restored')
-    expect(store.getImport('imported:a')).toEqual(passage())
+    expect(store.getImport('imported:a')).toEqual({ ...passage(), importedAt })
     // An import is not a recording, so history has nothing to hide for it.
     expect(store.deletedSpans()).toEqual([])
     store.close()
@@ -156,7 +158,7 @@ describe('recycle bin: imported tracks', () => {
     store.storeImport(passage())
     expect(store.binImport('imported:a', { from: t0 + 10_000 }, t0 + DAY)).toBeUndefined()
     expect(store.binEntries()).toEqual([])
-    expect(store.getImport('imported:a')).toEqual(passage())
+    expect(store.getImport('imported:a')).toEqual(stored(passage()))
     store.close()
   })
 
@@ -169,7 +171,7 @@ describe('recycle bin: imported tracks', () => {
       [{ position: [60.3, 24.3], timestamp: t0 + 3000 }],
     ])
     expect(store.restoreFromBin(id)).toBe('restored')
-    expect(store.getImport('imported:a')).toEqual(passage())
+    expect(store.getImport('imported:a')).toEqual(stored(passage()))
     store.close()
   })
 
@@ -181,7 +183,7 @@ describe('recycle bin: imported tracks', () => {
     expect(store.binEntries()).toMatchObject([{ id, whole: true, pointCount: 4 }])
     expect(store.binEntries()[0]).not.toHaveProperty('from')
     expect(store.restoreFromBin(id)).toBe('restored')
-    expect(store.getImport('imported:a')).toEqual(passage())
+    expect(store.getImport('imported:a')).toEqual(stored(passage()))
     store.close()
   })
 
@@ -193,7 +195,7 @@ describe('recycle bin: imported tracks', () => {
     expect(store.restoreFromBin(span)).toBe('conflict')
     expect(store.restoreFromBin(whole)).toBe('restored')
     expect(store.restoreFromBin(span)).toBe('restored')
-    expect(store.getImport('imported:a')).toEqual(passage())
+    expect(store.getImport('imported:a')).toEqual(stored(passage()))
     store.close()
   })
 
