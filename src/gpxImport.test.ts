@@ -205,9 +205,16 @@ describe('the import listing route', () => {
   it('lists every import as the webapp shows a track', () =>
     withHarness(async (h) => {
       const old = Date.UTC(2019, 5, 1)
+      const before = Date.now()
       const timed = await upload(h, gpxFile(trk('Passage 2019', [old, old + MINUTE])))
       const untimed = await upload(h, gpxFile(trk('Plan', [undefined, undefined, undefined])), '?self=true')
+      const after = Date.now()
       const res = await request(h.app).get('/plugins/tracks/imports').expect(200)
+      // When each was stored, not when it was sailed.
+      for (const { imported } of res.body as { imported: string }[]) {
+        expect(Date.parse(imported)).toBeGreaterThanOrEqual(before)
+        expect(Date.parse(imported)).toBeLessThanOrEqual(after)
+      }
       expect(res.body).toEqual(
         expect.arrayContaining([
           {
@@ -216,6 +223,7 @@ describe('the import listing route', () => {
             name: 'Passage 2019',
             from: iso(old),
             to: iso(old + MINUTE),
+            imported: expect.any(String),
             pointCount: 2,
           },
           {
@@ -224,6 +232,7 @@ describe('the import listing route', () => {
             name: 'Plan',
             context: SELF_CONTEXT,
             isSelf: true,
+            imported: expect.any(String),
             pointCount: 3,
           },
         ]),

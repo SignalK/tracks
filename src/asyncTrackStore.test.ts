@@ -298,7 +298,7 @@ describe('imported tracks through the worker', () => {
   it('resolves only once the track is stored, so it reads back at once', async () => {
     const store = create()
     await store.storeImport(track('imported:a'))
-    expect(await store.getImport('imported:a')).toEqual(track('imported:a'))
+    expect(await store.getImport('imported:a')).toEqual({ ...track('imported:a'), importedAt: expect.any(Number) })
     expect((await store.findImports({ contexts: ['vessels.other'] })).map(({ id }) => id)).toEqual(['imported:a'])
     expect(await store.binImport('imported:a', undefined, 1000)).toBeTypeOf('number')
     expect(await store.getImport('imported:a')).toBeUndefined()

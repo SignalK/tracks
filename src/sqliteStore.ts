@@ -12,6 +12,7 @@ import type {
   GeoBounds,
   ImportedPoint,
   ImportedTrack,
+  StoredImport,
   ImportFilter,
   LatLngTuple,
   RecordedSpan,
@@ -132,9 +133,12 @@ interface ImportedRow {
   context: string | null
   name: string | null
   metadata: string
+  imported_at: number
   west: number
   east: number
 }
+
+const SELECT_IMPORTS = 'SELECT * FROM imported_tracks JOIN import_times USING (id)'
 
 /** Longitude intervals as `[west, east]`, either of which may cross the antimeridian. */
 const longitudesOverlap = (a: [number, number], b: [number, number]): boolean => {
@@ -270,6 +274,13 @@ export class SqliteTrackStore implements TrackStore {
         north       REAL    NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_imported_context ON imported_tracks(context);
+      -- When each import was kept. Its own table, like names, so a database
+      -- written before it existed opens unchanged; it stays while the import
+      -- is in the recycle bin, for a restore, and goes when that is purged.
+      CREATE TABLE IF NOT EXISTS import_times (
+        id          TEXT PRIMARY KEY,
+        imported_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS imported_points (
         track_id  TEXT    NOT NULL,
         seq       INTEGER NOT NULL,
@@ -327,6 +338,14 @@ export class SqliteTrackStore implements TrackStore {
       );
       CREATE INDEX IF NOT EXISTS idx_binned_imported_points ON binned_imported_points(bin_id);
     `)
+    // Imports kept before their time was: dated to the first start that knew to.
+    const now = Date.now()
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO import_times (id, imported_at)
+         SELECT id, ? FROM imported_tracks UNION SELECT id, ? FROM binned_imported_tracks`,
+      )
+      .run(now, now)
     this.insert = this.db.prepare('INSERT INTO positions (context, timestamp, lat, lon, s2cell) VALUES (?, ?, ?, ?, ?)')
     // Newer wins: a corrected or changed name replaces what is stored, while
     // an older observation arriving late leaves it alone.
@@ -722,6 +741,11 @@ export class SqliteTrackStore implements TrackStore {
     if (points.length === 0) {
       throw new Error('An imported track needs at least one point')
     }
+    // Checked before the first write: an id whose import is in the recycle
+    // bin has no imported_tracks row to collide with, only its kept time.
+    if (this.db.prepare('SELECT 1 AS found FROM import_times WHERE id = ?').get(track.id)) {
+      throw new Error(`An import with id ${track.id} already exists`)
+    }
     let south = points[0]!.position[0]
     let north = south
     let firstTime: number | undefined
@@ -752,6 +776,7 @@ export class SqliteTrackStore implements TrackStore {
         east,
         north,
       )
+    this.db.prepare('INSERT INTO import_times (id, imported_at) VALUES (?, ?)').run(track.id, Date.now())
     const insert = this.db.prepare(
       'INSERT INTO imported_points (track_id, seq, segment, timestamp, lat, lon) VALUES (?, ?, ?, ?, ?, ?)',
     )
@@ -1019,15 +1044,18 @@ export class SqliteTrackStore implements TrackStore {
         this.db.prepare('DELETE FROM recycle_bin WHERE id = ?').run(id)
       }
     }
+    if (entry.whole === 1 && entry.import_id !== null) {
+      this.db.prepare('DELETE FROM import_times WHERE id = ?').run(entry.import_id)
+    }
   }
 
-  getImport(id: string): ImportedTrack | undefined {
-    const row = this.db.prepare('SELECT * FROM imported_tracks WHERE id = ?').get(id) as ImportedRow | undefined
+  getImport(id: string): StoredImport | undefined {
+    const row = this.db.prepare(`${SELECT_IMPORTS} WHERE id = ?`).get(id) as ImportedRow | undefined
     return row ? this.importFrom(row) : undefined
   }
 
   /** Imported tracks the filter lets through, in the order they were stored. */
-  findImports(filter: ImportFilter = {}): ImportedTrack[] {
+  findImports(filter: ImportFilter = {}): StoredImport[] {
     const clauses: string[] = []
     const params: (string | number)[] = []
     if (filter.contexts) {
@@ -1052,7 +1080,7 @@ export class SqliteTrackStore implements TrackStore {
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
     let rows = this.db
-      .prepare(`SELECT * FROM imported_tracks ${where} ORDER BY rowid`)
+      .prepare(`${SELECT_IMPORTS} ${where} ORDER BY imported_tracks.rowid`)
       .all(...params) as unknown as ImportedRow[]
     // Longitude in JS rather than SQL: either box may cross the antimeridian.
     const box = filter.bbox
@@ -1062,7 +1090,7 @@ export class SqliteTrackStore implements TrackStore {
     return rows.map((row) => this.importFrom(row))
   }
 
-  private importFrom(row: ImportedRow): ImportedTrack {
+  private importFrom(row: ImportedRow): StoredImport {
     const points = this.selectImportedPoints.all(row.id) as unknown as {
       segment: number
       timestamp: number | null
@@ -1086,6 +1114,7 @@ export class SqliteTrackStore implements TrackStore {
       ...(row.name === null ? {} : { name: row.name }),
       metadata: JSON.parse(row.metadata) as Record<string, unknown>,
       segments,
+      importedAt: row.imported_at,
     }
   }
 

@@ -35,10 +35,10 @@ import type {
   Context,
   DeletedSpan,
   Debug,
-  ImportedTrack,
   LatLngTuple,
   LngLatTuple,
   Position,
+  StoredImport,
   TimedPosition,
   TimeWindow,
   TimedTrackCollection,
@@ -1352,7 +1352,7 @@ export default function ThePlugin(app: App): Plugin {
     // asks to delete, which restoring and purging are part of.
     registerWithRouter: function (router: Router) {
       /** An import as the webapp lists it, in the shape of a v2 track's properties. */
-      const importSummary = (track: ImportedTrack) => {
+      const importSummary = (track: StoredImport) => {
         const name =
           track.context === undefined
             ? undefined
@@ -1381,6 +1381,7 @@ export default function ThePlugin(app: App): Plugin {
           ...(track.context === undefined ? {} : { context: track.context, isSelf: track.context === app.selfContext }),
           ...(name === undefined ? {} : { contextName: name }),
           ...(from > to ? {} : { from: new Date(from).toISOString(), to: new Date(to).toISOString() }),
+          imported: new Date(track.importedAt).toISOString(),
           pointCount,
         }
       }

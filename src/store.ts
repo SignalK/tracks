@@ -3,6 +3,7 @@ import type {
   Context,
   Debug,
   ImportedTrack,
+  StoredImport,
   ImportFilter,
   LatLngTuple,
   RecordedSpan,
@@ -129,9 +130,9 @@ export interface TrackStore {
    */
   storeImport?(track: ImportedTrack): void | Promise<void>
 
-  getImport?(id: string): ImportedTrack | undefined | Promise<ImportedTrack | undefined>
+  getImport?(id: string): StoredImport | undefined | Promise<StoredImport | undefined>
 
-  findImports?(filter?: ImportFilter): ImportedTrack[] | Promise<ImportedTrack[]>
+  findImports?(filter?: ImportFilter): StoredImport[] | Promise<StoredImport[]>
 
   /**
    * The recycle bin. Optional like the import methods: a store without it

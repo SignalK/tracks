@@ -60,6 +60,12 @@ export interface ImportedTrack {
   segments: ImportedPoint[][]
 }
 
+/** An imported track as a store gives it back. */
+export interface StoredImport extends ImportedTrack {
+  /** When the store kept it, in ms since the epoch. */
+  importedAt: number
+}
+
 /** Which imported tracks a query can see. Every field narrows; none means all. */
 export interface ImportFilter {
   /** Only imports naming one of these contexts; contextless ones drop out. */
