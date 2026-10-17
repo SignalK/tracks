@@ -77,6 +77,12 @@ export interface TrackProviderDeps {
     window: TimeWindow | undefined,
     resolutionMs: number | undefined,
   ) => Promise<TimedPosition[]>
+  /**
+   * What the store and history hold for a context over a window, rejecting
+   * when history could not be read: an import that fills only the gaps
+   * cannot tell a gap from an outage.
+   */
+  recordedOver: (context: string, window: TimeWindow) => Promise<TimedPosition[]>
 }
 
 /** v2 sends `[west, south, east, north]`; a bounds here is `[lat, lng]` corners. */
@@ -384,14 +390,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         store: writableStore(),
         selfContext: deps.selfContext(),
         historyKnows: deps.historyKnows,
-        recorded: async (context, from, to) => {
-          const { tracks } = await matching({
-            contexts: [context],
-            from: Temporal.Instant.fromEpochMilliseconds(from),
-            to: Temporal.Instant.fromEpochMilliseconds(to),
-          })
-          return tracks.get(context) ?? []
-        },
+        recorded: (context, from, to) => deps.recordedOver(context, { from, to }),
         deleted: deps.deleted,
       },
       onOverlap,
@@ -756,12 +755,24 @@ export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOve
       points.map(({ position, timestamp }): TimedPosition => ({ position, timestamp: timestamp! })),
     )
     if (onOverlap === 'keep') {
-      const times = segments.flat().map(({ timestamp }) => timestamp)
-      const recorded = await deps.recorded(
-        context,
-        Math.min(...times) - MIN_FILLED_GAP_MS,
-        Math.max(...times) + MIN_FILLED_GAP_MS,
-      )
+      // Read per segment: one window spanning segments days apart would ask
+      // history for the days between and coarsen its buckets to fit.
+      const recorded = (
+        await Promise.all(
+          segments.map(async (points) => {
+            if (points.length === 0) {
+              return []
+            }
+            let from = Infinity
+            let to = -Infinity
+            for (const { timestamp } of points) {
+              from = Math.min(from, timestamp)
+              to = Math.max(to, timestamp)
+            }
+            return deps.recorded(context, from - MIN_FILLED_GAP_MS, to + MIN_FILLED_GAP_MS)
+          }),
+        )
+      ).flat()
       const { runs, overlapping } = fillGaps(segments, recorded, MIN_FILLED_GAP_MS)
       // Nothing is there to replace, so nothing goes to the recycle bin.
       await deps.store.recordTrack(context, runs, Date.now(), false)

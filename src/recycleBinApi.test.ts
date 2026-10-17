@@ -403,6 +403,57 @@ describe('an import of the own vessel with a history provider installed', () => 
       { history },
     ))
 
+  // An outage would read as one long gap, and the import would draw over it.
+  it('refuses to fill gaps while history cannot be read', () =>
+    withHarness(
+      async (h) => {
+        await expect(importOwn(h, overHistory, 'keep')).rejects.toThrow(/could not be read/)
+        expect(await importOwn(h, overHistory, 'replace')).toEqual({ id: `recorded:${SELF_CONTEXT}`, overlapping: 0 })
+      },
+      { history: { ...history, getValuesRejects: true } },
+    ))
+
+  // One window spanning both would coarsen the buckets to cover the days between.
+  it('reads history over each segment rather than across them', () => {
+    const asked: [number, number][] = []
+    const days = (n: number) => t0 - n * 24 * 60 * MINUTE
+    const twoPassages: TrackImport = {
+      ...overHistory,
+      geometry: {
+        type: 'MultiLineString',
+        coordinates: [
+          [
+            [25, 61],
+            [25, 61.01],
+          ],
+          [
+            [25, 61.02],
+            [25, 61.03],
+          ],
+        ],
+      },
+      properties: {
+        coordTimes: [
+          [iso(days(10)), iso(days(10) + MINUTE)],
+          [iso(t0 + MINUTE), iso(t0 + 2 * MINUTE)],
+        ],
+        context: SELF_CONTEXT,
+      },
+    }
+    return withHarness(
+      async (h) => {
+        await importOwn(h, twoPassages, 'keep')
+        expect(asked.map(([from, to]) => to - from)).toEqual([11 * MINUTE, 11 * MINUTE])
+      },
+      {
+        history: {
+          ...history,
+          onValues: ({ from, to }) => asked.push([Date.parse(from.toString()), Date.parse(to.toString())]),
+        },
+      },
+    )
+  })
+
   it('hides the history it replaces', () =>
     withHarness(
       async (h) => {

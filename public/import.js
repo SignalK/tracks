@@ -45,6 +45,13 @@ export function start() {
   const form = document.getElementById('import-form')
   const status = document.getElementById('import-status')
   const button = form.querySelector('button[type="submit"]')
+  const { self, replace } = form.elements
+  // Only the own vessel has a recording to replace.
+  const allowReplace = () => {
+    replace.disabled = !self.checked
+  }
+  allowReplace()
+  self.addEventListener('change', allowReplace)
 
   function show(message, state) {
     // A failed upload can be tried again; a successful one reloads the page.
@@ -72,7 +79,7 @@ export function start() {
       show('Choose a GPX file first.', 'error')
       return
     }
-    const query = importQuery({ self: form.elements.self.checked, replace: form.elements.replace.checked })
+    const query = importQuery({ self: self.checked, replace: replace.checked })
     button.disabled = true
     show('Importing…')
     let response

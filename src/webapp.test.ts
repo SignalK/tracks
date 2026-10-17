@@ -928,13 +928,35 @@ describe('the import form', () => {
     expect(importQuery({ self: true, replace: true })).toBe('?self=true&onOverlap=replace')
   })
 
+  it('offers to replace a recording only while the own vessel is chosen', () => {
+    let changed = () => {}
+    const self = {
+      checked: false,
+      addEventListener: (_type: string, handler: () => void) => {
+        changed = handler
+      },
+    }
+    const replace = { checked: false, disabled: false }
+    const form = { elements: { self, replace }, querySelector: () => ({}), addEventListener: () => {} }
+    vi.stubGlobal('document', { getElementById: (id: string) => (id === 'import-form' ? form : {}) })
+    startImport()
+    expect(replace.disabled).toBe(true)
+    self.checked = true
+    changed()
+    expect(replace.disabled).toBe(false)
+  })
+
   // Each upload stores the file anew, so a second submit would import it twice.
   it('sends one upload at a time, and allows another after a failure', async () => {
     const button = { disabled: false }
     const status = { textContent: '', hidden: true, dataset: {} as Record<string, string> }
     let submit: (event: { preventDefault: () => void }) => Promise<void> = async () => {}
     const form = {
-      elements: { file: { files: [{ name: 'a.gpx' }] }, self: { checked: false }, replace: { checked: false } },
+      elements: {
+        file: { files: [{ name: 'a.gpx' }] },
+        self: { checked: false, addEventListener: () => {} },
+        replace: { checked: false, disabled: false },
+      },
       querySelector: () => button,
       addEventListener: (_type: string, handler: typeof submit) => {
         submit = handler

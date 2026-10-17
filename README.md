@@ -59,7 +59,8 @@ recording instead of being kept as an import, and the answer is the recording's 
 `tracks:recorded:<context>`. By default it only fills what the recording is missing: its
 points are used where the vessel has no position, from this plugin or a history provider, for
 at least five minutes, and left out elsewhere, so nothing recorded is overwritten and two
-sources are never interleaved minute by minute. Asked to replace instead, it takes the place of
+sources are never interleaved minute by minute; while a history provider cannot be read, such an
+import is refused with a 503 rather than drawn over what it holds. Asked to replace instead, it takes the place of
 what was recorded over the same time: the positions this plugin stored there go to the recycle
 bin first, one entry per segment, and a history provider's data over that time is hidden while
 the entry is there. Restoring the entry brings both back. An untimed track of the own vessel

@@ -1020,6 +1020,17 @@ export default function ThePlugin(app: App): Plugin {
           // for every other vessel in it.
           return withHistory(history, stored)
         },
+        recordedOver: async (context, window) => {
+          // The store rejects a vessel it has never recorded, which has nothing to keep.
+          const stored = (await tracks?.getTimed(context, window).catch(() => [])) ?? []
+          const history = await visibleHistory(context, window, storeResolution)
+          if (history.failed) {
+            throw new HistoryUnavailableError(`History provider could not be read for ${context}`)
+          }
+          // Both sources whole rather than reconciled: the question is where
+          // either has a position, not which one draws there.
+          return [...stored, ...history.points]
+        },
       })
       app.registerTrackApiProvider?.(trackProvider)
       return starting.ready.catch(async () => {
@@ -1493,6 +1504,13 @@ export default function ThePlugin(app: App): Plugin {
               kept.push(await provider.importTrack(track, onOverlap))
             }
           } catch (err) {
+            // Filling only the gaps needs to know where history has positions.
+            if (err instanceof HistoryUnavailableError) {
+              res.status(503).json({
+                message: 'The history provider could not be read, so the gaps to fill are unknown; try again later',
+              })
+              return
+            }
             app.error(`GPX import: ${errorDetail(err)}`)
             res.status(500).json({ message: 'Track storage failed' })
             return
