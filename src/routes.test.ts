@@ -1,3 +1,4 @@
+import { Temporal } from '@js-temporal/polyfill'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fromGpx } from './gpx.js'
@@ -1087,6 +1088,75 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
 
     await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
   }, 15_000)
+
+  // The provider cannot be told to stop a query nobody waits for any more, so
+  // a probe that outlasts the timeout is still scanning; another started
+  // beside it would scan the whole database again.
+  it('waits for a slow existence query to finish before asking again', async () => {
+    let probes = 0
+    const gate = deferred()
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: {
+        rows: [],
+        get contexts() {
+          probes += 1
+          return [OTHER_CONTEXT]
+        },
+        deferContexts: gate,
+      },
+    }))
+
+    // Only the clock is faked -- `withTimeout` needs a real timer set.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+      // Past the failure window: a timeout is not a failure to retry.
+      vi.setSystemTime(Date.now() + 2_000)
+      await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+      expect(probes).toBe(1)
+
+      gate.release()
+      await gate.wait
+      vi.setSystemTime(Date.now() + 2_000)
+      // The late answer fills the cache, so the vessel is known without asking.
+      await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(probes).toBe(1)
+  }, 30_000)
+
+  it('does not ask for a window while a slow windowed query is still running', async () => {
+    let queries = 0
+    const gate = deferred()
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: {
+        rows: [],
+        get contexts() {
+          queries += 1
+          return [OTHER_CONTEXT]
+        },
+        deferContexts: gate,
+      },
+    }))
+    const window = () => ({
+      from: Temporal.Instant.fromEpochMilliseconds(Date.now() - 3_600_000),
+      to: Temporal.Instant.fromEpochMilliseconds(Date.now()),
+    })
+
+    await h.trackProvider()!.getTracks(window())
+    await h.trackProvider()!.getTracks(window())
+    expect(queries).toBe(1)
+
+    gate.release()
+    await gate.wait
+    // Once it has settled, the next window is asked again.
+    await new Promise((resolve) => setImmediate(resolve))
+    await h.trackProvider()!.getTracks(window())
+    expect(queries).toBe(2)
+  }, 30_000)
 
   // At least one provider maps its stored `self` back to the spec's spelling,
   // so the own vessel has to be recognised under either one.
