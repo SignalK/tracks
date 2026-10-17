@@ -65,9 +65,10 @@ be stored fails alone and recording carries on. It is admitted outside the limit
 above, so a large import neither pauses recording nor is dropped. Once recording
 writes have failed, imports are refused too. Retention never removes an imported
 track: it stays until it is deleted. A timed track imported for the own vessel is
-the exception: it is written into the recording, in place of what was recorded
-over the same time, which goes to the recycle bin first, and from then on it is
-part of the recording like any position.
+the exception: it is written into the recording, by default only where the
+recording and the history provider have nothing for at least five minutes, or,
+when asked, in place of what was recorded over the same time, which goes to the
+recycle bin first. From then on it is part of the recording like any position.
 
 Deleting a track, or part of one, moves its points into recycle bin tables in the
 same database, and restoring moves them back; both are written as imports are.

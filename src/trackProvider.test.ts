@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { HistoryValuesQuery, TestHarness } from './harness.test-utils.js'
 import type { TrackApi } from './trackApi.js'
+import { fillGaps, MIN_FILLED_GAP_MS } from './trackProvider.js'
+import type { TimedPosition } from './types.js'
 
 /**
  * The plugin as a v2 Track API provider.
@@ -1508,5 +1510,27 @@ describe('segment gaps on a thinned track', () => {
     } finally {
       await h.stop()
     }
+  })
+})
+
+describe('fillGaps', () => {
+  const at = (...minutes: number[]): TimedPosition[] =>
+    minutes.map((m) => ({ position: [60, 24], timestamp: m * 60_000 }))
+  const minutesOf = (runs: TimedPosition[][]) => runs.map((run) => run.map(({ timestamp }) => timestamp / 60_000))
+
+  it('keeps a history bucket covering the time between its fixes', () => {
+    const buckets = at(0, 20).map((point) => ({ ...point, span: 15 * 60_000 }))
+    const { runs, overlapping } = fillGaps([at(10, 16, 30, 40)], buckets, MIN_FILLED_GAP_MS)
+    expect(minutesOf(runs)).toEqual([[16], [40]])
+    expect(overlapping).toBe(2)
+  })
+
+  it('starts a new run at each recorded stretch and segment boundary', () => {
+    const { runs } = fillGaps([at(1, 2, 12, 13), at(14)], at(6, 7), MIN_FILLED_GAP_MS)
+    expect(minutesOf(runs)).toEqual([[1, 2], [12, 13], [14]])
+  })
+
+  it('fills everything when nothing is recorded', () => {
+    expect(fillGaps([at(1, 2)], [], MIN_FILLED_GAP_MS)).toEqual({ runs: [at(1, 2)], overlapping: 0 })
   })
 })

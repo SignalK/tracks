@@ -158,6 +158,25 @@ describe('the GPX upload route', () => {
       expect(properties).not.toHaveProperty('imported')
     }))
 
+  it('reports the points it left out where the recording already has positions', () =>
+    withHarness(async (h) => {
+      h.seedTrack(SELF_CONTEXT, [[60, 24]], [t0])
+      // The second point follows the recording, which has nothing after it.
+      const keep = await upload(h, gpxFile(trk('Morning', [t0, t0 + MINUTE])), '?self=true')
+      expect(keep.body).toMatchObject({ overlappingPoints: 1 })
+      const replace = await upload(h, gpxFile(trk('Morning', [t0, t0 + MINUTE])), '?self=true&onOverlap=replace')
+      expect(replace.status).toBe(201)
+      expect(replace.body).toMatchObject({ overlappingPoints: 0 })
+      const [properties] = await listed(h)
+      expect(properties).toMatchObject({ id: `recorded:${SELF_CONTEXT}`, pointCount: 2 })
+    }))
+
+  it('refuses an unknown onOverlap', () =>
+    withHarness(async (h) => {
+      const res = await upload(h, gpxFile(trk('Morning', [t0])), '?self=true&onOverlap=merge')
+      expect(res.status).toBe(400)
+    }))
+
   it('stores an untimed track for the own vessel', () =>
     withHarness(async (h) => {
       const res = await upload(h, gpxFile(trk('Plan', [undefined, undefined])), '?self=true')

@@ -31,6 +31,10 @@
         <form id="import-form">
           <label>GPX file <input type="file" name="file" accept=".gpx,application/gpx+xml" required /></label>
           <label><input type="checkbox" name="self" /> Tracks of my own vessel</label>
+          <label
+            ><input type="checkbox" name="replace" /> Replace what my vessel recorded over the same time (it goes to the
+            recycle bin)</label
+          >
           <button type="submit">Import</button>
         </form>
         <p id="import-status" role="status" hidden></p>

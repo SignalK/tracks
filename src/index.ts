@@ -16,7 +16,8 @@
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
 import { join } from 'node:path'
-import { createTrackProvider, keepTrack } from './trackProvider.js'
+import { createTrackProvider } from './trackProvider.js'
+import type { TrackProvider } from './trackProvider.js'
 import { outsideSpans, recordedId } from './recycleBin.js'
 import type { TrackApi } from './trackApi.js'
 import { AsyncTrackStore } from './asyncTrackStore.js'
@@ -737,6 +738,8 @@ export default function ThePlugin(app: App): Plugin {
 
   let onStop: (() => void)[] = []
   let tracks: TrackStore | undefined = undefined
+  /** Also what the plugin's own import route keeps tracks through. */
+  let trackProvider: TrackProvider | undefined = undefined
   let segmentGap = 0
   /**
    * How often the store keeps a position, in ms.
@@ -985,41 +988,40 @@ export default function ThePlugin(app: App): Plugin {
       // Deliberately not unregistered in stop(): the server pushes its own
       // unregister onto the plugin's stop handlers when this is called, so
       // doing it here as well would unregister twice.
-      app.registerTrackApiProvider?.(
-        createTrackProvider({
-          store: () => tracks,
-          selfContext: () => app.selfContext,
-          segmentGap: () => segmentGap,
-          contextName: (context: string) =>
-            contextName(
-              context,
-              remembering(() => tracks),
-            ),
-          // The same reconciliation the v1 routes have done since #73. Without
-          // it the plugin answers differently depending on which route a client
-          // uses: the store alone through v2, the store enriched by a history
-          // provider through v1.
-          historyContexts: (window) => historyContextsIn(app, window, app.debug, knownContexts),
-          historyKnows: (context) => historyKnowsContext(app, context, app.debug, knownContexts),
-          deleted: () => {
-            deletedSpans = undefined
-          },
-          reconcileWithHistory: async (context, stored, window, resolutionMs) => {
-            const effective = resolutionMs ?? storeResolution
-            // A query with no window still gets history, for the same reason
-            // the v1 route does: a context recorded only by the provider —
-            // before this plugin was installed — would otherwise never be asked
-            // about.
-            const asked = window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
-            const history = await visibleHistory(context, asked, effective)
-            // `failed` is deliberately not escalated here: the v2 contract has
-            // no per-context error and no 404, so a provider outage degrades to
-            // the store's own points rather than failing a multi-context query
-            // for every other vessel in it.
-            return withHistory(history, stored)
-          },
-        }),
-      )
+      trackProvider = createTrackProvider({
+        store: () => tracks,
+        selfContext: () => app.selfContext,
+        segmentGap: () => segmentGap,
+        contextName: (context: string) =>
+          contextName(
+            context,
+            remembering(() => tracks),
+          ),
+        // The same reconciliation the v1 routes have done since #73. Without
+        // it the plugin answers differently depending on which route a client
+        // uses: the store alone through v2, the store enriched by a history
+        // provider through v1.
+        historyContexts: (window) => historyContextsIn(app, window, app.debug, knownContexts),
+        historyKnows: (context) => historyKnowsContext(app, context, app.debug, knownContexts),
+        deleted: () => {
+          deletedSpans = undefined
+        },
+        reconcileWithHistory: async (context, stored, window, resolutionMs) => {
+          const effective = resolutionMs ?? storeResolution
+          // A query with no window still gets history, for the same reason
+          // the v1 route does: a context recorded only by the provider —
+          // before this plugin was installed — would otherwise never be asked
+          // about.
+          const asked = window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
+          const history = await visibleHistory(context, asked, effective)
+          // `failed` is deliberately not escalated here: the v2 contract has
+          // no per-context error and no 404, so a provider outage degrades to
+          // the store's own points rather than failing a multi-context query
+          // for every other vessel in it.
+          return withHistory(history, stored)
+        },
+      })
+      app.registerTrackApiProvider?.(trackProvider)
       return starting.ready.catch(async () => {
         // A failed start must release the worker before callers remove the data directory.
         await starting.close().catch(() => {})
@@ -1451,15 +1453,20 @@ export default function ThePlugin(app: App): Plugin {
       // A server without per-route access keeps the route admin-only.
       const writable = (router as AccessRouter).access?.('readwrite') ?? router
       writable.post('/imports', (req: Request, res: Response) => {
-        const store = tracks
-        if (!store?.storeImport || !store.recordTrack) {
+        const provider = trackProvider
+        if (!provider || !tracks?.storeImport || !tracks.recordTrack) {
           notAvailable(res)
           return
         }
-        const writableStore = { storeImport: store.storeImport.bind(store), recordTrack: store.recordTrack.bind(store) }
         // `self` files the tracks under the own vessel, which writes a timed
-        // one into the recording (see keepTrack).
+        // one into the recording (see keepTrack), and `onOverlap` says what
+        // happens where the recording already has positions.
         const context = req.query.self === 'true' ? app.selfContext : undefined
+        const onOverlap = req.query.onOverlap ?? 'keep'
+        if (onOverlap !== 'keep' && onOverlap !== 'replace') {
+          res.status(400).json({ message: "onOverlap must be 'keep' or 'replace'" })
+          return
+        }
         void (async () => {
           let text: string
           try {
@@ -1480,19 +1487,10 @@ export default function ThePlugin(app: App): Plugin {
             return
           }
           const converted = read.map((gpx) => fromGpxTrack(gpx, context ?? gpx.context))
-          const ids: string[] = []
+          const kept: { id: string; overlapping: number }[] = []
           try {
             for (const { track } of converted) {
-              ids.push(
-                await keepTrack(track, {
-                  store: writableStore,
-                  selfContext: app.selfContext,
-                  historyKnows: (vessel) => historyKnowsContext(app, vessel, app.debug, knownContexts),
-                  deleted: () => {
-                    deletedSpans = undefined
-                  },
-                }),
-              )
+              kept.push(await provider.importTrack(track, onOverlap))
             }
           } catch (err) {
             app.error(`GPX import: ${errorDetail(err)}`)
@@ -1502,8 +1500,9 @@ export default function ThePlugin(app: App): Plugin {
           res.status(201).json({
             // As the Track API names them on a server with its write routes,
             // so a client can fetch or delete them there.
-            ids: ids.map((id) => `${PLUGIN_ID}:${id}`),
+            ids: kept.map(({ id }) => `${PLUGIN_ID}:${id}`),
             skippedPoints: converted.reduce((sum, { skippedPoints }) => sum + skippedPoints, 0),
+            overlappingPoints: kept.reduce((sum, { overlapping }) => sum + overlapping, 0),
           })
         })()
       })
