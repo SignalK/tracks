@@ -1158,6 +1158,44 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(queries).toBe(2)
   }, 30_000)
 
+  // Each running query holds the others back on its own, so the one that
+  // settles first cannot reopen the provider while another still runs.
+  it('keeps waiting while any of several slow windowed queries is still running', async () => {
+    let queries = 0
+    const gates = [deferred(), deferred(), deferred()]
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: {
+        rows: [],
+        contexts: [OTHER_CONTEXT],
+        get deferContexts() {
+          queries += 1
+          return gates[queries - 1]!
+        },
+      },
+    }))
+    const window = () => ({
+      from: Temporal.Instant.fromEpochMilliseconds(Date.now() - 3_600_000),
+      to: Temporal.Instant.fromEpochMilliseconds(Date.now()),
+    })
+
+    await Promise.all([h.trackProvider()!.getTracks(window()), h.trackProvider()!.getTracks(window())])
+    expect(queries).toBe(2)
+
+    gates[1]!.release()
+    await gates[1]!.wait
+    await new Promise((resolve) => setImmediate(resolve))
+    await h.trackProvider()!.getTracks(window())
+    expect(queries).toBe(2)
+
+    gates[0]!.release()
+    await gates[0]!.wait
+    await new Promise((resolve) => setImmediate(resolve))
+    await h.trackProvider()!.getTracks(window())
+    expect(queries).toBe(3)
+    gates[2]!.release()
+  }, 30_000)
+
   // At least one provider maps its stored `self` back to the spec's spelling,
   // so the own vessel has to be recognised under either one.
   it('accepts vessels.self as naming the own vessel', async () => {

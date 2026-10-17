@@ -451,14 +451,15 @@ interface KnownContexts {
  * What the plugin remembers of a history provider's context lists between
  * requests.
  *
- * `slowWindowSince` marks a windowed query that outlasted its timeout and is
- * still running in the provider. Windowed queries are not cached, since each
- * asks a different window, but while one is still running nothing else asks:
- * a provider too slow to answer one in time would only fall further behind.
+ * `windowQueries` holds the start of each windowed query still running in the
+ * provider. Windowed queries are not cached, since each asks a different
+ * window (one ending now never repeats), but while one has outlasted its
+ * timeout nothing else asks, whatever its window: the provider is one store,
+ * and one too slow to answer in time would only fall further behind.
  */
 interface HistoryContextCache {
   current: KnownContexts | undefined
-  slowWindowSince?: number
+  windowQueries?: Set<{ startedAt: number }>
 }
 
 /** A provider's context list as a set, with the `vessels.self` spelling resolved. */
@@ -586,8 +587,20 @@ async function historyContextsIn(
     if (!window) {
       return await knownHistoryContexts(app, cache)
     }
-    const slowSince = cache.slowWindowSince
-    if (slowSince !== undefined && Date.now() - slowSince < KNOWN_CONTEXTS_PENDING_MAX_MS) {
+    const running = (cache.windowQueries ??= new Set())
+    const now = Date.now()
+    let slow = false
+    for (const entry of running) {
+      const age = now - entry.startedAt
+      // Given up on, as for the existence probe, so a query that never
+      // settles cannot switch windowed history off until a restart.
+      if (age >= KNOWN_CONTEXTS_PENDING_MAX_MS) {
+        running.delete(entry)
+      } else if (age >= HISTORY_QUERY_TIMEOUT_MS) {
+        slow = true
+      }
+    }
+    if (slow) {
       if (debug.enabled) {
         debug('History contexts skipped: an earlier windowed query is still running')
       }
@@ -604,21 +617,11 @@ async function historyContextsIn(
       from: Temporal.Instant.from(new Date(Math.max(window.from, EXISTENCE_PROBE_FROM_MS)).toISOString()),
       to: Temporal.Instant.from(new Date(window.to).toISOString()),
     })
-    try {
-      return toContextSet(await withTimeout(query, HISTORY_QUERY_TIMEOUT_MS), app.selfContext)
-    } catch (err) {
-      if (err instanceof HistoryTimeoutError) {
-        const since = Date.now()
-        cache.slowWindowSince = since
-        const settled = () => {
-          if (cache.slowWindowSince === since) {
-            delete cache.slowWindowSince
-          }
-        }
-        query.then(settled, settled)
-      }
-      throw err
-    }
+    const entry = { startedAt: Date.now() }
+    running.add(entry)
+    const settled = () => running.delete(entry)
+    query.then(settled, settled)
+    return toContextSet(await withTimeout(query, HISTORY_QUERY_TIMEOUT_MS), app.selfContext)
   } catch (err) {
     if (debug.enabled) {
       debug(`History contexts unavailable: ${errorDetail(err)}`)
@@ -1105,7 +1108,7 @@ export default function ThePlugin(app: App): Plugin {
       // A restart often follows a provider change; keeping the old list would
       // answer from a provider that is no longer the one installed.
       knownContexts.current = undefined
-      delete knownContexts.slowWindowSince
+      delete knownContexts.windowQueries
       // Release the file handle a sqlite store holds, so a plugin restart does
       // not leak it and the WAL gets checkpointed.
       //
