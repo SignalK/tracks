@@ -756,24 +756,36 @@ export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOve
     )
     if (onOverlap === 'keep') {
       // Read per segment: one window spanning segments days apart would ask
-      // history for the days between and coarsen its buckets to fit.
-      const recorded = (
-        await Promise.all(
-          segments.map(async (points) => {
-            if (points.length === 0) {
-              return []
-            }
-            let from = Infinity
-            let to = -Infinity
-            for (const { timestamp } of points) {
-              from = Math.min(from, timestamp)
-              to = Math.max(to, timestamp)
-            }
-            return deps.recorded(context, from - MIN_FILLED_GAP_MS, to + MIN_FILLED_GAP_MS)
-          }),
-        )
-      ).flat()
-      const { runs, overlapping } = fillGaps(segments, recorded, MIN_FILLED_GAP_MS)
+      // history for the days between and coarsen its buckets to fit. One at a
+      // time, so a file of many segments cannot fill the store's read queue,
+      // and each segment also yields to what earlier ones of the same file
+      // filled, so overlapping segments are not both written.
+      const runs: TimedPosition[][] = []
+      const filled: TimedPosition[] = []
+      let overlapping = 0
+      for (const points of segments) {
+        if (points.length === 0) {
+          continue
+        }
+        let from = Infinity
+        let to = -Infinity
+        for (const { timestamp } of points) {
+          from = Math.min(from, timestamp)
+          to = Math.max(to, timestamp)
+        }
+        from -= MIN_FILLED_GAP_MS
+        to += MIN_FILLED_GAP_MS
+        const recorded = await deps.recorded(context, from, to)
+        for (const point of filled) {
+          if (point.timestamp >= from && point.timestamp <= to) {
+            recorded.push(point)
+          }
+        }
+        const kept = fillGaps([points], recorded, MIN_FILLED_GAP_MS)
+        runs.push(...kept.runs)
+        filled.push(...kept.runs.flat())
+        overlapping += kept.overlapping
+      }
       // Nothing is there to replace, so nothing goes to the recycle bin.
       await deps.store.recordTrack(context, runs, Date.now(), false)
       return { id: recordedId(context), overlapping }

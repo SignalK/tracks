@@ -330,6 +330,21 @@ describe('an import of the own vessel', () => {
       )
     }))
 
+  // TimeZero's exports repeat a few points across block seams.
+  it('writes points that two of its segments share only once', () =>
+    withHarness(async (h) => {
+      const provider = providerOf(h)
+      const times = [0, 1, 2, 3].map((i) => t0 + i * MINUTE)
+      const coordinates = times.map((_, i): [number, number] => [25, 61 + i / 100])
+      const seams: TrackImport = {
+        type: 'Feature',
+        geometry: { type: 'MultiLineString', coordinates: [coordinates.slice(0, 3), coordinates.slice(1)] },
+        properties: { coordTimes: [times.slice(0, 3).map(iso), times.slice(1).map(iso)], context: SELF_CONTEXT },
+      }
+      expect(await importOwn(h, seams, 'keep')).toEqual({ id: `recorded:${SELF_CONTEXT}`, overlapping: 2 })
+      expect(await timesOf(provider, SELF_CONTEXT)).toEqual(times.map(iso))
+    }))
+
   it('replaces what was recorded over its time when asked, binned so it can be restored', () =>
     withHarness(async (h) => {
       seedFour(h)

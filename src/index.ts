@@ -1021,8 +1021,16 @@ export default function ThePlugin(app: App): Plugin {
           return withHistory(history, stored)
         },
         recordedOver: async (context, window) => {
-          // The store rejects a vessel it has never recorded, which has nothing to keep.
-          const stored = (await tracks?.getTimed(context, window).catch(() => [])) ?? []
+          // Read through the filtered query, which leaves out a vessel the store
+          // has never recorded instead of rejecting: any other failure must fail
+          // the import, or it would read as nothing recorded.
+          const collection = await tracks?.getFilteredTimedTracks(
+            { bbox: null, radius: null, intersects: true, contexts: [context] },
+            undefined,
+            undefined,
+            { window },
+          )
+          const stored = collection?.[context] ?? []
           const history = await visibleHistory(context, window, storeResolution)
           if (history.failed) {
             throw new HistoryUnavailableError(`History provider could not be read for ${context}`)
