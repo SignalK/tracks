@@ -339,6 +339,15 @@ const KNOWN_CONTEXTS_TTL_MS = 30_000
 const KNOWN_CONTEXTS_FAILURE_TTL_MS = 1_000
 
 /**
+ * How long a context query may stay unanswered before another is started
+ * beside it. Waiting for the provider to settle is what keeps a slow one from
+ * running a new epoch-wide scan every few seconds; the bound only covers a
+ * provider whose promise never settles at all, which would otherwise leave
+ * the list unknown until a restart.
+ */
+const KNOWN_CONTEXTS_PENDING_MAX_MS = 5 * 60_000
+
+/**
  * Config values arrive from the plugin UI as numbers, but a hand-edited
  * settings file can supply strings. Accept both, reject anything non-finite so
  * a bad value falls back to the default instead of poisoning arithmetic with NaN.
@@ -430,6 +439,27 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 interface KnownContexts {
   at: number
   contexts: Promise<ReadonlySet<string>>
+  /**
+   * Until the provider answers. Its query cannot be cancelled, so one that
+   * outlasts the caller's timeout is still running in the provider, and a
+   * second started beside it would only add to the load that made it slow.
+   */
+  pending: boolean
+}
+
+/**
+ * What the plugin remembers of a history provider's context lists between
+ * requests.
+ *
+ * `windowQueries` holds the start of each windowed query still running in the
+ * provider. Windowed queries are not cached, since each asks a different
+ * window (one ending now never repeats), but while one has outlasted its
+ * timeout nothing else asks, whatever its window: the provider is one store,
+ * and one too slow to answer in time would only fall further behind.
+ */
+interface HistoryContextCache {
+  current: KnownContexts | undefined
+  windowQueries?: Set<{ startedAt: number }>
 }
 
 /** A provider's context list as a set, with the `vessels.self` spelling resolved. */
@@ -457,63 +487,77 @@ async function historyKnowsContext(
   app: App,
   context: Context,
   debug: Debug,
-  cache: { current: KnownContexts | undefined },
+  cache: HistoryContextCache,
 ): Promise<boolean> {
-  const getHistoryApi = app.getHistoryApi
-  if (!getHistoryApi) {
-    return false
-  }
   try {
-    const now = Date.now()
-    // Reused while fresh, and shared while in flight: a burst of misses is one
-    // question to the provider, not one each. The promise is cached rather than
-    // its result so concurrent callers join the same query instead of starting
-    // their own.
-    //
-    // Resolving the provider is inside the cached promise, not before it: a
-    // slow or failing `getHistoryApi` would otherwise be paid per request, and
-    // could time out into a 404 for a vessel the cached list already knows.
-    const cached = cache.current
-    if (cached === undefined || now - cached.at >= KNOWN_CONTEXTS_TTL_MS) {
-      const contexts = withTimeout(
-        getHistoryApi(app.config?.settings?.historyApi?.defaultProvider)
-          .then((historyApi) =>
-            historyApi.getContexts
-              ? historyApi.getContexts({
-                  from: Temporal.Instant.from(new Date(EXISTENCE_PROBE_FROM_MS).toISOString()),
-                  to: Temporal.Instant.from(new Date(now).toISOString()),
-                })
-              : // A provider built against an older server-api has no such
-                // method. Nothing is known, and that is a cacheable answer.
-                [],
-          )
-          // Indexed once per fetch rather than scanned per request: the branch
-          // that consults this is the one an open route lets a client repeat
-          // without limit, and a provider on a busy install lists thousands of
-          // vessels. The `vessels.self` spelling at least one provider returns
-          // is resolved here, while `app.selfContext` is a single fixed value,
-          // so the lookup itself is a plain membership test.
-          .then((listed) => toContextSet(listed, app.selfContext)),
-        HISTORY_QUERY_TIMEOUT_MS,
-      )
-      // Dropped on failure so the next miss retries rather than inheriting a
-      // rejection for the rest of the window. The catch is attached here, not
-      // awaited, so a rejection never escapes as an unhandled one.
-      const entry: KnownContexts = { at: now, contexts }
-      contexts.catch(() => {
-        if (cache.current === entry) {
-          // Back-dated rather than dropped: the next miss after the failure
-          // window retries, while a burst inside it does not re-ask.
-          cache.current = { at: now - KNOWN_CONTEXTS_TTL_MS + KNOWN_CONTEXTS_FAILURE_TTL_MS, contexts }
-        }
-      })
-      cache.current = entry
-    }
-    return (await cache.current!.contexts).has(context)
+    return (await knownHistoryContexts(app, cache)).has(context)
   } catch (err) {
     debug(`History contexts unavailable for ${context}: ${errorDetail(err)}`)
     return false
   }
+}
+
+/**
+ * Every context a history provider holds anything for, from the cache.
+ *
+ * Reused while fresh, and shared while in flight: a burst of misses is one
+ * question to the provider, not one each. The promise is cached rather than
+ * its result so concurrent callers join the same query instead of starting
+ * their own, and a query is shared until the provider answers it, not only
+ * until the caller's timeout: the provider keeps running a query nobody waits
+ * for, so asking again on every timeout stacks scans of the whole database.
+ */
+function knownHistoryContexts(app: App, cache: HistoryContextCache): Promise<ReadonlySet<string>> {
+  const getHistoryApi = app.getHistoryApi
+  if (!getHistoryApi) {
+    return Promise.resolve(new Set())
+  }
+  const now = Date.now()
+  const cached = cache.current
+  const stale =
+    cached === undefined ||
+    (cached.pending ? now - cached.at >= KNOWN_CONTEXTS_PENDING_MAX_MS : now - cached.at >= KNOWN_CONTEXTS_TTL_MS)
+  if (stale) {
+    // Resolving the provider is inside the cached promise, not before it: a
+    // slow or failing `getHistoryApi` would otherwise be paid per request, and
+    // could time out into a 404 for a vessel the cached list already knows.
+    const contexts = getHistoryApi(app.config?.settings?.historyApi?.defaultProvider)
+      .then((historyApi) =>
+        historyApi.getContexts
+          ? historyApi.getContexts({
+              from: Temporal.Instant.from(new Date(EXISTENCE_PROBE_FROM_MS).toISOString()),
+              to: Temporal.Instant.from(new Date(now).toISOString()),
+            })
+          : // A provider built against an older server-api has no such
+            // method. Nothing is known, and that is a cacheable answer.
+            [],
+      )
+      // Indexed once per fetch rather than scanned per request: the branch
+      // that consults this is the one an open route lets a client repeat
+      // without limit, and a provider on a busy install lists thousands of
+      // vessels. The `vessels.self` spelling at least one provider returns
+      // is resolved here, while `app.selfContext` is a single fixed value,
+      // so the lookup itself is a plain membership test.
+      .then((listed) => toContextSet(listed, app.selfContext))
+    const entry: KnownContexts = { at: now, contexts, pending: true }
+    // Dated from the answer, so a list that took long to arrive is still
+    // reused for the whole window. A failure is back-dated instead: the next
+    // miss after the failure window retries, while a burst inside it does not
+    // re-ask. Both handlers are attached here, so a rejection never escapes
+    // as an unhandled one.
+    contexts.then(
+      () => {
+        entry.pending = false
+        entry.at = Date.now()
+      },
+      () => {
+        entry.pending = false
+        entry.at = Date.now() - KNOWN_CONTEXTS_TTL_MS + KNOWN_CONTEXTS_FAILURE_TTL_MS
+      },
+    )
+    cache.current = entry
+  }
+  return withTimeout(cache.current!.contexts, HISTORY_QUERY_TIMEOUT_MS)
 }
 
 /**
@@ -533,7 +577,7 @@ async function historyContextsIn(
   app: App,
   window: TimeWindow | undefined,
   debug: Debug,
-  cache: { current: KnownContexts | undefined },
+  cache: HistoryContextCache,
 ): Promise<ReadonlySet<string>> {
   const getHistoryApi = app.getHistoryApi
   if (!getHistoryApi) {
@@ -541,8 +585,26 @@ async function historyContextsIn(
   }
   try {
     if (!window) {
-      await historyKnowsContext(app, app.selfContext, debug, cache)
-      return (await cache.current?.contexts) ?? new Set()
+      return await knownHistoryContexts(app, cache)
+    }
+    const running = (cache.windowQueries ??= new Set())
+    const now = Date.now()
+    let slow = false
+    for (const entry of running) {
+      const age = now - entry.startedAt
+      // Given up on, as for the existence probe, so a query that never
+      // settles cannot switch windowed history off until a restart.
+      if (age >= KNOWN_CONTEXTS_PENDING_MAX_MS) {
+        running.delete(entry)
+      } else if (age >= HISTORY_QUERY_TIMEOUT_MS) {
+        slow = true
+      }
+    }
+    if (slow) {
+      if (debug.enabled) {
+        debug('History contexts skipped: an earlier windowed query is still running')
+      }
+      return new Set()
     }
     const historyApi = await withTimeout(
       getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
@@ -551,14 +613,15 @@ async function historyContextsIn(
     if (!historyApi.getContexts) {
       return new Set()
     }
-    const listed = await withTimeout(
-      historyApi.getContexts({
-        from: Temporal.Instant.from(new Date(Math.max(window.from, EXISTENCE_PROBE_FROM_MS)).toISOString()),
-        to: Temporal.Instant.from(new Date(window.to).toISOString()),
-      }),
-      HISTORY_QUERY_TIMEOUT_MS,
-    )
-    return toContextSet(listed, app.selfContext)
+    const query = historyApi.getContexts({
+      from: Temporal.Instant.from(new Date(Math.max(window.from, EXISTENCE_PROBE_FROM_MS)).toISOString()),
+      to: Temporal.Instant.from(new Date(window.to).toISOString()),
+    })
+    const entry = { startedAt: Date.now() }
+    running.add(entry)
+    const settled = () => running.delete(entry)
+    query.then(settled, settled)
+    return toContextSet(await withTimeout(query, HISTORY_QUERY_TIMEOUT_MS), app.selfContext)
   } catch (err) {
     if (debug.enabled) {
       debug(`History contexts unavailable: ${errorDetail(err)}`)
@@ -805,7 +868,7 @@ export default function ThePlugin(app: App): Plugin {
    * Per plugin instance rather than module-global: two instances would
    * otherwise answer from each other's provider.
    */
-  const knownContexts: { current: KnownContexts | undefined } = { current: undefined }
+  const knownContexts: HistoryContextCache = { current: undefined }
 
   /** The own vessel's navigation.state, or undefined when it reports none. */
   function getVesselState(): string | undefined {
@@ -1045,6 +1108,7 @@ export default function ThePlugin(app: App): Plugin {
       // A restart often follows a provider change; keeping the old list would
       // answer from a provider that is no longer the one installed.
       knownContexts.current = undefined
+      delete knownContexts.windowQueries
       // Release the file handle a sqlite store holds, so a plugin restart does
       // not leak it and the WAL gets checkpointed.
       //
