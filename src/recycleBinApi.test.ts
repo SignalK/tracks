@@ -3,7 +3,9 @@ import request from 'supertest'
 import { describe, expect, it } from 'vitest'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { HarnessOptions, TestHarness } from './harness.test-utils.js'
+import { toImportedTrack } from './importedTracks.js'
 import type { TrackApi, TrackImport } from './trackApi.js'
+import type { OnOverlap, TrackProvider } from './trackProvider.js'
 
 const MINUTE = 60_000
 const t0 = Date.now() - 60 * MINUTE
@@ -289,6 +291,9 @@ describe('recycle bin routes', () => {
     ))
 })
 
+const importOwn = (h: TestHarness, track: TrackImport, onOverlap: OnOverlap) =>
+  (h.trackProvider() as TrackProvider).importTrack(toImportedTrack(track), onOverlap)
+
 describe('an import of the own vessel', () => {
   const ownPassage = (times: number[], context: string = SELF_CONTEXT): TrackImport => ({
     type: 'Feature',
@@ -296,11 +301,55 @@ describe('an import of the own vessel', () => {
     properties: { coordTimes: [times.map(iso)], name: 'Before the plugin', context },
   })
 
-  it('replaces what was recorded over its time, binned so it can be restored', () =>
+  it('leaves what was recorded alone by default', () =>
     withHarness(async (h) => {
       seedFour(h)
       const provider = providerOf(h)
       const id = await provider.storeTrack(ownPassage([t0 + MINUTE, t0 + 2 * MINUTE - 10_000]))
+      expect(id).toBe(`recorded:${SELF_CONTEXT}`)
+      expect(await timesOf(provider, SELF_CONTEXT)).toEqual([0, 1, 2, 3].map((i) => iso(t0 + i * MINUTE)))
+      const bin = await request(h.app).get('/plugins/tracks/recycle-bin').expect(200)
+      expect(bin.body).toEqual([])
+    }))
+
+  it('fills only a stretch of at least five minutes with nothing recorded', () =>
+    withHarness(async (h) => {
+      const recorded = [0, 1, 2, 3, 20, 23].map((i) => t0 + i * MINUTE)
+      h.seedTrack(
+        SELF_CONTEXT,
+        recorded.map((_, i): [number, number] => [60 + i / 100, 24]),
+        recorded,
+      )
+      const provider = providerOf(h)
+      // 3 recorded, 16 in the 17-minute gap, and 2 in the 3-minute one.
+      const times = [...Array.from({ length: 19 }, (_, i) => t0 + (i + 1) * MINUTE), t0 + 21 * MINUTE, t0 + 22 * MINUTE]
+      const kept = await importOwn(h, ownPassage(times), 'keep')
+      expect(kept).toEqual({ id: `recorded:${SELF_CONTEXT}`, overlapping: 5 })
+      expect(await timesOf(provider, SELF_CONTEXT)).toEqual(
+        [...Array.from({ length: 20 }, (_, i) => t0 + i * MINUTE), t0 + 20 * MINUTE, t0 + 23 * MINUTE].map(iso),
+      )
+    }))
+
+  // TimeZero's exports repeat a few points across block seams.
+  it('writes points that two of its segments share only once', () =>
+    withHarness(async (h) => {
+      const provider = providerOf(h)
+      const times = [0, 1, 2, 3].map((i) => t0 + i * MINUTE)
+      const coordinates = times.map((_, i): [number, number] => [25, 61 + i / 100])
+      const seams: TrackImport = {
+        type: 'Feature',
+        geometry: { type: 'MultiLineString', coordinates: [coordinates.slice(0, 3), coordinates.slice(1)] },
+        properties: { coordTimes: [times.slice(0, 3).map(iso), times.slice(1).map(iso)], context: SELF_CONTEXT },
+      }
+      expect(await importOwn(h, seams, 'keep')).toEqual({ id: `recorded:${SELF_CONTEXT}`, overlapping: 2 })
+      expect(await timesOf(provider, SELF_CONTEXT)).toEqual(times.map(iso))
+    }))
+
+  it('replaces what was recorded over its time when asked, binned so it can be restored', () =>
+    withHarness(async (h) => {
+      seedFour(h)
+      const provider = providerOf(h)
+      const { id } = await importOwn(h, ownPassage([t0 + MINUTE, t0 + 2 * MINUTE - 10_000]), 'replace')
       expect(id).toBe(`recorded:${SELF_CONTEXT}`)
       expect(await timesOf(provider, SELF_CONTEXT)).toEqual([
         iso(t0),
@@ -340,26 +389,91 @@ describe('an import of the own vessel with a history provider installed', () => 
     rows: [0, 1, 2, 3].map((i) => [iso(t0 + i * MINUTE), [24, 60 + i / 100]]),
   }
 
+  const overHistory: TrackImport = {
+    type: 'Feature',
+    geometry: {
+      type: 'MultiLineString',
+      coordinates: [
+        [
+          [25, 61],
+          [25, 61.01],
+        ],
+      ],
+    },
+    properties: {
+      coordTimes: [[iso(t0 + MINUTE), iso(t0 + 2 * MINUTE)]],
+      context: SELF_CONTEXT,
+    },
+  }
+
+  it('does not draw over history by default', () =>
+    withHarness(
+      async (h) => {
+        const provider = providerOf(h)
+        await provider.storeTrack(overHistory)
+        const { features } = await provider.getTracks({ ...lastHours, contexts: [SELF_CONTEXT], times: true })
+        const lats = features.flatMap(({ geometry }) => (geometry?.coordinates ?? []).flat().map(([, lat]) => lat))
+        expect(lats).toEqual([60, 60.01, 60.02, 60.03])
+      },
+      { history },
+    ))
+
+  // An outage would read as one long gap, and the import would draw over it.
+  it('refuses to fill gaps while history cannot be read', () =>
+    withHarness(
+      async (h) => {
+        await expect(importOwn(h, overHistory, 'keep')).rejects.toThrow(/could not be read/)
+        expect(await importOwn(h, overHistory, 'replace')).toEqual({ id: `recorded:${SELF_CONTEXT}`, overlapping: 0 })
+      },
+      { history: { ...history, getValuesRejects: true } },
+    ))
+
+  // One window spanning both would coarsen the buckets to cover the days between.
+  it('reads history over each segment rather than across them', () => {
+    const asked: [number, number][] = []
+    const days = (n: number) => t0 - n * 24 * 60 * MINUTE
+    const twoPassages: TrackImport = {
+      ...overHistory,
+      geometry: {
+        type: 'MultiLineString',
+        coordinates: [
+          [
+            [25, 61],
+            [25, 61.01],
+          ],
+          [
+            [25, 61.02],
+            [25, 61.03],
+          ],
+        ],
+      },
+      properties: {
+        coordTimes: [
+          [iso(days(10)), iso(days(10) + MINUTE)],
+          [iso(t0 + MINUTE), iso(t0 + 2 * MINUTE)],
+        ],
+        context: SELF_CONTEXT,
+      },
+    }
+    return withHarness(
+      async (h) => {
+        await importOwn(h, twoPassages, 'keep')
+        expect(asked.map(([from, to]) => to - from)).toEqual([11 * MINUTE, 11 * MINUTE])
+      },
+      {
+        history: {
+          ...history,
+          onValues: ({ from, to }) => asked.push([Date.parse(from.toString()), Date.parse(to.toString())]),
+        },
+      },
+    )
+  })
+
   it('hides the history it replaces', () =>
     withHarness(
       async (h) => {
         const provider = providerOf(h)
-        await provider.storeTrack({
-          type: 'Feature',
-          geometry: {
-            type: 'MultiLineString',
-            coordinates: [
-              [
-                [25, 61],
-                [25, 61.01],
-              ],
-            ],
-          },
-          properties: {
-            coordTimes: [[iso(t0 + MINUTE), iso(t0 + 2 * MINUTE)]],
-            context: SELF_CONTEXT,
-          },
-        })
+        await importOwn(h, overHistory, 'replace')
         const { features } = await provider.getTracks({ ...lastHours, contexts: [SELF_CONTEXT], times: true })
         const lats = features.flatMap(({ geometry }) => (geometry?.coordinates ?? []).flat().map(([, lat]) => lat))
         expect(lats).toEqual([60, 61, 61.01, 60.03])

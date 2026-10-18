@@ -5,7 +5,7 @@ import { parseDuration } from './timeWindow.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '../public/bin.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
-import { imported, start as startImport } from '../public/import.js'
+import { imported, importQuery, start as startImport } from '../public/import.js'
 
 /**
  * The webapp ships as plain static files with no build step, so it cannot
@@ -917,6 +917,33 @@ describe('the import form', () => {
   it('says how many tracks it imported, and any points it left out', () => {
     expect(imported({ ids: ['a'], skippedPoints: 0 })).toBe('Imported 1 track.')
     expect(imported({ ids: ['a', 'b'], skippedPoints: 3 })).toBe('Imported 2 tracks. 3 points without a time left out.')
+    expect(imported({ ids: ['a'], skippedPoints: 0, overlappingPoints: 1 })).toBe(
+      'Imported 1 track. 1 point left out where your vessel already has a track.',
+    )
+  })
+
+  it('asks to replace a recording only for the own vessel', () => {
+    expect(importQuery({ self: false, replace: true })).toBe('')
+    expect(importQuery({ self: true, replace: false })).toBe('?self=true')
+    expect(importQuery({ self: true, replace: true })).toBe('?self=true&onOverlap=replace')
+  })
+
+  it('offers to replace a recording only while the own vessel is chosen', () => {
+    let changed = () => {}
+    const self = {
+      checked: false,
+      addEventListener: (_type: string, handler: () => void) => {
+        changed = handler
+      },
+    }
+    const replace = { checked: false, disabled: false }
+    const form = { elements: { self, replace }, querySelector: () => ({}), addEventListener: () => {} }
+    vi.stubGlobal('document', { getElementById: (id: string) => (id === 'import-form' ? form : {}) })
+    startImport()
+    expect(replace.disabled).toBe(true)
+    self.checked = true
+    changed()
+    expect(replace.disabled).toBe(false)
   })
 
   // Each upload stores the file anew, so a second submit would import it twice.
@@ -925,7 +952,11 @@ describe('the import form', () => {
     const status = { textContent: '', hidden: true, dataset: {} as Record<string, string> }
     let submit: (event: { preventDefault: () => void }) => Promise<void> = async () => {}
     const form = {
-      elements: { file: { files: [{ name: 'a.gpx' }] }, self: { checked: false } },
+      elements: {
+        file: { files: [{ name: 'a.gpx' }] },
+        self: { checked: false, addEventListener: () => {} },
+        replace: { checked: false, disabled: false },
+      },
       querySelector: () => button,
       addEventListener: (_type: string, handler: typeof submit) => {
         submit = handler

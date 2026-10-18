@@ -56,11 +56,15 @@ before that time was kept are dated to the first start of a version that keeps i
 A timed track of the own vessel is the exception: it is the boat's own passage, logged before
 the plugin was installed or by another plotter, so it is written into the own vessel's
 recording instead of being kept as an import, and the answer is the recording's id,
-`tracks:recorded:<context>`. It replaces what was recorded over the same time: the positions
-this plugin stored there go to the recycle bin first, one entry per segment, and a history
-provider's data over that time is hidden while the entry is there. Restoring the entry brings
-both back. An untimed track of the own vessel stays an import, since it cannot be placed in
-time.
+`tracks:recorded:<context>`. By default it only fills what the recording is missing: its
+points are used where the vessel has no position, from this plugin or a history provider, for
+at least five minutes, and left out elsewhere, so nothing recorded is overwritten and two
+sources are never interleaved minute by minute; while a history provider cannot be read, such an
+import is refused with a 503 rather than drawn over what it holds. Asked to replace instead, it takes the place of
+what was recorded over the same time: the positions this plugin stored there go to the recycle
+bin first, one entry per segment, and a history provider's data over that time is hidden while
+the entry is there. Restoring the entry brings both back. An untimed track of the own vessel
+stays an import, since it cannot be placed in time.
 
 A track with neither times (`coordTimes`) nor a vessel (`context`) is kept too. No time
 window or vessel query matches it, but `GET /plugins/tracks/imports` lists it with every other
@@ -73,9 +77,14 @@ with `POST /plugins/tracks/imports`, the file as the request body with `Content-
 application/gpx+xml`. Each track in the file becomes an imported track as above. Ticking
 **Tracks of my own vessel** (`?self=true`) files them under the own vessel, which writes a
 timed one into the recording; otherwise a track names a vessel only if the file says which, as
-the plugin's own GPX export does.
+the plugin's own GPX export does. Ticking **Replace what my vessel recorded over the same time**
+as well (`onOverlap=replace`; the default is `keep`) replaces the recording rather than filling
+it.
 
-In a timed track, points without a time are skipped, and the answer says how many. The route
+In a timed track, points without a time are skipped, and the answer says how many
+(`skippedPoints`), as it does for the points left out where the recording already has positions
+(`overlappingPoints`). A track posted through the Track API's `POST /signalk/v2/api/tracks` is
+always kept beside the recording this way, since that API has no such choice yet. The route
 needs write access on a Signal K server that lets a plugin say so, and administrator rights on
 an older one.
 

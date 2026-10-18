@@ -77,6 +77,12 @@ export interface TrackProviderDeps {
     window: TimeWindow | undefined,
     resolutionMs: number | undefined,
   ) => Promise<TimedPosition[]>
+  /**
+   * What the store and history hold for a context over a window, rejecting
+   * when history could not be read: an import that fills only the gaps
+   * cannot tell a gap from an outage.
+   */
+  recordedOver: (context: string, window: TimeWindow) => Promise<TimedPosition[]>
 }
 
 /** v2 sends `[west, south, east, north]`; a bounds here is `[lat, lng]` corners. */
@@ -182,7 +188,12 @@ const boundsOf = (points: TimedPosition[]): TracksRequest['bbox'] => {
   return [west, south, east, north]
 }
 
-export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
+/** The Track API provider, plus the import route's way in with an overlap choice. */
+export type TrackProvider = TrackApi & {
+  importTrack(track: ImportedTrack, onOverlap: OnOverlap): Promise<KeptTrack>
+}
+
+export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
   const matching = async (
     query: TracksRequest,
   ): Promise<{ tracks: Map<string, TimedPosition[]>; resolution: number | undefined }> => {
@@ -372,6 +383,19 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     return store as WritableStore
   }
 
+  const importTrack = (track: ImportedTrack, onOverlap: OnOverlap): Promise<KeptTrack> =>
+    keepTrack(
+      track,
+      {
+        store: writableStore(),
+        selfContext: deps.selfContext(),
+        historyKnows: deps.historyKnows,
+        recorded: (context, from, to) => deps.recordedOver(context, { from, to }),
+        deleted: deps.deleted,
+      },
+      onOverlap,
+    )
+
   /** The recorded feature's identity, which `getTracks` and `getTrack` share. */
   const recordedIdentity = (context: string): Omit<TrackProperties, 'pointCount'> => {
     const name = deps.contextName(context)
@@ -473,13 +497,10 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackApi {
     },
 
     async storeTrack(track: TrackImport): Promise<string> {
-      return keepTrack(toImportedTrack(track), {
-        store: writableStore(),
-        selfContext: deps.selfContext(),
-        historyKnows: deps.historyKnows,
-        deleted: deps.deleted,
-      })
+      return (await importTrack(toImportedTrack(track), 'keep')).id
     },
+
+    importTrack,
 
     async deleteTrack(id: string): Promise<boolean> {
       const recorded = recordedContext(id)
@@ -686,11 +707,34 @@ function extentEpsilon([west, south, east, north]: TrackBoundingBox): number {
   return Math.max(diagonal / AUTO_EPSILON_DIVISOR, MIN_AUTO_EPSILON)
 }
 
+/**
+ * What an import does where the vessel's recording already holds positions.
+ * `keep` leaves them alone and fills only the stretches with nothing; `replace`
+ * puts the import in their place, sending them to the recycle bin.
+ */
+export type OnOverlap = 'keep' | 'replace'
+
+/**
+ * The shortest stretch without positions that an import kept beside a
+ * recording may fill. Filling every pause between recorded points would
+ * interleave two sources minute by minute, and any offset between them would
+ * draw as a sawtooth; whole stretches keep each part of the line from one.
+ */
+export const MIN_FILLED_GAP_MS = 5 * 60_000
+
 export interface KeepTrackDeps {
   store: Required<Pick<TrackStore, 'storeImport' | 'recordTrack'>>
   selfContext: string
   historyKnows: (context: string) => Promise<boolean>
+  /** The vessel's positions over a window, from the store and history alike. */
+  recorded: (context: string, from: number, to: number) => Promise<TimedPosition[]>
   deleted: () => void
+}
+
+export interface KeptTrack {
+  id: string
+  /** Points left out because the vessel already had positions there. */
+  overlapping: number
 }
 
 /**
@@ -698,25 +742,125 @@ export interface KeepTrackDeps {
  *
  * A timed track of the own vessel is the vessel's own passage, from before
  * the plugin recorded it or from another plotter, so it is written into the
- * recording in place of what was recorded over the same time and answers
- * as `recorded:<context>`. Everything else is kept as an import: another
- * vessel's track is not this boat's recording, and an untimed one cannot be
- * placed in it.
+ * recording and answers as `recorded:<context>`: with `keep`, only where the
+ * recording has nothing (see {@link fillGaps}); with `replace`, in place of
+ * what was recorded over the same time. Everything else is kept as an import:
+ * another vessel's track is not this boat's recording, and an untimed one
+ * cannot be placed in it.
  */
-export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps): Promise<string> {
+export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOverlap: OnOverlap): Promise<KeptTrack> {
   const context = track.context === undefined ? undefined : resolveSelf(deps.selfContext)(track.context)
   if (context === deps.selfContext && isTimed(track)) {
     const segments = track.segments.map((points) =>
       points.map(({ position, timestamp }): TimedPosition => ({ position, timestamp: timestamp! })),
     )
+    if (onOverlap === 'keep') {
+      // Read per segment: one window spanning segments days apart would ask
+      // history for the days between and coarsen its buckets to fit. One at a
+      // time, so a file of many segments cannot fill the store's read queue,
+      // and each segment also yields to what earlier ones of the same file
+      // filled, so overlapping segments are not both written.
+      const runs: TimedPosition[][] = []
+      const filled: TimedPosition[] = []
+      let overlapping = 0
+      for (const points of segments) {
+        if (points.length === 0) {
+          continue
+        }
+        let from = Infinity
+        let to = -Infinity
+        for (const { timestamp } of points) {
+          from = Math.min(from, timestamp)
+          to = Math.max(to, timestamp)
+        }
+        from -= MIN_FILLED_GAP_MS
+        to += MIN_FILLED_GAP_MS
+        const recorded = await deps.recorded(context, from, to)
+        for (const point of filled) {
+          if (point.timestamp >= from && point.timestamp <= to) {
+            recorded.push(point)
+          }
+        }
+        const kept = fillGaps([points], recorded, MIN_FILLED_GAP_MS)
+        runs.push(...kept.runs)
+        filled.push(...kept.runs.flat())
+        overlapping += kept.overlapping
+      }
+      // Nothing is there to replace, so nothing goes to the recycle bin.
+      await deps.store.recordTrack(context, runs, Date.now(), false)
+      return { id: recordedId(context), overlapping }
+    }
     // As a delete does: the binned span has to hide what a history provider
     // holds there too, or the provider would draw the old passage beside it.
     await deps.store.recordTrack(context, segments, Date.now(), await deps.historyKnows(context))
     deps.deleted()
-    return recordedId(context)
+    return { id: recordedId(context), overlapping: 0 }
   }
   await deps.store.storeImport(track)
-  return track.id
+  return { id: track.id, overlapping: 0 }
+}
+
+/**
+ * The parts of an import that fall where a recording has nothing for at least
+ * `minGap`, as runs to record, and how many points were left out.
+ *
+ * Each recorded point covers its own instant, or a history bucket's whole
+ * span, so a coarse provider read still counts as covering the time between
+ * its buckets. A run never crosses a recorded stretch or a segment boundary.
+ */
+export function fillGaps(
+  segments: TimedPosition[][],
+  recorded: readonly TimedPosition[],
+  minGap: number,
+): { runs: TimedPosition[][]; overlapping: number } {
+  const covered: [number, number][] = []
+  for (const { timestamp, span } of [...recorded].sort((a, b) => a.timestamp - b.timestamp)) {
+    const end = timestamp + (span ?? 0)
+    const last = covered.at(-1)
+    if (last && timestamp <= last[1]) {
+      last[1] = Math.max(last[1], end)
+    } else {
+      covered.push([timestamp, end])
+    }
+  }
+  /** Index of the first covered stretch ending at or after `time`. */
+  const nextStretch = (time: number): number => {
+    let low = 0
+    let high = covered.length
+    while (low < high) {
+      const mid = (low + high) >> 1
+      if (covered[mid]![1] < time) low = mid + 1
+      else high = mid
+    }
+    return low
+  }
+  const runs: TimedPosition[][] = []
+  let overlapping = 0
+  for (const points of segments) {
+    let run: TimedPosition[] = []
+    let runGap = -1
+    for (const point of points) {
+      const next = nextStretch(point.timestamp)
+      const after = covered[next]
+      const before = covered[next - 1]
+      const inside = after !== undefined && after[0] <= point.timestamp
+      const free = (after?.[0] ?? Infinity) - (before?.[1] ?? -Infinity)
+      if (inside || free < minGap) {
+        overlapping += 1
+        if (run.length > 0) runs.push(run)
+        run = []
+        continue
+      }
+      if (run.length > 0 && next !== runGap) {
+        runs.push(run)
+        run = []
+      }
+      run.push(point)
+      runGap = next
+    }
+    if (run.length > 0) runs.push(run)
+  }
+  return { runs, overlapping }
 }
 
 /** v2 accepts the `self` alias; the store keys on the qualified context. */

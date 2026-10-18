@@ -10,12 +10,26 @@ import { refusal } from './bin.js'
 /** Relative, because the server mounts this page under /@signalk/tracks-plugin. */
 const IMPORT_URL = '../../plugins/tracks/imports'
 
+const points = (count) => `${count} point${count === 1 ? '' : 's'}`
+
 /** What an import came to, in words. */
-export function imported({ ids, skippedPoints }) {
-  const count = `Imported ${ids.length} track${ids.length === 1 ? '' : 's'}.`
-  return skippedPoints > 0
-    ? `${count} ${skippedPoints} point${skippedPoints === 1 ? '' : 's'} without a time left out.`
-    : count
+export function imported({ ids, skippedPoints, overlappingPoints = 0 }) {
+  return [
+    `Imported ${ids.length} track${ids.length === 1 ? '' : 's'}.`,
+    ...(skippedPoints > 0 ? [`${points(skippedPoints)} without a time left out.`] : []),
+    ...(overlappingPoints > 0 ? [`${points(overlappingPoints)} left out where your vessel already has a track.`] : []),
+  ].join(' ')
+}
+
+/**
+ * The upload's query. Only the own vessel's tracks go into a recording, so
+ * replacing is offered for those alone; the route keeps by default.
+ */
+export function importQuery({ self, replace }) {
+  if (!self) {
+    return ''
+  }
+  return replace ? '?self=true&onOverlap=replace' : '?self=true'
 }
 
 async function messageOf(response) {
@@ -31,6 +45,13 @@ export function start() {
   const form = document.getElementById('import-form')
   const status = document.getElementById('import-status')
   const button = form.querySelector('button[type="submit"]')
+  const { self, replace } = form.elements
+  // Only the own vessel has a recording to replace.
+  const allowReplace = () => {
+    replace.disabled = !self.checked
+  }
+  allowReplace()
+  self.addEventListener('change', allowReplace)
 
   function show(message, state) {
     // A failed upload can be tried again; a successful one reloads the page.
@@ -58,7 +79,7 @@ export function start() {
       show('Choose a GPX file first.', 'error')
       return
     }
-    const query = form.elements.self.checked ? '?self=true' : ''
+    const query = importQuery({ self: self.checked, replace: replace.checked })
     button.disabled = true
     show('Importing…')
     let response
