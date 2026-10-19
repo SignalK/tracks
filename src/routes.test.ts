@@ -791,15 +791,15 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     const h = (harness = createHarness({
       selfPosition: [60, 24],
       history: {
-        // Read once per getValues call, which every request makes on its way
-        // to the probe -- so this counts arrivals without a new harness knob.
-        get rows() {
+        // Once per request on its way to the history read, and once more for
+        // the probe: the ninth call means all eight are past the store.
+        onHistoryApi: () => {
           arrived += 1
-          if (arrived === 8) {
+          if (arrived === 9) {
             allArrived.release()
           }
-          return []
         },
+        rows: [],
         contexts: [],
         deferContexts: {
           release: gate.release,

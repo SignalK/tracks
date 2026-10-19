@@ -165,6 +165,15 @@ otherwise start at the Unix epoch. Instead the plugin first finds where the
 provider's positions begin and reads from there, within the same budget; when
 the provider has none in the window, it contributes nothing.
 
+A chart viewer asks again with the same window on every zoom and pan, and only
+its box changes, which the provider never sees. So a read is kept and reused
+for the same vessel, start and bucket width while the asked window ends no more
+than five minutes after it; the store covers those last minutes for any vessel
+it records. A read that is still running when a query gives up on it after five
+seconds is kept too: the History API cannot cancel it, so the next query waits
+for that read instead of starting a second one beside it, and gets its answer
+once it lands.
+
 ## Why the two never double up
 
 A provider aggregates into buckets and stamps each one on its boundary:

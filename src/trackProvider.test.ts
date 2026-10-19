@@ -996,6 +996,76 @@ describe('bounded history reads', () => {
   })
 })
 
+describe('repeated history reads', () => {
+  const MINUTE = 60_000
+  const DAY = 24 * 60 * MINUTE
+  const rowAt = (timestamp: number, [lat, lng]: [number, number]) => [new Date(timestamp).toISOString(), [lng, lat]]
+  const from = Temporal.Instant.fromEpochMilliseconds(Date.now() - 400 * DAY)
+  const rows = [rowAt(Date.now() - 300 * DAY, [10, 20]), rowAt(Date.now() - 200 * DAY, [10.5, 20.5])]
+
+  // A viewer asks again with the same window on every zoom and pan.
+  it('asks the provider once for a window asked again with another box', async () => {
+    const asked: HistoryValuesQuery[] = []
+    const h = createHarness({
+      history: { contexts: [OTHER_CONTEXT], rows, aggregatesFirst: true, onValues: (query) => asked.push(query) },
+    })
+    try {
+      const provider = providerOf(h)
+      const wide = await provider.getTracks({ from, contexts: [OTHER_CONTEXT], bbox: [19, 9, 21, 11] })
+      const close = await provider.getTracks({ from, contexts: [OTHER_CONTEXT], bbox: [19.9, 9.9, 20.1, 10.1] })
+      expect(wide.features.map((f) => f.properties.pointCount)).toEqual([2])
+      expect(close.features.map((f) => f.properties.pointCount)).toEqual([2])
+      expect(asked).toHaveLength(1)
+    } finally {
+      await h.stop()
+    }
+  })
+
+  // The History API cannot cancel a read, so asking again would only stack a
+  // second scan beside the first.
+  it('waits for a read that outlasted its timeout instead of asking again', async () => {
+    const asked: HistoryValuesQuery[] = []
+    const h = createHarness({
+      history: {
+        contexts: [OTHER_CONTEXT],
+        rows,
+        aggregatesFirst: true,
+        // Just past the five-second timeout, so the second request finds it
+        // still running.
+        valuesDelayMs: 6500,
+        onValues: (query) => asked.push(query),
+      },
+    })
+    try {
+      const provider = providerOf(h)
+      expect((await provider.getTracks({ from, contexts: [OTHER_CONTEXT] })).features).toEqual([])
+      const second = await provider.getTracks({ from, contexts: [OTHER_CONTEXT] })
+      expect(second.features.map((f) => f.properties.pointCount)).toEqual([2])
+      expect(asked).toHaveLength(1)
+    } finally {
+      await h.stop()
+    }
+  }, 30_000)
+
+  it('asks again once the window ends well past the read', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const asked: HistoryValuesQuery[] = []
+    const h = createHarness({
+      history: { contexts: [OTHER_CONTEXT], rows, aggregatesFirst: true, onValues: (query) => asked.push(query) },
+    })
+    try {
+      const provider = providerOf(h)
+      await provider.getTracks({ from, contexts: [OTHER_CONTEXT] })
+      vi.setSystemTime(Date.now() + 10 * MINUTE)
+      await provider.getTracks({ from, contexts: [OTHER_CONTEXT] })
+      expect(asked).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+      await h.stop()
+    }
+  })
+})
+
 describe('getTrackContexts', () => {
   // A store matches on the *last* position, so a context can pass the spatial
   // filter and still have nothing inside the time window. Listing it while

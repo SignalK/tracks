@@ -126,6 +126,8 @@ export interface HarnessOptions {
      * only the earliest of `rows` in each bucket of the asked resolution.
      */
     aggregatesFirst?: boolean
+    /** Answer each `getValues` this long after it is asked, as a provider scanning years does. */
+    valuesDelayMs?: number
     /** Called with every `getValues` query, so a test can see what was asked. */
     onValues?: (query: HistoryValuesQuery) => void
     /**
@@ -133,6 +135,8 @@ export interface HarnessOptions {
      * registered — the default install, and not an outage.
      */
     noProvider?: boolean
+    /** Called on every `getHistoryApi`, which each request makes on its way to history. */
+    onHistoryApi?: () => void
     /** Never resolve `getHistoryApi`: a registered provider that wedges. */
     providerHangs?: boolean
   }
@@ -197,17 +201,23 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     ...(options.history === undefined
       ? {}
       : {
-          getHistoryApi: () =>
-            options.history?.providerHangs === true
+          getHistoryApi: () => {
+            options.history?.onHistoryApi?.()
+            return options.history?.providerHangs === true
               ? new Promise<never>(() => undefined)
               : options.history?.noProvider === true
                 ? Promise.reject(new Error('No history api provider configured'))
                 : Promise.resolve({
                     getValues: (query: HistoryValuesQuery) => {
                       options.history?.onValues?.(query)
+                      const delay = options.history?.valuesDelayMs ?? 0
+                      const later = <T>(value: T): Promise<T> =>
+                        delay > 0
+                          ? new Promise((resolve) => setTimeout(() => resolve(value), delay))
+                          : Promise.resolve(value)
                       return options.history?.getValuesRejects === true
                         ? Promise.reject(new Error('history provider unavailable'))
-                        : Promise.resolve({
+                        : later({
                             context: selfContext,
                             range: { from: '', to: '' },
                             values: [],
@@ -240,7 +250,8 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
                             return deferred ? deferred.wait.then(() => answer) : Promise.resolve(answer)
                           },
                         }),
-                  }),
+                  })
+          },
         }),
     ...(options.withoutTrackApi
       ? {}
