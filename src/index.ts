@@ -349,6 +349,107 @@ const KNOWN_CONTEXTS_FAILURE_TTL_MS = 1_000
 const KNOWN_CONTEXTS_PENDING_MAX_MS = 5 * 60_000
 
 /**
+ * How far a request's end may run past a history read's end and still reuse
+ * that read.
+ *
+ * A viewer refetches on every zoom and pan with the same window, and over
+ * years of history the provider's read is the slow part of each answer. What
+ * a reused read misses is its last few minutes, which the store holds for
+ * any vessel it records.
+ */
+const HISTORY_REUSE_MS = 5 * 60_000
+
+/** The most history positions kept for reuse across all reads. */
+const HISTORY_REUSE_MAX_POINTS = 200_000
+
+interface HistoryRead {
+  to: number
+  startedAt: number
+  /** Settled reads only: when they settled, and how many positions they hold. */
+  settledAt?: number
+  size?: number
+  points: Promise<TimedPosition[]>
+}
+
+/**
+ * History reads by context, start and bucket width, held so a repeated read
+ * joins or reuses the one before it instead of asking the provider again.
+ *
+ * A read outlasting the caller's timeout keeps running in the provider, since
+ * the History API cannot cancel it. Kept here, it is what the next request
+ * gets when it lands, rather than a second read stacked beside the first.
+ */
+class HistoryReads {
+  private reads = new Map<string, HistoryRead>()
+
+  get(key: string, to: number, now: number): Promise<TimedPosition[]> | undefined {
+    const read = this.reads.get(key)
+    if (!read) {
+      return undefined
+    }
+    if (to - read.to > HISTORY_REUSE_MS || !this.fresh(read, now)) {
+      this.reads.delete(key)
+      return undefined
+    }
+    // Most recently used last, so the budget evicts the oldest first.
+    this.reads.delete(key)
+    this.reads.set(key, read)
+    return read.points
+  }
+
+  add(key: string, to: number, now: number, points: Promise<TimedPosition[]>): void {
+    // Swept here, since a window that moves with every request, such as the
+    // last hour, never asks for its own read again.
+    for (const [stale, read] of this.reads) {
+      if (!this.fresh(read, now)) this.reads.delete(stale)
+    }
+    const read: HistoryRead = { to, startedAt: now, points }
+    this.reads.set(key, read)
+    points.then(
+      (settled) => {
+        if (this.reads.get(key) !== read) {
+          return
+        }
+        read.settledAt = Date.now()
+        read.size = settled.length
+        this.evict()
+      },
+      () => {
+        if (this.reads.get(key) === read) {
+          this.reads.delete(key)
+        }
+      },
+    )
+  }
+
+  /**
+   * A settled read is reused for a while; one still running is joined until
+   * the bound that also covers a context query that never settles.
+   */
+  private fresh(read: HistoryRead, now: number): boolean {
+    return read.settledAt === undefined
+      ? now - read.startedAt < KNOWN_CONTEXTS_PENDING_MAX_MS
+      : now - read.settledAt < HISTORY_REUSE_MS
+  }
+
+  clear(): void {
+    this.reads.clear()
+  }
+
+  private evict(): void {
+    let total = 0
+    for (const { size } of this.reads.values()) total += size ?? 0
+    for (const [key, { size }] of this.reads) {
+      if (total <= HISTORY_REUSE_MAX_POINTS) break
+      if (size !== undefined) {
+        this.reads.delete(key)
+        total -= size
+      }
+    }
+  }
+}
+
+/**
  * Config values arrive from the plugin UI as numbers, but a hand-edited
  * settings file can supply strings. Accept both, reject anything non-finite so
  * a bad value falls back to the default instead of poisoning arithmetic with NaN.
@@ -644,6 +745,7 @@ async function historyPositions(
   window: TimeWindow,
   resolutionMs: number,
   debug: Debug,
+  reads: HistoryReads,
 ): Promise<{ points: TimedPosition[]; resolutionMs: number; coarsened: boolean; failed: boolean }> {
   // The API takes whole seconds, so the width the provider actually bucketed
   // by is not necessarily the one asked for. Reconciling on the requested
@@ -683,39 +785,46 @@ async function historyPositions(
     return none(timedOut)
   }
   const read = async (from: number, seconds: number, throughEnd = false): Promise<TimedPosition[]> => {
-    const response = await withTimeout(
-      historyApi.getValues({
-        context,
-        // Instants, not ISO strings: providers call Instant methods on these.
-        from: Temporal.Instant.from(new Date(from).toISOString()),
-        to: Temporal.Instant.from(new Date(window.to).toISOString()),
-        pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
-        resolution: seconds,
-      }),
-      HISTORY_QUERY_TIMEOUT_MS,
-    )
-    const points: TimedPosition[] = []
-    for (const row of response?.data ?? []) {
-      const position = historyRowPosition(row)
-      // A row with no position means the provider had none for that bucket,
-      // which is what lets the store fill it.
-      if (position) {
-        const timestamp = historyRowTimestamp(row)
-        // Clipped to the window rather than trusted: a provider that returns a
-        // wider range would otherwise widen the answer beyond what was asked.
-        // Matching the stores, which treat a window without `inclusiveEnd`
-        // as half-open so consecutive bands tile without repeating the point
-        // they share. Clipping inclusively here would reintroduce exactly
-        // that duplicate from the provider side.
-        const withinEnd = window.inclusiveEnd || throughEnd ? timestamp <= window.to : timestamp < window.to
-        if (timestamp >= window.from && withinEnd) {
-          // A bucket, not a fix: its width keeps segment() from reading the
-          // spacing between buckets as a stop in the recording.
-          points.push({ position, timestamp, span: seconds * 1000 })
-        }
-      }
+    const key = `${context}|${from}|${seconds}`
+    const now = Date.now()
+    let points = reads.get(key, window.to, now)
+    if (!points) {
+      points = historyApi
+        .getValues({
+          context,
+          // Instants, not ISO strings: providers call Instant methods on these.
+          from: Temporal.Instant.from(new Date(from).toISOString()),
+          to: Temporal.Instant.from(new Date(window.to).toISOString()),
+          pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
+          resolution: seconds,
+        })
+        .then((response) => {
+          const parsed: TimedPosition[] = []
+          for (const row of response?.data ?? []) {
+            const position = historyRowPosition(row)
+            // A row with no position means the provider had none for that
+            // bucket, which is what lets the store fill it.
+            if (position) {
+              // A bucket, not a fix: its width keeps segment() from reading
+              // the spacing between buckets as a stop in the recording.
+              parsed.push({ position, timestamp: historyRowTimestamp(row), span: seconds * 1000 })
+            }
+          }
+          return parsed
+        })
+      reads.add(key, window.to, now, points)
     }
-    return points
+    const read = await withTimeout(points, HISTORY_QUERY_TIMEOUT_MS)
+    // Clipped to the window rather than trusted: a provider that returns a
+    // wider range would otherwise widen the answer beyond what was asked, and
+    // a reused read may reach past this window's end. Matching the stores,
+    // which treat a window without `inclusiveEnd` as half-open so consecutive
+    // bands tile without repeating the point they share. Clipping inclusively
+    // here would reintroduce exactly that duplicate from the provider side.
+    const inclusive = window.inclusiveEnd || throughEnd
+    return read.filter(
+      ({ timestamp }) => timestamp >= window.from && (inclusive ? timestamp <= window.to : timestamp < window.to),
+    )
   }
   try {
     // A window with only an end starts at minus infinity, which no Date can
@@ -854,7 +963,7 @@ export default function ThePlugin(app: App): Plugin {
     window: TimeWindow,
     resolutionMs: number,
   ): ReturnType<typeof historyPositions> {
-    const history = await historyPositions(app, context, window, resolutionMs, app.debug)
+    const history = await historyPositions(app, context, window, resolutionMs, app.debug, historyReads)
     // Nothing to hide, and no reason to let a store error fail the read.
     if (history.points.length === 0) {
       return history
@@ -872,6 +981,7 @@ export default function ThePlugin(app: App): Plugin {
    * otherwise answer from each other's provider.
    */
   const knownContexts: HistoryContextCache = { current: undefined }
+  const historyReads = new HistoryReads()
 
   /** The own vessel's navigation.state, or undefined when it reports none. */
   function getVesselState(): string | undefined {
@@ -1130,6 +1240,7 @@ export default function ThePlugin(app: App): Plugin {
       // answer from a provider that is no longer the one installed.
       knownContexts.current = undefined
       delete knownContexts.windowQueries
+      historyReads.clear()
       // Release the file handle a sqlite store holds, so a plugin restart does
       // not leak it and the WAL gets checkpointed.
       //
