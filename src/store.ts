@@ -32,8 +32,15 @@ import type { TrackQuery } from './timeWindow.js'
  * so a caller can filter it afterwards.
  */
 export interface TrackStore {
-  /** Record a position for a context. `timestamp` defaults to now. */
-  newPosition(context: Context, position: LatLngTuple, timestamp?: number): void
+  /**
+   * Record a position for a context. `timestamp` defaults to now.
+   *
+   * `resolution`, when finer than the store's own, records this position at
+   * that spacing instead: the own vessel at anchor, whose swing is the detail
+   * worth keeping. A store that keeps such detail thins it back to its own
+   * resolution once it is old.
+   */
+  newPosition(context: Context, position: LatLngTuple, timestamp?: number, resolution?: number): void
 
   /**
    * Seed a context's track, replacing whatever it held.

@@ -216,6 +216,118 @@ describe('clip reads', () => {
   })
 })
 
+describe('detail at anchor', () => {
+  const MINUTE = 60_000
+  const DAY = 24 * 60 * MINUTE
+  const self = 'vessels.self' as Context
+
+  /** Ten minutes of one fix a second, recorded finer than the store's minute. */
+  const anchored = (store: SqliteTrackStore, from: number) => {
+    for (let i = 0; i < 600; i++) {
+      store.newPosition(self, [60 + i * 1e-6, 24], from + i * 1000, 1000)
+    }
+  }
+
+  it('keeps the detail while it is recent', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE }, debug)
+    try {
+      const now = Date.now()
+      anchored(store, now - DAY)
+      store.prune(Infinity, self, now)
+      await expect(store.getTimed(self)).resolves.toHaveLength(600)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('thins it back to the store resolution once it is old, and nothing else', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE }, debug)
+    try {
+      const now = Date.now()
+      const from = now - 30 * DAY
+      anchored(store, from)
+      // Just as dense, but imported rather than recorded at anchor.
+      const imported = Array.from({ length: 600 }, (_, i) => from - DAY + i * 1000)
+      store.recordTrack(
+        self,
+        [imported.map((timestamp) => ({ position: [59, 23] as LatLngTuple, timestamp }))],
+        now,
+        false,
+      )
+      store.prune(Infinity, self, now)
+      const points = await store.getTimed(self)
+      // One a minute, give or take where the minutes fall.
+      expect(points.filter(({ timestamp }) => timestamp >= from).length).toBeGreaterThanOrEqual(10)
+      expect(points.filter(({ timestamp }) => timestamp >= from).length).toBeLessThanOrEqual(12)
+      expect(points.filter(({ timestamp }) => timestamp < from)).toHaveLength(600)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('thins the old part of a stay at anchor that has not ended', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE }, debug)
+    try {
+      const now = Date.now()
+      // Every second until a span's join gap would split it, from long ago
+      // up to now.
+      // Each pair sits inside one minute, so thinning to a minute keeps one of it.
+      for (let t = Math.floor((now - 8 * DAY) / MINUTE) * MINUTE + 10_000; t <= now; t += 5 * MINUTE) {
+        store.newPosition(self, [60, 24], t, 1000)
+        store.newPosition(self, [60, 24], t + 1000, 1000)
+      }
+      store.prune(Infinity, self, now)
+      const points = await store.getTimed(self)
+      // Detail is kept from the bucket edge at or before seven days ago.
+      const kept = Math.floor((now - 7 * DAY) / MINUTE) * MINUTE
+      const old = points.filter(({ timestamp }) => timestamp < kept)
+      const recent = points.filter(({ timestamp }) => timestamp >= kept)
+      expect(old.every(({ timestamp }, i) => i === 0 || timestamp - old[i - 1]!.timestamp > 1000)).toBe(true)
+      expect(recent.some(({ timestamp }, i) => i > 0 && timestamp - recent[i - 1]!.timestamp === 1000)).toBe(true)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('leaves an import written over a stay at anchor unthinned', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE }, debug)
+    try {
+      const now = Date.now()
+      const from = now - 30 * DAY
+      anchored(store, from)
+      // The middle of the stay replaced by an import, just as dense.
+      const imported = Array.from({ length: 120 }, (_, i) => ({
+        position: [61, 25 + i * 1e-6] as [number, number],
+        timestamp: from + 4 * MINUTE + i * 1000,
+      }))
+      store.recordTrack(self, [imported], now, false)
+      store.prune(Infinity, self, now)
+      const points = await store.getTimed(self)
+      expect(points.filter(({ position }) => position[0] === 61)).toHaveLength(120)
+      expect(points.filter(({ position }) => position[0] === 60).length).toBeLessThan(20)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('thins detail recorded before a restart', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-detail-'))
+    const file = join(dir, 'tracks.db')
+    try {
+      const now = Date.now()
+      const first = new SqliteTrackStore({ file, resolution: MINUTE }, debug)
+      anchored(first, now - 30 * DAY)
+      first.close()
+      const second = new SqliteTrackStore({ file, resolution: MINUTE }, debug)
+      second.prune(Infinity, self, now)
+      expect((await second.getTimed(self)).length).toBeLessThanOrEqual(12)
+      second.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('splitAtAntimeridian', () => {
   it('leaves an ordinary bounds alone', () => {
     const bounds: GeoBounds = { sw: [60, 24], ne: [61, 26] }

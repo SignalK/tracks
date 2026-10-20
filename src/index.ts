@@ -228,6 +228,10 @@ interface TracksPluginConfig {
 const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
 
 const DEFAULT_RESOLUTION = 60000
+// The own vessel's spacing while navigation.state is `anchored`: fine enough
+// to draw its swing around the anchor, which the normal resolution misses.
+// The store thins it back to the normal resolution once it is old.
+const ANCHORED_RESOLUTION_MS = 1000
 // How long the positions of a vessel other than the own one are kept. The own
 // vessel is never dropped — see TrackStore.prune. A month is long enough that a
 // passage last week is still there to compare against, and short enough that a
@@ -1115,7 +1119,8 @@ export default function ThePlugin(app: App): Plugin {
           // Read per delta rather than subscribed to: navigation.state changes
           // rarely, and the current value is what matters at the moment a
           // position arrives.
-          if (!stateGate.accept(update.context, getVesselState())) {
+          const state = getVesselState()
+          if (!stateGate.accept(update.context, state)) {
             return
           }
           // Filtered here rather than in each store: both would otherwise need
@@ -1123,7 +1128,8 @@ export default function ThePlugin(app: App): Plugin {
           if (!glitchFilter.accept(update.context, position, timestamp ?? Date.now())) {
             return
           }
-          tracks?.newPosition(update.context, position, timestamp)
+          const anchored = update.context === app.selfContext && state === 'anchored'
+          tracks?.newPosition(update.context, position, timestamp, anchored ? ANCHORED_RESOLUTION_MS : undefined)
         }),
       )
       // Set in days, since it is about how long another vessel's track stays

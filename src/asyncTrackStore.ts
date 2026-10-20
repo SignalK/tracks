@@ -298,11 +298,12 @@ export class AsyncTrackStore implements TrackStore {
     this.schedule()
   }
 
-  newPosition(context: Context, position: LatLngTuple, timestamp = Date.now()): void {
+  newPosition(context: Context, position: LatLngTuple, timestamp = Date.now(), resolution?: number): void {
+    const spacing = resolution === undefined ? this.resolution : Math.min(resolution, this.resolution)
     const previous = this.admitted.get(context)
-    if (this.resolution > 0 && previous !== undefined && timestamp - previous < this.resolution) return
+    if (spacing > 0 && previous !== undefined && timestamp - previous < spacing) return
     const sequence = this.sequence
-    void this.enqueue('newPosition', [context, position, timestamp], 'write')
+    void this.enqueue('newPosition', [context, position, timestamp, resolution], 'write')
     // Dropped positions must not suppress the first fix after recovery.
     if (this.sequence !== sequence && this.resolution > 0) this.admitted.set(context, timestamp)
   }

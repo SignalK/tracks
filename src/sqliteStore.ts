@@ -175,6 +175,15 @@ export interface SqliteStoreConfig {
 }
 
 const DEFAULT_MAX_CELLS = 8
+/**
+ * How long a stretch recorded finer than the store's resolution keeps that
+ * detail. The swing around an anchor matters while the boat lies there and
+ * for a while after, not for the rest of the season.
+ */
+const DETAIL_KEEP = 7 * 24 * 60 * 60 * 1000
+/** Fixes further apart than this start a new detail span. */
+const DETAIL_JOIN_GAP = 10 * 60 * 1000
+const DETAIL_SAVE_INTERVAL = 60 * 1000
 const DEFAULT_SEGMENT_GAP = 5 * 60 * 1000
 /**
  * How far apart two fixes inside a clipping box may be and still be read as
@@ -217,6 +226,8 @@ export class SqliteTrackStore implements TrackStore {
    * row that has not changed.
    */
   private readonly lastName = new Map<string, { name: string; timestamp: number }>()
+  /** The detail span each context is in, if any; see `noteDetail`. */
+  private readonly detail = new Map<string, { id: number; end: number; saved: number }>()
 
   constructor(config: SqliteStoreConfig, debug: Debug) {
     this.maxCells = config.maxCells ?? DEFAULT_MAX_CELLS
@@ -337,6 +348,14 @@ export class SqliteTrackStore implements TrackStore {
         lon       REAL    NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_binned_imported_points ON binned_imported_points(bin_id);
+      -- Stretches recorded finer than the store's resolution, thinned back to
+      -- it once they are old; see noteDetail and prune.
+      CREATE TABLE IF NOT EXISTS detail_spans (
+        id          INTEGER PRIMARY KEY,
+        context     TEXT    NOT NULL,
+        span_start  INTEGER NOT NULL,
+        span_end    INTEGER NOT NULL
+      );
     `)
     // Imports kept before their time was: dated to the first start that knew to.
     const now = Date.now()
@@ -360,21 +379,51 @@ export class SqliteTrackStore implements TrackStore {
     )
   }
 
-  newPosition(context: Context, position: LatLngTuple, timestamp: number = Date.now()): void {
+  newPosition(context: Context, position: LatLngTuple, timestamp: number = Date.now(), resolution?: number): void {
     // Leading-edge throttle per context, matching the in-memory accumulator's
     // throttleTime: the first position in a resolution window is stored and the
     // rest are dropped, not averaged. A vessel emitting at 8 Hz would otherwise
     // write hundreds of thousands of rows a day at the default 60s resolution.
     if (this.resolution > 0) {
+      const spacing = resolution === undefined ? this.resolution : Math.min(resolution, this.resolution)
       const previous = this.lastStored.get(context)
       // `<` not `<=`: two positions sharing a timestamp are the same instant,
       // and a stored point must not block one that is genuinely later.
-      if (previous !== undefined && timestamp - previous < this.resolution) {
+      if (previous !== undefined && timestamp - previous < spacing) {
         return
+      }
+      if (previous !== undefined && timestamp - previous < this.resolution) {
+        this.noteDetail(context, previous, timestamp)
       }
       this.lastStored.set(context, timestamp)
     }
     this.store(context, position, timestamp)
+  }
+
+  /**
+   * Remember that a context was recorded finer than the store's resolution from
+   * `previous` to `timestamp`, so `prune()` can thin that stretch once it is old.
+   *
+   * Kept as spans rather than inferred from row spacing: an own-vessel
+   * passage imported into the recording can be just as dense, and it is not
+   * this store's to thin. The span's end is written at most once a minute,
+   * since at anchor this runs every second; a restart loses at most that
+   * minute, which then simply stays at full detail.
+   */
+  private noteDetail(context: Context, previous: number, timestamp: number): void {
+    const open = this.detail.get(context)
+    if (open && timestamp - open.end <= DETAIL_JOIN_GAP) {
+      open.end = timestamp
+      if (timestamp - open.saved >= DETAIL_SAVE_INTERVAL) {
+        this.db.prepare('UPDATE detail_spans SET span_end = ? WHERE id = ?').run(timestamp, open.id)
+        open.saved = timestamp
+      }
+      return
+    }
+    const { lastInsertRowid } = this.db
+      .prepare('INSERT INTO detail_spans (context, span_start, span_end) VALUES (?, ?, ?)')
+      .run(context, previous, timestamp)
+    this.detail.set(context, { id: Number(lastInsertRowid), end: timestamp, saved: timestamp })
   }
 
   private store(context: Context, position: LatLngTuple, timestamp: number): void {
@@ -721,6 +770,8 @@ export class SqliteTrackStore implements TrackStore {
     for (const { context } of dropped) {
       this.db.prepare('DELETE FROM names WHERE context = ?').run(context)
       this.lastName.delete(context)
+      this.db.prepare('DELETE FROM detail_spans WHERE context = ?').run(context)
+      this.detail.delete(context)
     }
     // The write-throttle map is keyed by context and nothing else clears it, so
     // without this every vessel that ever passed leaves an entry behind — an
@@ -748,6 +799,57 @@ export class SqliteTrackStore implements TrackStore {
         this.db.prepare('DELETE FROM positions WHERE timestamp < ?').run(oldest)
       } else {
         this.db.prepare('DELETE FROM positions WHERE timestamp < ? AND context IS ?').run(oldest, keep)
+      }
+    }
+    this.thinOldDetail(now)
+  }
+
+  /**
+   * Thin what each detail span holds older than `DETAIL_KEEP` back to the
+   * store's resolution, keeping the first position of every resolution bucket, so a
+   * season at anchor costs what the recording would have without it.
+   */
+  private thinOldDetail(now: number): void {
+    if (this.resolution <= 0) {
+      return
+    }
+    const extend = this.db.prepare('UPDATE detail_spans SET span_end = ? WHERE id = ?')
+    for (const open of this.detail.values()) {
+      extend.run(open.end, open.id)
+      open.saved = open.end
+    }
+    // Each span's old part, including a span still being recorded: a boat
+    // can lie at anchor for longer than the detail is kept.
+    // On a bucket edge, so the hourly prune of a span still being recorded
+    // never splits a bucket between two runs and keeps two rows of it.
+    const cutoff = Math.floor((now - DETAIL_KEEP) / this.resolution) * this.resolution
+    const spans = this.db
+      .prepare('SELECT id, context, span_start AS start, span_end AS end FROM detail_spans WHERE span_start < ?')
+      .all(cutoff) as unknown as { id: number; context: string; start: number; end: number }[]
+    // A bare column next to a single min() comes from the row holding the
+    // minimum, so this keeps the first row of each bucket. Bound as an
+    // integer, or SQLite divides as REAL and every row is its own bucket.
+    const thin = this.db.prepare(
+      `DELETE FROM positions WHERE context = ?1 AND timestamp >= ?2 AND timestamp <= ?3 AND rowid NOT IN (
+         SELECT id FROM (
+           SELECT rowid AS id, min(timestamp) FROM positions
+           WHERE context = ?1 AND timestamp >= ?2 AND timestamp <= ?3
+           GROUP BY timestamp / CAST(?4 AS INTEGER)
+         )
+       )`,
+    )
+    const done = this.db.prepare('DELETE FROM detail_spans WHERE id = ?')
+    const shorten = this.db.prepare('UPDATE detail_spans SET span_start = ? WHERE id = ?')
+    for (const { id, context, start, end } of spans) {
+      if (end < cutoff) {
+        thin.run(context, start, end, this.resolution)
+        done.run(id)
+        if (this.detail.get(context)?.id === id) {
+          this.detail.delete(context)
+        }
+      } else {
+        thin.run(context, start, cutoff - 1, this.resolution)
+        shorten.run(cutoff, id)
       }
     }
   }
@@ -824,6 +926,7 @@ export class SqliteTrackStore implements TrackStore {
       if (first === undefined || last === undefined) continue
       const { id } = this.binRecorded(context, first.timestamp, last.timestamp, deletedAt, keepEmpty)
       if (id !== undefined) binned.push(id)
+      this.excludeFromDetail(context, first.timestamp, last.timestamp)
     }
     for (const points of segments) {
       for (const { position, timestamp } of points) {
@@ -831,6 +934,38 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     return binned
+  }
+
+  /**
+   * Take `[from, to]` out of a context's detail spans: an import written into
+   * the recording there is kept as imported, never thinned as detail.
+   */
+  private excludeFromDetail(context: Context, from: number, to: number): void {
+    const open = this.detail.get(context)
+    if (open) {
+      this.db.prepare('UPDATE detail_spans SET span_end = ? WHERE id = ?').run(open.end, open.id)
+    }
+    const spans = this.db
+      .prepare(
+        'SELECT id, span_start AS start, span_end AS end FROM detail_spans WHERE context = ? AND span_start <= ? AND span_end >= ?',
+      )
+      .all(context, to, from) as unknown as { id: number; start: number; end: number }[]
+    const remove = this.db.prepare('DELETE FROM detail_spans WHERE id = ?')
+    const insert = this.db.prepare('INSERT INTO detail_spans (context, span_start, span_end) VALUES (?, ?, ?)')
+    for (const { id, start, end } of spans) {
+      remove.run(id)
+      if (start < from) {
+        insert.run(context, start, from - 1)
+      }
+      const tail = end > to ? Number(insert.run(context, to + 1, end).lastInsertRowid) : undefined
+      if (open?.id === id) {
+        if (tail === undefined) {
+          this.detail.delete(context)
+        } else {
+          this.detail.set(context, { id: tail, end: open.end, saved: open.end })
+        }
+      }
+    }
   }
 
   /**
@@ -1180,6 +1315,10 @@ export class SqliteTrackStore implements TrackStore {
       this.db.exec('BEGIN')
       for (const [context, { name, timestamp }] of this.lastName) {
         redate.run(timestamp, context, name, timestamp)
+      }
+      const extend = this.db.prepare('UPDATE detail_spans SET span_end = ? WHERE id = ?')
+      for (const { id, end } of this.detail.values()) {
+        extend.run(end, id)
       }
       this.db.exec('COMMIT')
     } finally {

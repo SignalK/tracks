@@ -230,6 +230,33 @@ describe('fixed stations', () => {
   })
 })
 
+// At anchor the swing around the anchor is the detail worth keeping, and the
+// normal resolution misses it; navigation.state says when the boat is there.
+describe('the own vessel at anchor', () => {
+  it('records the own vessel every second while anchored, and others as usual', async () => {
+    const { app, emit } = createApp(dir)
+    let state = 'anchored'
+    app.getSelfPath = (path?: string): unknown => (path === 'navigation.state' ? { value: state } : undefined)
+    const plugin = ThePlugin(app)
+    try {
+      await plugin.start({ resolution: 60_000 })
+      const other = 'vessels.urn:mrn:imo:mmsi:987654321'
+      const t0 = Date.now() - 60_000
+      for (let i = 0; i < 5; i++) {
+        emit(SELF_CONTEXT, [60 + i * 1e-5, 24], t0 + i * 1000)
+        emit(other, [61 + i * 1e-5, 25], t0 + i * 1000)
+      }
+      state = 'motoring'
+      emit(SELF_CONTEXT, [60.1, 24], t0 + 5000)
+
+      await expect(plugin.getTracks()?.get(SELF_CONTEXT as never)).resolves.toHaveLength(5)
+      await expect(plugin.getTracks()?.get(other as never)).resolves.toHaveLength(1)
+    } finally {
+      await plugin.stop()
+    }
+  })
+})
+
 // A track recorder is only useful if it is recording. Installing it and then
 // having to find and enable it loses exactly the passage the user installed it
 // for, so the descriptor says so and this pins it.

@@ -157,6 +157,13 @@ track.
 
 While paused, the plugin says so in its status on the server dashboard.
 
+## Detail at anchor
+
+While `navigation.state` is `anchored`, the own vessel is recorded every second instead of at the
+track resolution, so its swing around the anchor shows. That detail is kept for seven days and
+then thinned back to the track resolution. Other vessels are recorded as usual: AIS reports a
+vessel at anchor only every few minutes anyway.
+
 ## Position sources
 
 `navigation.position` often arrives from several sources at once — an internal GPS, an AIS
