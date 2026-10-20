@@ -74,9 +74,10 @@ jobs:
   # ── End-to-end suite against a published server ───────────
   # `npm run test:e2e` against signalk-server from npm: the oldest
   # release with the v2 Track API, which the README names as the
-  # minimum, and the newest.
+  # minimum, and the newest. The newest is resolved when the job runs,
+  # so its name says so and the step summary records the version.
   e2e:
-    name: e2e / signalk-server ${{ matrix.signalk-server }}
+    name: e2e / signalk-server ${{ matrix.label }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -84,7 +85,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        signalk-server: ['2.33.0', 'latest']
+        include:
+          - signalk-server: '2.33.0'
+            label: 2.33.0 (minimum)
+          - signalk-server: latest
+            label: latest release
     services:
       # `latest` is what signalk-questdb runs for its users unless they pin
       # a version. The plugin is configured not to manage a container, only
@@ -113,7 +118,9 @@ jobs:
           cd "$RUNNER_TEMP/signalk"
           npm init -y > /dev/null
           npm install "signalk-server@$SIGNALK_SERVER_VERSION"
-          node -p "'signalk-server ' + require('./node_modules/signalk-server/package.json').version"
+          version=$(node -p "require('./node_modules/signalk-server/package.json').version")
+          echo "signalk-server $version"
+          echo "e2e against signalk-server $version" >> "$GITHUB_STEP_SUMMARY"
 
       # The service is up before the steps start, but QuestDB takes a few
       # seconds more to answer queries. The build is logged because the image
