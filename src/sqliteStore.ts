@@ -931,6 +931,9 @@ export class SqliteTrackStore implements TrackStore {
       if (id !== undefined) binned.push(id)
       this.excludeFromDetail(context, first.timestamp, last.timestamp)
     }
+    // The next live fix would otherwise open a detail span from the last one
+    // recorded before the import, reaching over the imported points.
+    this.lastStored.delete(context)
     for (const points of segments) {
       for (const { position, timestamp } of points) {
         this.store(context, position, timestamp)

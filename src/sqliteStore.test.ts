@@ -330,6 +330,28 @@ describe('detail at anchor', () => {
     }
   })
 
+  it('leaves an import that ends a stay at anchor unthinned when the stay goes on', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE }, debug)
+    try {
+      const now = Date.now()
+      const from = now - 30 * DAY
+      anchored(store, from)
+      // Replaces the end of the stay and reaches past the last live fix.
+      const imported = Array.from({ length: 320 }, (_, i) => ({
+        position: [61, 25 + i * 1e-6] as [number, number],
+        timestamp: from + 5 * MINUTE + i * 1000,
+      }))
+      store.recordTrack(self, [imported], now, false)
+      store.newPosition(self, [60, 24], from + 625_000, 1000)
+      store.newPosition(self, [60, 24], from + 626_000, 1000)
+      store.prune(Infinity, self, now)
+      const points = await store.getTimed(self)
+      expect(points.filter(({ position }) => position[0] === 61)).toHaveLength(320)
+    } finally {
+      store.close()
+    }
+  })
+
   it('thins detail recorded before a restart', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-detail-'))
     const file = join(dir, 'tracks.db')
