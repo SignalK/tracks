@@ -420,6 +420,9 @@ export class SqliteTrackStore implements TrackStore {
       }
       return
     }
+    if (open) {
+      this.db.prepare('UPDATE detail_spans SET span_end = ? WHERE id = ?').run(open.end, open.id)
+    }
     const { lastInsertRowid } = this.db
       .prepare('INSERT INTO detail_spans (context, span_start, span_end) VALUES (?, ?, ?)')
       .run(context, previous, timestamp)

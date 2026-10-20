@@ -289,6 +289,24 @@ describe('detail at anchor', () => {
     }
   })
 
+  it('thins the end of a stay that another stay followed', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE }, debug)
+    try {
+      const now = Date.now()
+      const from = now - 30 * DAY
+      // The first stay ends 30 s after its span end was last saved.
+      for (let i = 0; i <= 90; i++) {
+        store.newPosition(self, [60, 24], from + i * 1000, 1000)
+      }
+      anchored(store, from + 30 * MINUTE)
+      store.prune(Infinity, self, now)
+      const first = (await store.getTimed(self)).filter(({ timestamp }) => timestamp < from + 30 * MINUTE)
+      expect(first.length).toBeLessThanOrEqual(3)
+    } finally {
+      store.close()
+    }
+  })
+
   it('leaves an import written over a stay at anchor unthinned', async () => {
     const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE }, debug)
     try {

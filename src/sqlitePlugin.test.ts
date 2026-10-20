@@ -247,7 +247,8 @@ describe('the own vessel at anchor', () => {
         emit(other, [61 + i * 1e-5, 25], t0 + i * 1000)
       }
       state = 'motoring'
-      emit(SELF_CONTEXT, [60.1, 24], t0 + 5000)
+      // Close enough that the glitch filter accepts it; only the resolution can drop it.
+      emit(SELF_CONTEXT, [60 + 5e-5, 24], t0 + 5000)
 
       await expect(plugin.getTracks()?.get(SELF_CONTEXT as never)).resolves.toHaveLength(5)
       await expect(plugin.getTracks()?.get(other as never)).resolves.toHaveLength(1)
