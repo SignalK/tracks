@@ -53,7 +53,10 @@ jobs:
     if: ${{ github.event_name != 'workflow_dispatch' }}
     uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@master
     with:
-      test-command: npm run typecheck && npm run lint && npm test
+      # One npm script rather than a chain: the plugin registry runs this
+      # command to score the plugin, and accepts only a single `npm run`.
+      # A chain falls back to plain `npm test` under a shorter time limit.
+      test-command: npm run test:ci
       build-command: npm run build --if-present
       format-check-command: npm run format:check
       node-versions: '["22","24"]'

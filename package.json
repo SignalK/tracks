@@ -51,6 +51,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
+    "test:ci": "npm run typecheck && npm run lint && npm test",
     "test:watch": "vitest",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "prepublishOnly": "npm run typecheck && npm run lint && npm run build"
