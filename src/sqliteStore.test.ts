@@ -289,6 +289,32 @@ describe('detail at anchor', () => {
     }
   })
 
+  it('keeps a stay still going on at the spacing an anchor alarm reads it', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE }, debug)
+    try {
+      const now = Date.now()
+      // Three days at anchor, up to now: a burst of five fixes a second apart
+      // every five minutes, close enough together to stay one span.
+      const first = Math.floor((now - 3 * DAY) / MINUTE) * MINUTE
+      for (let t = first; t <= now - 5000; t += 5 * MINUTE) {
+        for (let i = 0; i < 5; i++) {
+          store.newPosition(self, [60, 24], t + i * 1000, 1000)
+        }
+      }
+      store.prune(Infinity, self, now)
+      const points = await store.getTimed(self)
+      // A three-day stay is read at one point every three seconds, so a burst
+      // older than a day keeps two of its five, where the track resolution
+      // would keep one.
+      const old = points.filter(({ timestamp }) => timestamp < now - 2 * DAY)
+      const bursts = new Set(old.map(({ timestamp }) => Math.floor(timestamp / (5 * MINUTE))))
+      expect(old.length).toBeGreaterThanOrEqual(2 * bursts.size)
+      expect(old.length).toBeLessThan(5 * bursts.size)
+    } finally {
+      store.close()
+    }
+  })
+
   it('thins the end of a stay that another stay followed', async () => {
     const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE }, debug)
     try {

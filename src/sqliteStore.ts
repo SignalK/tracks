@@ -176,11 +176,17 @@ export interface SqliteStoreConfig {
 
 const DEFAULT_MAX_CELLS = 8
 /**
- * How long a stretch recorded finer than the store's resolution keeps that
- * detail. The swing around an anchor matters while the boat lies there and
- * for a while after, not for the rest of the season.
+ * How long a stretch recorded finer than the store's resolution keeps all of
+ * that detail. The swing around an anchor matters while the boat lies there
+ * and for a while after, not for the rest of the season.
  */
 const DETAIL_KEEP = 24 * 60 * 60 * 1000
+/**
+ * How many points a stretch still being recorded keeps over its whole length,
+ * as an anchor alarm reads it: from the drop, at one point per this many
+ * seconds of the stay, so a day per second.
+ */
+const DETAIL_STAY_POINTS = 24 * 60 * 60
 /** Fixes further apart than this start a new detail span. */
 const DETAIL_JOIN_GAP = 10 * 60 * 1000
 const DETAIL_SAVE_INTERVAL = 60 * 1000
@@ -808,9 +814,12 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   /**
-   * Thin what each detail span holds older than `DETAIL_KEEP` back to the
-   * store's resolution, keeping the first position of every resolution bucket, so a
-   * season at anchor costs what the recording would have without it.
+   * Thin what each detail span holds older than `DETAIL_KEEP`, keeping the
+   * first position of every bucket. A span that ended before that goes back to
+   * the store's resolution, so a season at anchor costs what the recording
+   * would have without it. A span that has not, a stay at anchor that is
+   * still going on, keeps its older part at the spacing an anchor alarm reads
+   * the whole stay at, about `DETAIL_STAY_POINTS` points however long it is.
    */
   private thinOldDetail(now: number): void {
     if (this.resolution <= 0) {
@@ -821,8 +830,6 @@ export class SqliteTrackStore implements TrackStore {
       extend.run(open.end, open.id)
       open.saved = open.end
     }
-    // Each span's old part, including a span still being recorded: a boat
-    // can lie at anchor for longer than the detail is kept.
     // On a bucket edge, so the hourly prune of a span still being recorded
     // never splits a bucket between two runs and keeps two rows of it.
     const cutoff = Math.floor((now - DETAIL_KEEP) / this.resolution) * this.resolution
@@ -842,7 +849,6 @@ export class SqliteTrackStore implements TrackStore {
        )`,
     )
     const done = this.db.prepare('DELETE FROM detail_spans WHERE id = ?')
-    const shorten = this.db.prepare('UPDATE detail_spans SET span_start = ? WHERE id = ?')
     for (const { id, context, start, end } of spans) {
       if (end < cutoff) {
         thin.run(context, start, end, this.resolution)
@@ -851,8 +857,10 @@ export class SqliteTrackStore implements TrackStore {
           this.detail.delete(context)
         }
       } else {
-        thin.run(context, start, cutoff - 1, this.resolution)
-        shorten.run(cutoff, id)
+        // The span keeps its start, which is where the stay's spacing is
+        // measured from on the next prune.
+        const spacing = Math.min(this.resolution, Math.ceil((end - start) / DETAIL_STAY_POINTS / 1000) * 1000)
+        thin.run(context, start, cutoff - 1, spacing)
       }
     }
   }

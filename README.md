@@ -161,11 +161,16 @@ While paused, the plugin says so in its status on the server dashboard.
 
 The own vessel can be recorded at a different spacing for each `navigation.state`, finer or
 coarser than the track resolution. Out of the box only `anchored` is set, to one second, so the
-swing around the anchor shows. Detail finer than the track resolution is kept for a day, the span an
-anchor alarm looks back over, and then thinned back to the track resolution.
+swing around the anchor shows.
+
+Detail finer than the track resolution is kept in full for a day. While a stay at anchor goes on,
+its older part is thinned only to the spacing an anchor alarm reads the whole stay at, one second
+per day of the stay, so a stay of any length keeps roughly 86,400 points plus the last day. A day
+after the stay ends, it is thinned back to the track resolution.
 
 Other vessels have a resolution of their own, the track resolution unless set. Their
 `navigation.state` is not used: it is whatever their transponder was last set to, and often stale.
+Detail recorded for them finer than the track resolution is thinned the same way.
 
 ## Position sources
 
