@@ -30,11 +30,12 @@ Nothing needs configuring for this, and the plugin works fully with no provider 
 store is a SQLite file in the plugin's data directory, so tracks survive a restart on their own.
 See [docs/history-and-storage.md](docs/history-and-storage.md) for what that means in practice.
 
-The own vessel is kept indefinitely by default. Other vessels' positions are kept for 30 days, also
-for a vessel that never leaves receiver range — a harbour puts hundreds of AIS targets past a
-receiver in a day, and keeping every one of them forever is rarely what anybody wants. Both are
-settings. Space freed by removing positions is reused for new ones, so the database file stops
-growing, but it does not shrink: only an SQLite `VACUUM` returns that space to the file system.
+The own vessel is kept indefinitely by default. Other vessels' positions are kept for the number of
+days set in the plugin settings, also for a vessel that never leaves receiver range — a harbour
+puts hundreds of AIS targets past a receiver in a day, and keeping every one of them forever is
+rarely what anybody wants. Space freed by removing positions is reused for new ones, which slows
+the file's growth, but the file never shrinks on its own: only an SQLite `VACUUM` returns that
+space to the file system.
 
 ## Imported tracks
 
