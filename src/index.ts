@@ -213,7 +213,7 @@ const PLUGIN_ID = 'tracks'
 
 interface TracksPluginConfig {
   resolution?: number
-  /** Days another vessel is kept after its last fix. 0 keeps every vessel. */
+  /** Days another vessel's positions are kept. 0 keeps every position. */
   aisRetentionDays?: number
   /** Days a deleted track waits in the recycle bin before it is purged. */
   recycleBinDays?: number
@@ -228,7 +228,7 @@ interface TracksPluginConfig {
 const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
 
 const DEFAULT_RESOLUTION = 60000
-// How long a vessel other than the own one is kept after its last fix. The own
+// How long the positions of a vessel other than the own one are kept. The own
 // vessel is never dropped — see TrackStore.prune. A month is long enough that a
 // passage last week is still there to compare against, and short enough that a
 // season in a busy harbour does not accumulate every target that ever passed.
@@ -1115,11 +1115,11 @@ export default function ThePlugin(app: App): Plugin {
         }),
       )
       // Days rather than the seconds the old maxAge used: this is about how long
-      // a passing vessel stays interesting, not about clearing a live display.
-      // 0 keeps every vessel forever.
+      // another vessel's track stays interesting, not about clearing a live
+      // display. 0 keeps every position forever.
       const aisRetentionMs = (toNumber(config.aisRetentionDays) ?? DEFAULT_AIS_RETENTION_DAYS) * 24 * 60 * 60 * 1000
-      // prune() does two things: drop whole contexts that have gone quiet, and
-      // apply the own vessel's row-level retention. They are configured
+      // prune() does two things: age out other vessels' positions, and apply
+      // the own vessel's row-level retention. They are configured
       // separately, so it runs whenever either is set — gating the call on the
       // AIS setting alone meant `aisRetentionDays: 0` silently disabled the
       // own vessel's retention too. A maxAge of Infinity ages nothing out.
@@ -1823,9 +1823,9 @@ export default function ThePlugin(app: App): Plugin {
         aisRetentionDays: {
           type: 'integer',
           minimum: 0,
-          title: 'Days to keep another vessel after its last fix',
+          title: "Days to keep other vessels' positions",
           description:
-            'The own vessel is never removed. Other vessels are: a busy harbour puts hundreds of AIS targets past the receiver in a day, and keeping all of them forever is rarely what anyone wants. 0 keeps every vessel indefinitely.',
+            "The own vessel is never removed. Other vessels' positions are, once older than this, and a vessel with none left is dropped: a busy harbour puts hundreds of AIS targets past the receiver in a day, and a neighbour that never leaves range would otherwise grow without bound. 0 keeps every position indefinitely.",
           default: DEFAULT_AIS_RETENTION_DAYS,
         },
         segmentGapMinutes: {

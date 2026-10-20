@@ -8,11 +8,11 @@ install and needs no configuration to start recording.
 
 Requires Signal K server >= 2.33.0 for the v2 Track API; older servers get the v1 routes only.
 
-| Setting                                        | Behaviour                                                                      |
-| ---------------------------------------------- | ------------------------------------------------------------------------------ |
-| Track resolution                               | Minimum spacing between recorded positions.                                    |
-| Days of the own vessel's track to keep         | Trims only the own vessel. 0 keeps everything; it is never dropped for idling. |
-| Days to keep another vessel after its last fix | Drops a vessel that has gone quiet. 0 keeps every vessel indefinitely.         |
+| Setting                                | Behaviour                                                                                                   |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Track resolution                       | Minimum spacing between recorded positions.                                                                 |
+| Days of the own vessel's track to keep | Trims only the own vessel. 0 keeps everything; it is never dropped for idling.                              |
+| Days to keep other vessels' positions  | Drops other vessels' positions older than this, even while a vessel stays in range. 0 keeps every position. |
 
 The plugin's configuration page shows the current defaults, and is the authority on them.
 
@@ -30,9 +30,10 @@ Nothing needs configuring for this, and the plugin works fully with no provider 
 store is a SQLite file in the plugin's data directory, so tracks survive a restart on their own.
 See [docs/history-and-storage.md](docs/history-and-storage.md) for what that means in practice.
 
-The own vessel is kept indefinitely by default. Other vessels are kept for 30 days after their last
-fix — a harbour puts hundreds of AIS targets past a receiver in a day, and keeping every one of them
-forever is rarely what anybody wants. Both are settings.
+The own vessel is kept indefinitely by default. Other vessels' positions are kept for 30 days, also
+for a vessel that never leaves receiver range — a harbour puts hundreds of AIS targets past a
+receiver in a day, and keeping every one of them forever is rarely what anybody wants. Both are
+settings.
 
 ## Imported tracks
 
@@ -115,8 +116,8 @@ back in.
 Nothing deleted is gone at once. It goes to a recycle bin, listed in the Tracks webapp, where it
 can be restored or deleted for good, until it is purged after the number of days set in the
 plugin settings (180 by default). The retention settings above do not reach into the bin, but
-they apply again to what is restored: an AIS vessel restored after its last fix has aged past
-the retention is dropped at the next prune. Once a recorded span is purged its points are gone,
+they apply again to what is restored: an AIS vessel's positions restored after they have aged
+past the retention are dropped at the next prune. Once a recorded span is purged its points are gone,
 but the span stays hidden in the provider's data for good.
 
 ## Glitch filtering

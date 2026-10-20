@@ -16,7 +16,8 @@ survive a restart. A power cut can still lose the most recent ones, because
 they are not forced onto the storage one at a time (on an SD card each such
 write can take seconds), but it cannot damage the file. How long they are kept
 depends on two settings: the own vessel's track is kept indefinitely by
-default, and another vessel is dropped 30 days after its last fix.
+default, and another vessel's positions are dropped after 30 days, whether or
+not it is still in range.
 
 So the provider is the finer record of the recent past, and the plugin's store
 is what remains of everything older. The interval and the retention are both

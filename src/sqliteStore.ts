@@ -682,17 +682,16 @@ export class SqliteTrackStore implements TrackStore {
 
   prune(maxAge: number, keep?: Context, now = Date.now()): void {
     const cutoff = now - maxAge
-    // Drop whole contexts that have gone quiet, then apply the row-level
-    // retention if one is configured. `keep` — the own vessel — is excluded:
-    // its track has to survive a winter on a mooring.
+    // Every other vessel's positions older than the cutoff go, not only those
+    // of a vessel that has gone quiet: a neighbour in the marina or a fixed
+    // berth never goes quiet, and its track would otherwise grow for as long
+    // as it stays in range. A vessel left with no positions is dropped. `keep`
+    // — the own vessel — is excluded: its track has to survive a winter on a
+    // mooring.
     const dropped = this.db
       .prepare('SELECT context FROM positions GROUP BY context HAVING MAX(timestamp) < ? AND context IS NOT ?')
       .all(cutoff, keep ?? null) as { context: string }[]
-    this.db
-      .prepare(
-        'DELETE FROM positions WHERE context IN (SELECT context FROM positions GROUP BY context HAVING MAX(timestamp) < ?) AND context IS NOT ?',
-      )
-      .run(cutoff, keep ?? null)
+    this.db.prepare('DELETE FROM positions WHERE timestamp < ? AND context IS NOT ?').run(cutoff, keep ?? null)
     // A vessel that has aged out takes its name with it, or this table grows
     // for every target a harbour ever put past the receiver. The remembered
     // copy goes too, or a vessel returning under the same name would be taken
