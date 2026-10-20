@@ -304,7 +304,9 @@ describe('detail at anchor', () => {
       store.prune(Infinity, self, now)
       const points = await store.getTimed(self)
       expect(points.filter(({ position }) => position[0] === 61)).toHaveLength(120)
-      expect(points.filter(({ position }) => position[0] === 60).length).toBeLessThan(20)
+      const recorded = points.filter(({ position }) => position[0] !== 61)
+      expect(recorded.length).toBeGreaterThan(0)
+      expect(recorded.length).toBeLessThan(20)
     } finally {
       store.close()
     }
