@@ -157,6 +157,16 @@ track.
 
 While paused, the plugin says so in its status on the server dashboard.
 
+## Resolution by state
+
+The own vessel can be recorded at a different spacing for each `navigation.state`, finer or
+coarser than the track resolution. Out of the box only `anchored` is set, to one second, so the
+swing around the anchor shows. Detail finer than the track resolution is kept for a day, the span an
+anchor alarm looks back over, and then thinned back to the track resolution.
+
+Other vessels have a resolution of their own, the track resolution unless set. Their
+`navigation.state` is not used: it is whatever their transponder was last set to, and often stale.
+
 ## Position sources
 
 `navigation.position` often arrives from several sources at once — an internal GPS, an AIS

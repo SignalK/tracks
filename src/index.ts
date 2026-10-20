@@ -223,11 +223,19 @@ interface TracksPluginConfig {
   maxSpeedKnots?: number
   /** navigation.state values that pause recording of the own vessel. */
   pauseWhenState?: string[]
+  /** Milliseconds between recorded fixes of the own vessel per navigation.state. */
+  stateResolutions?: { state?: unknown; resolution?: unknown }[]
+  /** Milliseconds between recorded fixes of other vessels; `resolution` when unset. */
+  otherVesselsResolution?: number
 }
 
 const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
 
 const DEFAULT_RESOLUTION = 60000
+// At anchor every second: fine enough to draw the swing around the anchor,
+// which the normal resolution misses. The store thins detail finer than the
+// normal resolution back to it once it is a day old.
+const DEFAULT_STATE_RESOLUTIONS = [{ state: 'anchored', resolution: 1000 }]
 // How long the positions of a vessel other than the own one are kept. The own
 // vessel is never dropped — see TrackStore.prune. A month is long enough that a
 // passage last week is still there to compare against, and short enough that a
@@ -985,6 +993,9 @@ export default function ThePlugin(app: App): Plugin {
   const sourceWatch = new SourceWatch()
   let glitchFilter = new GlitchFilter({ maxSpeedKnots: DEFAULT_MAX_SPEED_KNOTS })
   let stateGate = new StateGate(app.selfContext, DEFAULT_PAUSE_STATES)
+  /** The own vessel's recording spacing per navigation.state, in ms. */
+  let stateResolutions = new Map<string, number>()
+  let otherVesselsResolution: number | undefined
   /**
    * The history provider's context list, cached between existence probes.
    *
@@ -1031,6 +1042,16 @@ export default function ThePlugin(app: App): Plugin {
       glitchFilter = new GlitchFilter({
         maxSpeedKnots: toNumber(config.maxSpeedKnots) ?? DEFAULT_MAX_SPEED_KNOTS,
       })
+      stateResolutions = new Map()
+      for (const entry of Array.isArray(config.stateResolutions)
+        ? config.stateResolutions
+        : DEFAULT_STATE_RESOLUTIONS) {
+        const spacing = toNumber(entry.resolution)
+        if (typeof entry.state === 'string' && spacing !== undefined && spacing >= 0) {
+          stateResolutions.set(entry.state, spacing)
+        }
+      }
+      otherVesselsResolution = toNumber(config.otherVesselsResolution)
       stateGate = new StateGate(
         app.selfContext,
         Array.isArray(config.pauseWhenState) ? config.pauseWhenState : DEFAULT_PAUSE_STATES,
@@ -1115,7 +1136,8 @@ export default function ThePlugin(app: App): Plugin {
           // Read per delta rather than subscribed to: navigation.state changes
           // rarely, and the current value is what matters at the moment a
           // position arrives.
-          if (!stateGate.accept(update.context, getVesselState())) {
+          const state = getVesselState()
+          if (!stateGate.accept(update.context, state)) {
             return
           }
           // Filtered here rather than in each store: both would otherwise need
@@ -1123,7 +1145,15 @@ export default function ThePlugin(app: App): Plugin {
           if (!glitchFilter.accept(update.context, position, timestamp ?? Date.now())) {
             return
           }
-          tracks?.newPosition(update.context, position, timestamp)
+          // navigation.state for another vessel is whatever its transponder
+          // was last set to, often stale, so only the own vessel follows it.
+          const spacing =
+            update.context === app.selfContext
+              ? state === undefined
+                ? undefined
+                : stateResolutions.get(state)
+              : otherVesselsResolution
+          tracks?.newPosition(update.context, position, timestamp, spacing)
         }),
       )
       // Set in days, since it is about how long another vessel's track stays
@@ -1870,6 +1900,28 @@ export default function ThePlugin(app: App): Plugin {
           },
           uniqueItems: true,
           default: DEFAULT_PAUSE_STATES,
+        },
+        stateResolutions: {
+          type: 'array',
+          title: 'Own vessel resolution by navigation.state',
+          description:
+            'Records the own vessel at a different spacing while navigation.state has the given value, finer or coarser than the track resolution. The default records every second at anchor, so an anchor alarm or a look back at the night sees the swing around the anchor. Anything finer than the track resolution is kept for a day and then thinned back to it. Needs navigation.state to be set, by signalk-autostate or by hand.',
+          items: {
+            type: 'object',
+            required: ['state', 'resolution'],
+            properties: {
+              state: { type: 'string', title: 'navigation.state', examples: ['anchored', 'moored', 'sailing'] },
+              resolution: { type: 'integer', minimum: 0, title: 'Resolution (milliseconds)' },
+            },
+          },
+          default: DEFAULT_STATE_RESOLUTIONS,
+        },
+        otherVesselsResolution: {
+          type: 'integer',
+          minimum: 0,
+          title: 'Resolution for other vessels (milliseconds)',
+          description:
+            'Spacing of recorded fixes for AIS and other vessels. Leave empty to use the track resolution. Their navigation.state is not used: it is what the transponder was last set to, and often stale.',
         },
       },
     },

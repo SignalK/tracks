@@ -230,6 +230,64 @@ describe('fixed stations', () => {
   })
 })
 
+// At anchor the swing around the anchor is the detail worth keeping, and the
+// normal resolution misses it; navigation.state says when the boat is there.
+describe('the own vessel at anchor', () => {
+  it('records the own vessel every second while anchored, and others as usual', async () => {
+    const { app, emit } = createApp(dir)
+    let state = 'anchored'
+    app.getSelfPath = (path?: string): unknown => (path === 'navigation.state' ? { value: state } : undefined)
+    const plugin = ThePlugin(app)
+    try {
+      await plugin.start({ resolution: 60_000 })
+      const other = 'vessels.urn:mrn:imo:mmsi:987654321'
+      const t0 = Date.now() - 60_000
+      for (let i = 0; i < 5; i++) {
+        emit(SELF_CONTEXT, [60 + i * 1e-5, 24], t0 + i * 1000)
+        emit(other, [61 + i * 1e-5, 25], t0 + i * 1000)
+      }
+      state = 'motoring'
+      // Close enough that the glitch filter accepts it; only the resolution can drop it.
+      emit(SELF_CONTEXT, [60 + 5e-5, 24], t0 + 5000)
+
+      await expect(plugin.getTracks()?.get(SELF_CONTEXT as never)).resolves.toHaveLength(5)
+      await expect(plugin.getTracks()?.get(other as never)).resolves.toHaveLength(1)
+    } finally {
+      await plugin.stop()
+    }
+  })
+
+  it('follows the resolutions set per state, and one set for other vessels', async () => {
+    const { app, emit } = createApp(dir)
+    let state = 'moored'
+    app.getSelfPath = (path?: string): unknown => (path === 'navigation.state' ? { value: state } : undefined)
+    const plugin = ThePlugin(app)
+    try {
+      await plugin.start({
+        resolution: 60_000,
+        pauseWhenState: [],
+        stateResolutions: [{ state: 'moored', resolution: 600_000 }],
+        otherVesselsResolution: 10_000,
+      })
+      const other = 'vessels.urn:mrn:imo:mmsi:987654321'
+      const t0 = Date.now() - 10 * 60_000
+      for (let i = 0; i < 6; i++) {
+        emit(SELF_CONTEXT, [60 + i * 1e-5, 24], t0 + i * 60_000)
+        emit(other, [61 + i * 1e-5, 25], t0 + i * 10_000)
+      }
+      // Anchored is not in the list set here, so the track resolution applies.
+      state = 'anchored'
+      emit(SELF_CONTEXT, [60 + 6e-5, 24], t0 + 6 * 60_000)
+      emit(SELF_CONTEXT, [60 + 7e-5, 24], t0 + 6 * 60_000 + 1000)
+
+      await expect(plugin.getTracks()?.get(SELF_CONTEXT as never)).resolves.toHaveLength(2)
+      await expect(plugin.getTracks()?.get(other as never)).resolves.toHaveLength(6)
+    } finally {
+      await plugin.stop()
+    }
+  })
+})
+
 // A track recorder is only useful if it is recording. Installing it and then
 // having to find and enable it loses exactly the passage the user installed it
 // for, so the descriptor says so and this pins it.
