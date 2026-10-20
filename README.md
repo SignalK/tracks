@@ -33,7 +33,8 @@ See [docs/history-and-storage.md](docs/history-and-storage.md) for what that mea
 The own vessel is kept indefinitely by default. Other vessels' positions are kept for 30 days, also
 for a vessel that never leaves receiver range — a harbour puts hundreds of AIS targets past a
 receiver in a day, and keeping every one of them forever is rarely what anybody wants. Both are
-settings.
+settings. Space freed by removing positions is reused for new ones, so the database file stops
+growing, but it does not shrink: only an SQLite `VACUUM` returns that space to the file system.
 
 ## Imported tracks
 

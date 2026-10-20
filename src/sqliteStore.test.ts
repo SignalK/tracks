@@ -353,13 +353,14 @@ describe('other vessels age out position by position', () => {
     }
   })
 
-  it('drops a vessel with no position left, and its name', () => {
+  it('drops a vessel with no position left, and its name', async () => {
     const store = new SqliteTrackStore({ file: ':memory:', resolution: 0 }, debug)
     try {
       const now = Date.now()
       store.newPosition(neighbour, [60, 24], now - 40 * DAY)
       store.recordName(neighbour, 'Ariadne', now - 40 * DAY)
       store.prune(30 * DAY, self, now)
+      await expect(store.getTimed(neighbour)).rejects.toThrow()
       expect(store.nameFor(neighbour)).toBeUndefined()
     } finally {
       store.close()

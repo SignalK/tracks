@@ -688,10 +688,20 @@ export class SqliteTrackStore implements TrackStore {
     // as it stays in range. A vessel left with no positions is dropped. `keep`
     // — the own vessel — is excluded: its track has to survive a winter on a
     // mooring.
-    const dropped = this.db
-      .prepare('SELECT context FROM positions GROUP BY context HAVING MAX(timestamp) < ? AND context IS NOT ?')
-      .all(cutoff, keep ?? null) as { context: string }[]
-    this.db.prepare('DELETE FROM positions WHERE timestamp < ? AND context IS NOT ?').run(cutoff, keep ?? null)
+    //
+    // Per context through the (context, timestamp) index rather than one
+    // DELETE over the table: that index cannot seek on a timestamp alone, so a
+    // single statement would scan every row each hour even with nothing to
+    // drop. The grouping below reads only the index.
+    const spans = this.db
+      .prepare('SELECT context, MIN(timestamp) AS oldest, MAX(timestamp) AS newest FROM positions GROUP BY context')
+      .all() as { context: string; oldest: number; newest: number }[]
+    const aged = spans.filter(({ context, oldest }) => context !== keep && oldest < cutoff)
+    const trim = this.db.prepare('DELETE FROM positions WHERE context = ? AND timestamp < ?')
+    for (const { context } of aged) {
+      trim.run(context, cutoff)
+    }
+    const dropped = aged.filter(({ newest }) => newest < cutoff)
     // A vessel that has aged out takes its name with it, or this table grows
     // for every target a harbour ever put past the receiver. The remembered
     // copy goes too, or a vessel returning under the same name would be taken
