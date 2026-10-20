@@ -1114,9 +1114,9 @@ export default function ThePlugin(app: App): Plugin {
           tracks?.newPosition(update.context, position, timestamp)
         }),
       )
-      // Days rather than the seconds the old maxAge used: this is about how long
-      // another vessel's track stays interesting, not about clearing a live
-      // display. 0 keeps every position forever.
+      // Set in days, since it is about how long another vessel's track stays
+      // interesting, and passed to prune() in milliseconds. 0 keeps every
+      // position indefinitely.
       const aisRetentionMs = (toNumber(config.aisRetentionDays) ?? DEFAULT_AIS_RETENTION_DAYS) * 24 * 60 * 60 * 1000
       // Runs even with `aisRetentionDays: 0`, since prune() also purges the
       // recycle bin. A maxAge of Infinity ages nothing out.
