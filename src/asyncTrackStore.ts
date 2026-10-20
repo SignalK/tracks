@@ -299,7 +299,7 @@ export class AsyncTrackStore implements TrackStore {
   }
 
   newPosition(context: Context, position: LatLngTuple, timestamp = Date.now(), resolution?: number): void {
-    const spacing = resolution === undefined ? this.resolution : Math.min(resolution, this.resolution)
+    const spacing = resolution ?? this.resolution
     const previous = this.admitted.get(context)
     if (spacing > 0 && previous !== undefined && timestamp - previous < spacing) return
     const sequence = this.sequence

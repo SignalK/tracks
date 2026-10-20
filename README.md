@@ -157,12 +157,15 @@ track.
 
 While paused, the plugin says so in its status on the server dashboard.
 
-## Detail at anchor
+## Resolution by state
 
-While `navigation.state` is `anchored`, the own vessel is recorded every second instead of at the
-track resolution, so its swing around the anchor shows. That detail is kept for seven days and
-then thinned back to the track resolution. Other vessels are recorded as usual: AIS reports a
-vessel at anchor only every few minutes anyway.
+The own vessel can be recorded at a different spacing for each `navigation.state`, finer or
+coarser than the track resolution. Out of the box only `anchored` is set, to one second, so the
+swing around the anchor shows. Detail finer than the track resolution is kept for a day, the span an
+anchor alarm looks back over, and then thinned back to the track resolution.
+
+Other vessels have a resolution of their own, the track resolution unless set. Their
+`navigation.state` is not used: it is whatever their transponder was last set to, and often stale.
 
 ## Position sources
 

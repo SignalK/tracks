@@ -35,10 +35,10 @@ export interface TrackStore {
   /**
    * Record a position for a context. `timestamp` defaults to now.
    *
-   * `resolution`, when finer than the store's own, records this position at
-   * that spacing instead: the own vessel at anchor, whose swing is the detail
-   * worth keeping. A store that keeps such detail thins it back to its own
-   * resolution once it is old.
+   * `resolution` records this position at that spacing instead of the
+   * store's own, finer or coarser: the own vessel at anchor, say, whose swing
+   * is the detail worth keeping. A store that keeps detail finer than its own
+   * resolution thins it back to that resolution once it is old.
    */
   newPosition(context: Context, position: LatLngTuple, timestamp?: number, resolution?: number): void
 

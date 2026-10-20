@@ -232,7 +232,7 @@ describe('detail at anchor', () => {
     const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE }, debug)
     try {
       const now = Date.now()
-      anchored(store, now - DAY)
+      anchored(store, now - DAY / 2)
       store.prune(Infinity, self, now)
       await expect(store.getTimed(self)).resolves.toHaveLength(600)
     } finally {
@@ -272,14 +272,14 @@ describe('detail at anchor', () => {
       // Every second until a span's join gap would split it, from long ago
       // up to now.
       // Each pair sits inside one minute, so thinning to a minute keeps one of it.
-      for (let t = Math.floor((now - 8 * DAY) / MINUTE) * MINUTE + 10_000; t <= now; t += 5 * MINUTE) {
+      for (let t = Math.floor((now - 2 * DAY) / MINUTE) * MINUTE + 10_000; t <= now; t += 5 * MINUTE) {
         store.newPosition(self, [60, 24], t, 1000)
         store.newPosition(self, [60, 24], t + 1000, 1000)
       }
       store.prune(Infinity, self, now)
       const points = await store.getTimed(self)
-      // Detail is kept from the bucket edge at or before seven days ago.
-      const kept = Math.floor((now - 7 * DAY) / MINUTE) * MINUTE
+      // Detail is kept from the bucket edge at or before a day ago.
+      const kept = Math.floor((now - DAY) / MINUTE) * MINUTE
       const old = points.filter(({ timestamp }) => timestamp < kept)
       const recent = points.filter(({ timestamp }) => timestamp >= kept)
       expect(old.every(({ timestamp }, i) => i === 0 || timestamp - old[i - 1]!.timestamp > 1000)).toBe(true)

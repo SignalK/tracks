@@ -180,7 +180,7 @@ const DEFAULT_MAX_CELLS = 8
  * detail. The swing around an anchor matters while the boat lies there and
  * for a while after, not for the rest of the season.
  */
-const DETAIL_KEEP = 7 * 24 * 60 * 60 * 1000
+const DETAIL_KEEP = 24 * 60 * 60 * 1000
 /** Fixes further apart than this start a new detail span. */
 const DETAIL_JOIN_GAP = 10 * 60 * 1000
 const DETAIL_SAVE_INTERVAL = 60 * 1000
@@ -385,7 +385,7 @@ export class SqliteTrackStore implements TrackStore {
     // rest are dropped, not averaged. A vessel emitting at 8 Hz would otherwise
     // write hundreds of thousands of rows a day at the default 60s resolution.
     if (this.resolution > 0) {
-      const spacing = resolution === undefined ? this.resolution : Math.min(resolution, this.resolution)
+      const spacing = resolution ?? this.resolution
       const previous = this.lastStored.get(context)
       // `<` not `<=`: two positions sharing a timestamp are the same instant,
       // and a stored point must not block one that is genuinely later.
