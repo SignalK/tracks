@@ -109,9 +109,8 @@ describe('requested contexts', () => {
     store.close()
   })
 
-  it('reads only the requested contexts the box lets through', async () => {
+  it('returns only the requested contexts the box lets through', async () => {
     const store = seeded()
-    const getTimed = vi.spyOn(store, 'getTimed')
     const bounds: GeoBounds = { sw: [60, 24], ne: [61, 26] }
 
     const tracks = await store.getFilteredTimedTracks({
@@ -121,7 +120,29 @@ describe('requested contexts', () => {
       contexts: [ctx, third],
     })
     expect(Object.keys(tracks)).toEqual([ctx])
-    expect(getTimed.mock.calls.map(([context]) => context)).toEqual([ctx])
+    store.close()
+  })
+
+  // A chart view over a busy harbour holds every AIS position ever recorded
+  // there, and an own-vessel trail asked for that view must not read them.
+  // That is a cost with no visible effect on the answer, so the spy on the
+  // cell prefilter is what pins it.
+  it('answers requested contexts without the cell prefilter', async () => {
+    const store = seeded()
+    const prefilter = vi.spyOn(store as unknown as { contextsInBounds: () => Set<string> }, 'contextsInBounds')
+    const bounds: GeoBounds = { sw: [60, 24], ne: [61, 26] }
+    const unknown = 'vessels.urn:mrn:imo:mmsi:230000099' as Context
+
+    const tracks = await store.getFilteredTimedTracks({
+      bbox: bounds,
+      radius: null,
+      intersects: true,
+      contexts: [ctx, unknown],
+    })
+    expect(Object.keys(tracks)).toEqual([ctx])
+    expect(prefilter).not.toHaveBeenCalled()
+    await store.getFilteredTimedTracks({ bbox: bounds, radius: null, intersects: true })
+    expect(prefilter).toHaveBeenCalledOnce()
     store.close()
   })
 
