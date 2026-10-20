@@ -435,6 +435,12 @@ export class SqliteTrackStore implements TrackStore {
     return rows.map(({ context }) => context)
   }
 
+  /** Those of `contexts` the store holds positions for, each found by an index seek. */
+  private stored(contexts: Iterable<Context>): Context[] {
+    const held = this.db.prepare('SELECT 1 AS found FROM positions WHERE context = ? LIMIT 1')
+    return [...contexts].filter((context) => held.get(context) !== undefined)
+  }
+
   getAllTracks(query?: TrackQuery): Promise<{ context: string; track: LatLngTuple[] }[]> {
     return Promise.all(
       this.contexts().map((context) =>
@@ -457,8 +463,9 @@ export class SqliteTrackStore implements TrackStore {
    * Two filters run, and they are not redundant despite both testing bounds:
    *
    * - `contextsInBounds` asks the cell index which contexts have *any* position
-   *   near the box. It is a cheap prefilter that keeps the query off every row
-   *   in the table, and it decides nothing on its own.
+   *   near the box. It is a prefilter that keeps the query off every row in
+   *   the table, and it decides nothing on its own. It runs only when no
+   *   contexts are named, since their tracks are read anyway.
    * - `matcher` — the same predicate the in-memory store uses — then applies
    *   whichever rule the caller asked for. That test is authoritative.
    *
@@ -495,14 +502,22 @@ export class SqliteTrackStore implements TrackStore {
     // A clipped query needs only the stretches near the box, so it reads those
     // instead of every position each candidate has in the window.
     const near = params.bbox && params.clip ? this.rowsNearBounds(params.bbox, query?.window) : undefined
-    const candidates = near ? new Set(near.keys()) : params.bbox ? this.contextsInBounds(params.bbox) : undefined
-    const matcher = createMatcher(params, selfPosition, debug)
     const requested = params.contexts ? new Set(params.contexts) : undefined
+    // The cell prefilter reads every row of every vessel near the box, at any
+    // time, so for named contexts, which are read anyway, it only adds cost: a
+    // view over a busy harbour would turn one own-vessel query into a scan of
+    // all its AIS traffic.
+    const candidates = near
+      ? new Set(near.keys())
+      : params.bbox && !requested
+        ? this.contextsInBounds(params.bbox)
+        : undefined
+    const matcher = createMatcher(params, selfPosition, debug)
 
     // Narrowed before reading: rows of a context that cannot be returned are
     // not worth fetching.
-    const contexts = this.contexts().filter(
-      (context) => (!candidates || candidates.has(context)) && (!requested || requested.has(context)),
+    const contexts = (requested ? this.stored(requested) : this.contexts()).filter(
+      (context) => !candidates || candidates.has(context),
     )
     const tracks = await Promise.all(
       contexts.map((context) => {
