@@ -8,11 +8,10 @@ install and needs no configuration to start recording.
 
 Requires Signal K server >= 2.33.0 for the v2 Track API; older servers get the v1 routes only.
 
-| Setting                                | Behaviour                                                                                                   |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Track resolution                       | Minimum spacing between recorded positions.                                                                 |
-| Days of the own vessel's track to keep | Trims only the own vessel. 0 keeps everything; it is never dropped for idling.                              |
-| Days to keep other vessels' positions  | Drops other vessels' positions older than this, even while a vessel stays in range. 0 keeps every position. |
+| Setting                               | Behaviour                                                                                                   |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Track resolution                      | Minimum spacing between recorded positions.                                                                 |
+| Days to keep other vessels' positions | Drops other vessels' positions older than this, even while a vessel stays in range. 0 keeps every position. |
 
 The plugin's configuration page shows the current defaults, and is the authority on them.
 
@@ -30,7 +29,7 @@ Nothing needs configuring for this, and the plugin works fully with no provider 
 store is a SQLite file in the plugin's data directory, so tracks survive a restart on their own.
 See [docs/history-and-storage.md](docs/history-and-storage.md) for what that means in practice.
 
-The own vessel is kept indefinitely by default. Other vessels' positions are kept for the number of
+The own vessel is kept indefinitely. Other vessels' positions are kept for the number of
 days set in the plugin settings, also for a vessel that never leaves receiver range — a harbour
 puts hundreds of AIS targets past a receiver in a day, and keeping every one of them forever is
 rarely what anybody wants. Space freed by removing positions is reused for new ones, which slows
