@@ -1118,11 +1118,8 @@ export default function ThePlugin(app: App): Plugin {
       // another vessel's track stays interesting, not about clearing a live
       // display. 0 keeps every position forever.
       const aisRetentionMs = (toNumber(config.aisRetentionDays) ?? DEFAULT_AIS_RETENTION_DAYS) * 24 * 60 * 60 * 1000
-      // prune() does two things: age out other vessels' positions, and apply
-      // the own vessel's row-level retention. They are configured
-      // separately, so it runs whenever either is set — gating the call on the
-      // AIS setting alone meant `aisRetentionDays: 0` silently disabled the
-      // own vessel's retention too. A maxAge of Infinity ages nothing out.
+      // Runs even with `aisRetentionDays: 0`, since prune() also purges the
+      // recycle bin. A maxAge of Infinity ages nothing out.
       const pruneInterval = setInterval(() => {
         tracks?.prune(aisRetentionMs > 0 ? aisRetentionMs : Infinity, app.selfContext)
       }, PRUNE_INTERVAL_MS)

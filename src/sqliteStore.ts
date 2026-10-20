@@ -720,10 +720,6 @@ export class SqliteTrackStore implements TrackStore {
     for (const { context } of dropped) {
       this.lastStored.delete(context)
     }
-    // Scoped to `keep` when there is one: this retention is configured as "days
-    // of the own vessel's track to keep", and applying it to every context
-    // would truncate an AIS vessel's track on a setting that does not name it.
-    // Unscoped without a `keep`, which is how a standalone store behaves.
     if (this.binRetention > 0) {
       const expired = this.db
         .prepare('SELECT * FROM recycle_bin WHERE purged = 0 AND deleted_at < ? ORDER BY whole DESC')
@@ -735,6 +731,9 @@ export class SqliteTrackStore implements TrackStore {
         }
       }
     }
+    // Scoped to `keep` when there is one: other vessels age out by `maxAge`
+    // above, so `retention` is the kept vessel's alone. Unscoped without a
+    // `keep`, which is how a standalone store behaves.
     if (this.retention > 0) {
       const oldest = now - this.retention
       if (keep === undefined) {
