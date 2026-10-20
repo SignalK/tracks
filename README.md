@@ -23,7 +23,8 @@ vessel, exposing the result as `Observable<LatLngTuple[]>`.
 With a history provider installed — [signalk-questdb](https://www.npmjs.com/package/signalk-questdb),
 [signalk-to-influxdb2](https://www.npmjs.com/package/signalk-to-influxdb2) — a track is answered from
 both it and the plugin's own store: the provider is the finer record for as long as its retention
-reaches, and the store is what remains of everything older or of any period the provider missed.
+reaches, and the store keeps the older track, within its own retention, and any period the provider
+missed.
 
 Nothing needs configuring for this, and the plugin works fully with no provider installed. Its own
 store is a SQLite file in the plugin's data directory, so tracks survive a restart on their own.

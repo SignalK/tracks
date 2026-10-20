@@ -1286,8 +1286,8 @@ export default function ThePlugin(app: App): Plugin {
           .then((points) => ({ points, known: true }))
           .catch(() => ({ points: [] as TimedPosition[], known: false }))
         // A history provider is the finer source for as long as its retention
-        // reaches; the store is what remains of everything older, and of any
-        // period the provider missed. A query with no window still gets
+        // reaches; the store keeps the older track, within its own retention,
+        // and any period the provider missed. A query with no window still gets
         // history: `/self/track` with no parameters is the common case, and
         // skipping the provider there would quietly serve store-only data.
         const window = query.window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
@@ -1822,7 +1822,7 @@ export default function ThePlugin(app: App): Plugin {
           minimum: 0,
           title: "Days to keep other vessels' positions",
           description:
-            "The own vessel is never removed. Other vessels' positions are, once older than this, and a vessel with none left is dropped: a busy harbour puts hundreds of AIS targets past the receiver in a day, and a neighbour that never leaves range would otherwise grow without bound. 0 keeps every position indefinitely.",
+            "The own vessel is never removed. Other vessels' positions are removed once older than this, and a vessel with none left is dropped: a busy harbour puts hundreds of AIS targets past the receiver in a day, and a neighbour that never leaves range would otherwise grow without bound. 0 keeps every position indefinitely.",
           default: DEFAULT_AIS_RETENTION_DAYS,
         },
         segmentGapMinutes: {

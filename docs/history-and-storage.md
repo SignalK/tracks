@@ -21,7 +21,7 @@ plugin settings, whether it is still in range or not. Setting that to 0 keeps
 every position.
 
 So the provider is the finer record of the recent past, and the plugin's store
-is what remains of everything older. The interval and the retention are both
+keeps the older track, within its own retention. The interval and the retention are both
 settings on the plugin's configuration page, which is where their current
 defaults are shown.
 
