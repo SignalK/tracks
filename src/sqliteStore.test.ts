@@ -352,6 +352,43 @@ describe('retention', () => {
   })
 })
 
+// A neighbour in a marina or a vessel at a fixed berth never goes quiet, so
+// a rule that drops only quiet vessels would keep its track growing forever.
+describe('other vessels age out position by position', () => {
+  const self = 'vessels.self' as Context
+  const neighbour = 'vessels.neighbour' as Context
+  const DAY = 24 * 60 * 60 * 1000
+
+  it('trims a vessel still in range and keeps its recent positions', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: 0 }, debug)
+    try {
+      const now = Date.now()
+      store.newPosition(neighbour, [60, 24], now - 40 * DAY)
+      store.newPosition(neighbour, [60.1, 24.1], now - DAY)
+      store.newPosition(self, [61, 25], now - 40 * DAY)
+      store.prune(30 * DAY, self, now)
+      await expect(store.get(neighbour)).resolves.toEqual([[60.1, 24.1]])
+      await expect(store.get(self)).resolves.toEqual([[61, 25]])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('drops a vessel with no position left, and its name', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: 0 }, debug)
+    try {
+      const now = Date.now()
+      store.newPosition(neighbour, [60, 24], now - 40 * DAY)
+      store.recordName(neighbour, 'Ariadne', now - 40 * DAY)
+      store.prune(30 * DAY, self, now)
+      await expect(store.getTimed(neighbour)).rejects.toThrow()
+      expect(store.nameFor(neighbour)).toBeUndefined()
+    } finally {
+      store.close()
+    }
+  })
+})
+
 // The store's `retention` trims the kept context's own rows. The plugin no
 // longer sets it — the own vessel's track is never aged out — but the store
 // option remains, and it must not reach into another vessel's rows.

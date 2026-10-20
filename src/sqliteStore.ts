@@ -695,19 +695,25 @@ export class SqliteTrackStore implements TrackStore {
     return row?.name
   }
 
+  /**
+   * Age out other vessels position by position, as `TrackStore.prune`
+   * describes: a vessel that stays in range would otherwise keep every row.
+   */
   prune(maxAge: number, keep?: Context, now = Date.now()): void {
     const cutoff = now - maxAge
-    // Drop whole contexts that have gone quiet, then apply the row-level
-    // retention if one is configured. `keep` — the own vessel — is excluded:
-    // its track has to survive a winter on a mooring.
-    const dropped = this.db
-      .prepare('SELECT context FROM positions GROUP BY context HAVING MAX(timestamp) < ? AND context IS NOT ?')
-      .all(cutoff, keep ?? null) as { context: string }[]
-    this.db
-      .prepare(
-        'DELETE FROM positions WHERE context IN (SELECT context FROM positions GROUP BY context HAVING MAX(timestamp) < ?) AND context IS NOT ?',
-      )
-      .run(cutoff, keep ?? null)
+    // Per context through the (context, timestamp) index rather than one
+    // DELETE over the table: that index cannot seek on a timestamp alone, so a
+    // single statement would scan every row each hour even with nothing to
+    // drop. The grouping below reads only the index.
+    const spans = this.db
+      .prepare('SELECT context, MIN(timestamp) AS oldest, MAX(timestamp) AS newest FROM positions GROUP BY context')
+      .all() as { context: string; oldest: number; newest: number }[]
+    const aged = spans.filter(({ context, oldest }) => context !== keep && oldest < cutoff)
+    const trim = this.db.prepare('DELETE FROM positions WHERE context = ? AND timestamp < ?')
+    for (const { context } of aged) {
+      trim.run(context, cutoff)
+    }
+    const dropped = aged.filter(({ newest }) => newest < cutoff)
     // A vessel that has aged out takes its name with it, or this table grows
     // for every target a harbour ever put past the receiver. The remembered
     // copy goes too, or a vessel returning under the same name would be taken
@@ -722,10 +728,6 @@ export class SqliteTrackStore implements TrackStore {
     for (const { context } of dropped) {
       this.lastStored.delete(context)
     }
-    // Scoped to `keep` when there is one: this retention is configured as "days
-    // of the own vessel's track to keep", and applying it to every context
-    // would truncate an AIS vessel's track on a setting that does not name it.
-    // Unscoped without a `keep`, which is how a standalone store behaves.
     if (this.binRetention > 0) {
       const expired = this.db
         .prepare('SELECT * FROM recycle_bin WHERE purged = 0 AND deleted_at < ? ORDER BY whole DESC')
@@ -737,6 +739,9 @@ export class SqliteTrackStore implements TrackStore {
         }
       }
     }
+    // Scoped to `keep` when there is one: other vessels age out by `maxAge`
+    // above, so `retention` is the kept vessel's alone. Unscoped without a
+    // `keep`, which is how a standalone store behaves.
     if (this.retention > 0) {
       const oldest = now - this.retention
       if (keep === undefined) {

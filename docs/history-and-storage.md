@@ -15,11 +15,13 @@ The plugin writes its positions to a SQLite file in its data directory, so they
 survive a restart. A power cut can still lose the most recent ones, because
 they are not forced onto the storage one at a time (on an SD card each such
 write can take seconds), but it cannot damage the file. How long they are kept
-depends on two settings: the own vessel's track is kept indefinitely by
-default, and another vessel is dropped 30 days after its last fix.
+depends on whose they are: the own vessel's track is kept indefinitely, and
+another vessel's positions are dropped after the number of days set in the
+plugin settings, whether it is still in range or not. Setting that to 0 keeps
+every position.
 
 So the provider is the finer record of the recent past, and the plugin's store
-is what remains of everything older. The interval and the retention are both
+keeps the older track, within its own retention. The interval and the retention are both
 settings on the plugin's configuration page, which is where their current
 defaults are shown.
 
