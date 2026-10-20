@@ -450,6 +450,17 @@ class HistoryReads {
 }
 
 /**
+ * A base station or an aid to navigation reports the same position for as
+ * long as it is in range, so recording it would store a growing pile of
+ * identical points and no track.
+ */
+const FIXED_STATION_PREFIXES = ['shore.', 'atons.']
+
+function isFixedStation(context: string): boolean {
+  return FIXED_STATION_PREFIXES.some((prefix) => context.startsWith(prefix))
+}
+
+/**
  * Config values arrive from the plugin UI as numbers, but a hand-edited
  * settings file can supply strings. Accept both, reject anything non-finite so
  * a bad value falls back to the default instead of poisoning arithmetic with NaN.
@@ -1077,6 +1088,7 @@ export default function ThePlugin(app: App): Plugin {
       onStop.push(
         app.streambundle.getBus('navigation.position').onValue((update: ContextPosition): void => {
           if (!update.value || update.value.latitude == null || update.value.longitude == null) return
+          if (isFixedStation(update.context)) return
           sourceWatch.add(update.context, update.$source)
           // Captured here rather than by subscribing to `name`: the data model
           // already holds it by the time a position arrives, and a vessel with
