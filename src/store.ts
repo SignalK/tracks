@@ -99,11 +99,11 @@ export interface TrackStore {
   nameFor(context: Context): string | undefined
 
   /**
-   * Drop contexts whose newest position is older than `maxAge` ms. A store
-   * that keeps every position it is given also drops the older positions of a
-   * context that is still reporting, or a vessel that never leaves receiver
-   * range grows without bound; one that keeps a fixed number per context is
-   * bounded already.
+   * Drop positions older than `maxAge` ms from every context except `keep`,
+   * including a context that is still reporting, or a vessel that never
+   * leaves receiver range grows without bound. A context left with no
+   * positions is dropped. A store that keeps a fixed number of positions per
+   * context is bounded already and may only drop whole idle contexts.
    *
    * `keep` is never pruned however long it has been idle. The own vessel's
    * track is the one a user came for — it has to survive a winter on a

@@ -686,13 +686,6 @@ export class SqliteTrackStore implements TrackStore {
    */
   prune(maxAge: number, keep?: Context, now = Date.now()): void {
     const cutoff = now - maxAge
-    // Every other vessel's positions older than the cutoff go, not only those
-    // of a vessel that has gone quiet: a neighbour in the marina or a fixed
-    // berth never goes quiet, and its track would otherwise grow for as long
-    // as it stays in range. A vessel left with no positions is dropped. `keep`
-    // — the own vessel — is excluded: its track has to survive a winter on a
-    // mooring.
-    //
     // Per context through the (context, timestamp) index rather than one
     // DELETE over the table: that index cannot seek on a timestamp alone, so a
     // single statement would scan every row each hour even with nothing to
