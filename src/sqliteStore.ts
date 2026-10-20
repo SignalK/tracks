@@ -680,6 +680,10 @@ export class SqliteTrackStore implements TrackStore {
     return row?.name
   }
 
+  /**
+   * Age out other vessels position by position, as `TrackStore.prune`
+   * describes: a vessel that stays in range would otherwise keep every row.
+   */
   prune(maxAge: number, keep?: Context, now = Date.now()): void {
     const cutoff = now - maxAge
     // Every other vessel's positions older than the cutoff go, not only those
