@@ -199,6 +199,29 @@ describe('clip reads', () => {
     store.close()
   })
 
+  // An own-vessel trail asked for a view over a busy anchorage must not read
+  // the AIS traffic recorded there. That is a cost with no visible effect on
+  // the answer, so the spy on the clip read is what pins it.
+  it('reads near the box only the requested contexts', async () => {
+    const { store, all } = seeded()
+    store.newPosition(other, inside, MINUTE)
+    const near = vi.spyOn(store as unknown as { rowsNearBounds: () => Map<Context, unknown[]> }, 'rowsNearBounds')
+
+    const tracks = await store.getFilteredTimedTracks({
+      bbox: box,
+      radius: null,
+      intersects: true,
+      clip: true,
+      contexts: [ctx],
+    })
+    expect(Object.keys(tracks)).toEqual([ctx])
+    expect(clipToBounds(tracks[ctx]!, box)).toEqual(clipToBounds(all, box))
+    expect([...near.mock.results[0]!.value.keys()]).toEqual([ctx])
+    await store.getFilteredTimedTracks({ bbox: box, radius: null, intersects: true, clip: true })
+    expect([...near.mock.results[1]!.value.keys()].sort()).toEqual([ctx, other].sort())
+    store.close()
+  })
+
   it('keeps the edge points inside the time window', async () => {
     const { store } = seeded()
     const enter = 24 * 60 * MINUTE
