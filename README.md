@@ -28,6 +28,7 @@ reaches, and the store is what remains of everything older or of any period the 
 
 Nothing needs configuring for this, and the plugin works fully with no provider installed. Its own
 store is a SQLite file in the plugin's data directory, so tracks survive a restart on their own.
+Base stations and aids to navigation are not recorded, since their position never changes.
 See [docs/history-and-storage.md](docs/history-and-storage.md) for what that means in practice.
 
 The own vessel is kept indefinitely by default. Other vessels are kept for 30 days after their last

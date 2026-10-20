@@ -204,6 +204,32 @@ describe('own vessel retention', () => {
   })
 })
 
+// A base station or an aid to navigation never moves, so a track of it is a
+// pile of identical points that grows for as long as it stays in range.
+describe('fixed stations', () => {
+  it('records vessels but not base stations or aids to navigation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-fixed-'))
+    const { app, emit } = createApp(dir)
+    const plugin = ThePlugin(app)
+    try {
+      await plugin.start({ resolution: 0 })
+      const station = 'shore.basestations.urn:mrn:imo:mmsi:002442000' as ContextPosition['context']
+      const aton = 'atons.urn:mrn:imo:mmsi:992446001' as ContextPosition['context']
+      const vessel = 'vessels.urn:mrn:imo:mmsi:987654321' as ContextPosition['context']
+      emit(station, [60, 24], Date.now())
+      emit(aton, [60.1, 24.1], Date.now())
+      emit(vessel, [61, 25], Date.now())
+
+      await expect(plugin.getTracks()?.get(vessel)).resolves.toHaveLength(1)
+      await expect(plugin.getTracks()?.get(station)).rejects.toThrow()
+      await expect(plugin.getTracks()?.get(aton)).rejects.toThrow()
+    } finally {
+      await plugin.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 // A track recorder is only useful if it is recording. Installing it and then
 // having to find and enable it loses exactly the passage the user installed it
 // for, so the descriptor says so and this pins it.
