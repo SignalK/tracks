@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createServer } from 'node:http'
 import type { Worker } from 'node:worker_threads'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AsyncTrackStore } from './asyncTrackStore.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import type { Debug, ImportedTrack, LatLngTuple } from './types.js'
@@ -200,13 +200,16 @@ describe('worker-owned SQLite', () => {
   })
   it('resumes below the low-water mark and reports dropped operations', async () => {
     const errors: Error[] = []
-    const resumed: string[] = []
+    let resume: (message: string) => void = () => {}
+    // Resuming waits for the worker to start and commit, which can take a busy
+    // Windows runner seconds, so the test waits for the event itself.
+    const resumed = new Promise<string>((resolve) => (resume = resolve))
     const store = new AsyncTrackStore(
       { file: join(dir, 'tracks.db'), resolution: 100 },
       debug,
       (error) => errors.push(error),
       { maxItems: 2 },
-      (message) => resumed.push(message),
+      (message) => resume(message),
     )
     open.push(store)
     store.newPosition('self', [60, 24], 100)
@@ -214,8 +217,7 @@ describe('worker-owned SQLite', () => {
     store.newPosition('self', [62, 26], 300)
     store.newPosition('self', [63, 27], 400)
     expect(errors).toHaveLength(1)
-    await vi.waitFor(() => expect(resumed).toHaveLength(1))
-    expect(resumed[0]).toContain('2 operations dropped')
+    expect(await resumed).toContain('2 operations dropped')
     store.newPosition('self', [64, 28], 401)
     expect(await store.get('self')).toEqual([
       [60, 24],
