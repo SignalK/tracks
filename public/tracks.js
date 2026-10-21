@@ -39,6 +39,12 @@ const REQUEST_TIMEOUT_MS = 30_000
 
 /** Relative, because the server mounts this under /@signalk/tracks-plugin. */
 const TRACKS_URL = `../../signalk/v2/api/tracks?geometry=false&duration=${WINDOW_V2}`
+/**
+ * The own vessel's tracks alone, asked for beside the whole list: one vessel
+ * answers at once, while every AIS target a busy receiver heard in a month
+ * can take the store many seconds.
+ */
+const OWN_TRACKS_URL = `${TRACKS_URL}&contexts=vessels.self`
 /** One track by its id, on a server that serves them so. */
 const TRACK_URL = '../../signalk/v2/api/tracks/'
 /** Every import, in the shape of the list's rows; the window above misses old and untimed ones. */
@@ -229,6 +235,45 @@ async function namesByProvider(listed, unlisted, signal) {
   }
 }
 
+/**
+ * Whether a listed entry can be shown. Skipped rather than thrown on: one
+ * malformed feature should not blank a list that is otherwise fine.
+ */
+function listable(properties) {
+  return (
+    properties &&
+    // An import may name no vessel; it is still listed, so it can be deleted.
+    (typeof properties.context === 'string' || typeof properties.name === 'string') &&
+    Number.isFinite(properties.pointCount)
+  )
+}
+
+/**
+ * Puts the entries that can be shown in the table, newest first: the track
+ * someone came to look at is almost always the one that just finished.
+ */
+function draw(entries) {
+  const sorted = entries.filter(listable).sort((a, b) => String(b.to ?? '').localeCompare(String(a.to ?? '')))
+  // Replaced even with nothing, so the own vessel's rows shown while the list
+  // loaded do not outlive a list that has none.
+  tbody.replaceChildren(...sorted.map(row))
+  table.hidden = sorted.length === 0
+  return sorted
+}
+
+/** The own vessel's listed tracks, or none when that request fails: the whole list reports it. */
+async function ownTracks(signal) {
+  try {
+    const response = await fetch(OWN_TRACKS_URL, { credentials: 'include', signal })
+    const body = response.ok ? await response.json() : undefined
+    return body?.type === 'FeatureCollection' && Array.isArray(body.features)
+      ? body.features.map((feature) => feature?.properties)
+      : []
+  } catch {
+    return []
+  }
+}
+
 async function load() {
   // Bounded, because an unsettled fetch is the one failure the page cannot
   // recover from: every other path ends in an error message, while a stalled
@@ -236,22 +281,57 @@ async function load() {
   // hang rather than a failure. The signal stays armed through json() below,
   // so a response that stops mid-body is caught too.
   const deadline = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  // A month of AIS traffic can keep a busy store for a while: the wait counts
+  // up, and the own vessel's tracks show as soon as they are in.
+  const started = Date.now()
+  const progress = { waiting: 'Loading…', answered: false }
+  const tick = () => show(`${progress.waiting} ${Math.round((Date.now() - started) / 1000)} s`)
+  const ticker = setInterval(tick, 1000)
+  // The status is a live region: busy while it counts, so a screen reader
+  // announces where the wait ended rather than every second of it.
+  status.setAttribute('aria-busy', 'true')
+  void ownTracks(deadline).then((own) => {
+    // Once the whole list has ended, in rows or a message, it says
+    // everything this would.
+    if (progress.answered || own.filter(listable).length === 0) {
+      return
+    }
+    draw(own)
+    progress.waiting = 'Loading the other vessels…'
+    tick()
+  })
+  try {
+    await list(deadline, progress)
+  } finally {
+    clearInterval(ticker)
+    status.setAttribute('aria-busy', 'false')
+  }
+}
+
+async function list(deadline, progress) {
+  // Every way this ends marks the list answered in the same step as what it
+  // shows, so the own vessel's rows can neither land on top of it nor be held
+  // back while its body is still on the way.
+  const end = (message, state) => {
+    progress.answered = true
+    show(message, state)
+  }
   const imports = allImports(deadline)
   let response
   try {
     response = await fetch(TRACKS_URL, { credentials: 'include', signal: deadline })
   } catch {
-    show(deadline.aborted ? 'The server did not answer in time.' : 'Could not reach the server.', 'error')
+    end(deadline.aborted ? 'The server did not answer in time.' : 'Could not reach the server.', 'error')
     return
   }
   // 501 is the server saying no provider is registered, which is a different
   // thing from an error and worth telling the user plainly.
   if (response.status === 501) {
-    show('No track provider is registered on this server.', 'error')
+    end('No track provider is registered on this server.', 'error')
     return
   }
   if (!response.ok) {
-    show(`The server answered ${response.status}.`, 'error')
+    end(`The server answered ${response.status}.`, 'error')
     return
   }
 
@@ -263,7 +343,7 @@ async function load() {
     // body that stops mid-stream, which the deadline above aborts here rather
     // than at the fetch. Without this the rejection escapes `void load()` and
     // the page sits on "Loading…" forever, which looks like a hang.
-    show(
+    end(
       deadline.aborted ? 'The server did not answer in time.' : 'The server sent a response this page could not read.',
       'error',
     )
@@ -273,11 +353,9 @@ async function load() {
   // is a failure, not an empty list. Reporting "no tracks" for it would tell
   // the user the opposite of what happened.
   if (body?.type !== 'FeatureCollection' || !Array.isArray(body.features)) {
-    show('The server sent a response this page could not read.', 'error')
+    end('The server sent a response this page could not read.', 'error')
     return
   }
-  // Individual entries are still skipped rather than thrown on: one malformed
-  // feature should not blank a list that is otherwise fine.
   const listed = body.features.map((feature) => feature?.properties)
   const ids = new Set(listed.map(localId))
   const unlisted = (await imports).filter((properties) => !ids.has(localId(properties)))
@@ -287,17 +365,8 @@ async function load() {
   const older = (await namesByProvider(listed, unlisted, deadline))
     ? unlisted
     : unlisted.map((properties) => ({ ...properties, id: localId(properties), providerId: undefined }))
-  // Newest first: the track someone came to look at is almost always the one
-  // that just finished.
-  const sorted = [...listed, ...older]
-    // An import may name no vessel; it is still listed, so it can be deleted.
-    .filter(
-      (properties) =>
-        properties &&
-        (typeof properties.context === 'string' || typeof properties.name === 'string') &&
-        Number.isFinite(properties.pointCount),
-    )
-    .sort((a, b) => String(b.to ?? '').localeCompare(String(a.to ?? '')))
+  progress.answered = true
+  const sorted = draw([...listed, ...older])
 
   // Checked after filtering, not before: a response of nothing but malformed
   // features would otherwise draw an empty table reading "0 tracks".
@@ -306,8 +375,6 @@ async function load() {
     return
   }
 
-  tbody.replaceChildren(...sorted.map(row))
-  table.hidden = false
   const tracks = `${sorted.length} track${sorted.length === 1 ? '' : 's'}`
   show(older.length > 0 ? `${tracks}: the last 30 days, and every import.` : `${tracks} in the last 30 days.`)
 }

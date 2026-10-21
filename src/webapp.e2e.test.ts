@@ -46,12 +46,15 @@ describe('the webapp is served by a real server', () => {
     // out of the source, which would pin how the request happens to be
     // written rather than where it goes.
     const { requested } = await renderShippedPage(await (await fetchApp('tracks.js')).text())
-    expect(requested).toHaveLength(2)
-    const [imports, tracks] = [...requested].sort()
+    expect(requested).toHaveLength(3)
+    // The own vessel's request is the list's with `contexts` added, so it sorts after it.
+    const [imports, tracks, own] = [...requested].sort()
 
-    const listed = await fetch(new URL(tracks!, page))
-    expect(listed.status).toBe(200)
-    expect(await listed.json()).toHaveProperty('features')
+    for (const url of [tracks!, own!]) {
+      const listed = await fetch(new URL(url, page))
+      expect(listed.status, url).toBe(200)
+      expect(await listed.json(), url).toHaveProperty('features')
+    }
 
     // Every import, from the plugin's own route.
     const all = await fetch(new URL(imports!, page))
@@ -70,6 +73,7 @@ async function renderShippedPage(source: string): Promise<{ requested: string[] 
   const stub = () => {
     const el: Record<string, unknown> = { dataset: {}, hidden: false, textContent: '', className: '' }
     Object.assign(el, {
+      setAttribute: () => undefined,
       append: () => undefined,
       replaceChildren: () => undefined,
       querySelector: () => el,
