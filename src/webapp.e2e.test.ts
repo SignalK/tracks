@@ -73,6 +73,7 @@ async function renderShippedPage(source: string): Promise<{ requested: string[] 
   const stub = () => {
     const el: Record<string, unknown> = { dataset: {}, hidden: false, textContent: '', className: '' }
     Object.assign(el, {
+      setAttribute: () => undefined,
       append: () => undefined,
       replaceChildren: () => undefined,
       querySelector: () => el,
