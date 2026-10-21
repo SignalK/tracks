@@ -533,6 +533,35 @@ describe('getTracks', () => {
 
   // The points of every AIS target over weeks are what made the list slow:
   // read in the worker, then copied to the main thread only to be counted.
+  it('asks history once for what it holds when listing', async () => {
+    let probes = 0
+    const h = createHarness({
+      history: {
+        get contexts() {
+          probes++
+          return [SELF_CONTEXT]
+        },
+        rows: [],
+      },
+    })
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      h.seedTrack(SELF_CONTEXT, [[60.1, 24.9]], [t0])
+      h.seedTrack(OTHER_CONTEXT, [[60.2, 25.0]], [t0])
+
+      const res = await providerOf(h).getTracks({
+        from: Temporal.Instant.fromEpochMilliseconds(t0 - 60_000),
+        to: Temporal.Instant.fromEpochMilliseconds(t0 + 60_000),
+        geometry: false,
+      })
+
+      expect(res.features).toHaveLength(2)
+      expect(probes).toBe(1)
+    } finally {
+      await h.stop()
+    }
+  })
+
   it('lists from summaries, reading points only for what history holds', async () => {
     const debug = Object.assign(() => {}, { enabled: false })
     const store = new SqliteTrackStore({ file: ':memory:' }, debug)

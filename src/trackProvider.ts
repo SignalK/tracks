@@ -204,6 +204,8 @@ export type TrackProvider = TrackApi & {
 export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
   const matching = async (
     query: TracksRequest,
+    /** What history lists for the window, when the caller has asked already. */
+    known?: ReadonlySet<string>,
   ): Promise<{ tracks: Map<string, TimedPosition[]>; resolution: number | undefined }> => {
     const store = deps.store()
     if (!store) {
@@ -254,7 +256,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     // recorded. The store's own points, if any, still take part in the
     // reconciliation; whether such a context matches the box is decided on
     // the reconciled track, since the store could not decide it.
-    const listed = await deps.historyContexts(window)
+    const listed = known ?? (await deps.historyContexts(window))
     const fromHistory = [...(listed ?? [])].filter(
       (context) => !(context in collection) && (!wanted || wanted.includes(context)),
     )
@@ -336,7 +338,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
    */
   const listing = async (
     query: TracksRequest,
-  ): Promise<{ summaries: TrackSummary[]; reconciled: string[] } | undefined> => {
+  ): Promise<{ summaries: TrackSummary[]; reconciled: string[]; history: ReadonlySet<string> } | undefined> => {
     const store = deps.store()
     if (
       !store?.summarize ||
@@ -362,6 +364,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     return {
       summaries: summaries.filter(({ context }) => !listed.has(context)),
       reconciled: [...listed].filter((context) => !wanted || wanted.includes(context)),
+      history: listed,
     }
   }
 
@@ -493,12 +496,12 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
 
   return {
     async getTracks(query: TracksRequest): Promise<TracksResponse> {
-      const listed = await listing(query)
-      const { tracks: matched, resolution: requested } = !listed
+      const list = await listing(query)
+      const { tracks: matched, resolution: requested } = !list
         ? await matching(query)
         : // An empty contexts list would ask for every context, not none.
-          listed.reconciled.length > 0
-          ? await matching({ ...query, contexts: listed.reconciled })
+          list.reconciled.length > 0
+          ? await matching({ ...query, contexts: list.reconciled }, list.history)
           : { tracks: new Map<string, TimedPosition[]>(), resolution: undefined }
       const gap = deps.segmentGap()
       const features: TrackFeature[] = []
@@ -508,7 +511,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
           features.push(feature)
         }
       }
-      for (const { context, pointCount, first, last, bbox } of listed?.summaries ?? []) {
+      for (const { context, pointCount, first, last, bbox } of list?.summaries ?? []) {
         // What shapeFeature reports for the same points, which nothing reshapes.
         features.push({
           type: 'Feature',

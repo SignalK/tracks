@@ -519,32 +519,47 @@ export class SqliteTrackStore implements TrackStore {
     // A list of every vessel reads every row of the window, which in table
     // order is one sequential pass. Left to choose, SQLite walks the
     // (context, timestamp) index for the GROUP BY instead, a row lookup per
-    // position: 5.3 s against 1.4 s over 1.17 M rows. Named contexts keep the
+    // position: 6.3 s against 4.2 s over 1.17 M rows. Named contexts keep the
     // index, which reads only theirs.
     const rows = `FROM positions${contexts ? '' : ' NOT INDEXED'}${clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : ''}`
-    const totals = this.db
+    // Grouped by longitude too, since the bounds need every distinct one: a
+    // track across the antimeridian spans the narrower way round. One
+    // statement, so the counts and the bounds come from the same snapshot,
+    // and streamed rather than read whole: 40 MB against a few hundred for
+    // 413,000 groups.
+    const groups = this.db
       .prepare(
-        `SELECT context, COUNT(*) AS pointCount, MIN(timestamp) AS first, MAX(timestamp) AS last,
-                MIN(lat) AS south, MAX(lat) AS north ${rows} GROUP BY context`,
+        `SELECT context, lon, COUNT(*) AS count, MIN(timestamp) AS first, MAX(timestamp) AS last,
+                MIN(lat) AS south, MAX(lat) AS north ${rows} GROUP BY context, lon`,
       )
-      .all(...params) as unknown as (Omit<TrackSummary, 'bbox'> & { south: number; north: number })[]
-    // The bounds need every distinct longitude, since a track across the
-    // antimeridian spans the narrower way round. Streamed rather than read
-    // whole: 39 MB against 229 MB for 413,000 of them, for a second more.
-    const longitudes = new Map<Context, number[]>()
-    const distinct = this.db
-      .prepare(`SELECT context, lon ${rows} GROUP BY context, lon`)
       .iterate(...params) as Iterable<{
       context: Context
       lon: number
+      count: number
+      first: number
+      last: number
+      south: number
+      north: number
     }>
-    for (const { context, lon } of distinct) {
-      const own = longitudes.get(context)
-      if (own) own.push(lon)
-      else longitudes.set(context, [lon])
+    const tracks = new Map<
+      Context,
+      Omit<TrackSummary, 'bbox'> & { south: number; north: number; longitudes: number[] }
+    >()
+    for (const { context, lon, count, first, last, south, north } of groups) {
+      const track = tracks.get(context)
+      if (!track) {
+        tracks.set(context, { context, pointCount: count, first, last, south, north, longitudes: [lon] })
+        continue
+      }
+      track.pointCount += count
+      track.first = Math.min(track.first, first)
+      track.last = Math.max(track.last, last)
+      track.south = Math.min(track.south, south)
+      track.north = Math.max(track.north, north)
+      track.longitudes.push(lon)
     }
-    return totals.map(({ context, pointCount, first, last, south, north }) => {
-      const [west, east] = longitudeSpan(longitudes.get(context)!)
+    return [...tracks.values()].map(({ context, pointCount, first, last, south, north, longitudes }) => {
+      const [west, east] = longitudeSpan(longitudes)
       return { context, pointCount, first, last, bbox: [west, south, east, north] }
     })
   }
