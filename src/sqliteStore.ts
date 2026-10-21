@@ -551,10 +551,10 @@ export class SqliteTrackStore implements TrackStore {
     debug?: Debug,
     query?: TrackQuery,
   ): Promise<TimedTrackCollection> {
+    const requested = params.contexts ? new Set(params.contexts) : undefined
     // A clipped query needs only the stretches near the box, so it reads those
     // instead of every position each candidate has in the window.
-    const near = params.bbox && params.clip ? this.rowsNearBounds(params.bbox, query?.window) : undefined
-    const requested = params.contexts ? new Set(params.contexts) : undefined
+    const near = params.bbox && params.clip ? this.rowsNearBounds(params.bbox, query?.window, requested) : undefined
     // The cell prefilter reads every row of every vessel near the box, at any
     // time, so for named contexts, which are read anyway, it only adds cost: a
     // view over a busy harbour would turn one own-vessel query into a scan of
@@ -640,8 +640,18 @@ export class SqliteTrackStore implements TrackStore {
    * Nothing between two stretches is inside the box, so skipping it loses
    * nothing the clip would keep: how they are grouped decides only how many
    * rows are read, never the result.
+   *
+   * With `contexts` given, only those are read. Every other vessel near the
+   * box would be dropped afterwards, and over a busy anchorage reading them
+   * costs seconds: the box holds all the AIS traffic ever recorded there, and
+   * SQLite answers the unnarrowed read by walking the whole (context,
+   * timestamp) index.
    */
-  private rowsNearBounds(bounds: GeoBounds, window?: TimeWindow): Map<Context, PositionRow[]> {
+  private rowsNearBounds(
+    bounds: GeoBounds,
+    window?: TimeWindow,
+    contexts?: ReadonlySet<Context>,
+  ): Map<Context, PositionRow[]> {
     const near = new Map<Context, PositionRow[]>()
     const clause = this.coveringClause(bounds)
     if (!clause) {
@@ -650,12 +660,14 @@ export class SqliteTrackStore implements TrackStore {
     const timeClauses = window ? ['timestamp >= ?', window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?'] : []
     const timeParams = window ? [window.from, window.to] : []
     const inWindow = timeClauses.map((c) => ` AND ${c}`).join('')
+    const named = contexts ? [...contexts] : []
+    const inContexts = contexts ? ` AND context IN (${named.map(() => '?').join(', ')})` : ''
 
     const inside = this.db
       .prepare(
-        `SELECT context, timestamp, lat, lon FROM positions WHERE (${clause.where})${inWindow} ORDER BY context, timestamp`,
+        `SELECT context, timestamp, lat, lon FROM positions WHERE (${clause.where})${inContexts}${inWindow} ORDER BY context, timestamp`,
       )
-      .all(...clause.params, ...timeParams) as unknown as PositionRow[]
+      .all(...clause.params, ...named, ...timeParams) as unknown as PositionRow[]
     const inBounds = createInBounds(bounds)
     const times = new Map<Context, number[]>()
     for (const { context, timestamp, lat, lon } of inside) {
