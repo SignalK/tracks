@@ -60,13 +60,13 @@ export interface TrackProviderDeps {
    */
   /**
    * Contexts a history provider holds data for within the window, empty when
-   * there is no provider.
+   * there is no provider, undefined when the provider could not say.
    *
    * The store can be far younger than the provider, so it alone cannot say
    * which vessels exist or which passed through a box: a vessel recorded
    * only before this plugin was installed is known to history alone.
    */
-  historyContexts: (window: TimeWindow | undefined) => Promise<ReadonlySet<string>>
+  historyContexts: (window: TimeWindow | undefined) => Promise<ReadonlySet<string> | undefined>
   /** Whether a history provider holds anything at all for a context. */
   historyKnows: (context: string) => Promise<boolean>
   /** Called after a delete, so whatever hides deleted spans from history reloads them. */
@@ -246,7 +246,8 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     // recorded. The store's own points, if any, still take part in the
     // reconciliation; whether such a context matches the box is decided on
     // the reconciled track, since the store could not decide it.
-    const fromHistory = [...(await deps.historyContexts(window))].filter(
+    const listed = await deps.historyContexts(window)
+    const fromHistory = [...(listed ?? [])].filter(
       (context) => !(context in collection) && (!wanted || wanted.includes(context)),
     )
     const inBounds = bounds ? createInBounds(bounds) : undefined
@@ -265,10 +266,20 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     // Reconciled per context rather than in one pass: a history provider is
     // asked per context, and the store's own points are what a provider-less
     // install returns unchanged.
+    //
+    // A stored context the provider does not list for the window is not asked
+    // about: it holds nothing there to reconcile, and a box over a busy
+    // anchorage would otherwise send it one read per vessel in view, all at
+    // once, on every pan and zoom.
     const reconciled = await Promise.all([
       ...Object.entries(collection).map(
         async ([context, stored]) =>
-          [context, await deps.reconcileWithHistory(context, stored, window, historyResolution)] as const,
+          [
+            context,
+            listed && !listed.has(context)
+              ? stored
+              : await deps.reconcileWithHistory(context, stored, window, historyResolution),
+          ] as const,
       ),
       ...fromHistory.map(
         async (context) =>
