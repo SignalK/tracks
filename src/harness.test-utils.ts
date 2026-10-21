@@ -157,6 +157,7 @@ export function deferred(): { release: () => void; wait: Promise<void> } {
 }
 
 export interface HistoryValuesQuery {
+  context: string
   from: { toString: () => string }
   to: { toString: () => string }
   resolution?: number

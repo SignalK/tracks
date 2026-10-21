@@ -838,6 +838,38 @@ describe('positions only a history provider holds', () => {
     }
   })
 
+  // A box over a busy anchorage would otherwise cost the provider one read per
+  // vessel in view, on every pan and zoom.
+  it('asks history only about the vessels it lists for the window', async () => {
+    const asked: HistoryValuesQuery[] = []
+    const h = createHarness({ history: { contexts: [SELF_CONTEXT], rows: [], onValues: (query) => asked.push(query) } })
+    try {
+      h.seedTrack(SELF_CONTEXT, [[60.5, 24.5]], [t0])
+      h.seedTrack(OTHER_CONTEXT, [[60.6, 24.6]], [t0])
+      const res = await providerOf(h).getTracks({ ...window, bbox, clip: true })
+      expect(res.features.map((f) => f.properties.context).sort()).toEqual([OTHER_CONTEXT, SELF_CONTEXT].sort())
+      expect(asked.map((q) => q.context)).toEqual([SELF_CONTEXT])
+    } finally {
+      await h.stop()
+    }
+  })
+
+  it.each([
+    ['cannot list its vessels', { withoutGetContexts: true }],
+    ['fails to list them', { getContextsRejects: true }],
+  ])('asks history about every vessel when the provider %s', async (_, failure) => {
+    const asked: HistoryValuesQuery[] = []
+    const h = createHarness({ history: { rows: [], ...failure, onValues: (query) => asked.push(query) } })
+    try {
+      h.seedTrack(SELF_CONTEXT, [[60.5, 24.5]], [t0])
+      h.seedTrack(OTHER_CONTEXT, [[60.6, 24.6]], [t0])
+      await providerOf(h).getTracks({ ...window, bbox, clip: true })
+      expect(asked.map((q) => q.context).sort()).toEqual([OTHER_CONTEXT, SELF_CONTEXT].sort())
+    } finally {
+      await h.stop()
+    }
+  })
+
   it('reads history for a window with only an end', async () => {
     const h = createHarness({ history: { contexts: [OTHER_CONTEXT], rows: rows([10, 20], [10.1, 20.1]) } })
     try {

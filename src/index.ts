@@ -559,7 +559,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  */
 interface KnownContexts {
   at: number
-  contexts: Promise<ReadonlySet<string>>
+  /** Undefined from a provider that cannot list its contexts. */
+  contexts: Promise<ReadonlySet<string> | undefined>
   /**
    * Until the provider answers. Its query cannot be cancelled, so one that
    * outlasts the caller's timeout is still running in the provider, and a
@@ -611,7 +612,7 @@ async function historyKnowsContext(
   cache: HistoryContextCache,
 ): Promise<boolean> {
   try {
-    return (await knownHistoryContexts(app, cache)).has(context)
+    return (await knownHistoryContexts(app, cache))?.has(context) === true
   } catch (err) {
     debug(`History contexts unavailable for ${context}: ${errorDetail(err)}`)
     return false
@@ -628,7 +629,7 @@ async function historyKnowsContext(
  * until the caller's timeout: the provider keeps running a query nobody waits
  * for, so asking again on every timeout stacks scans of the whole database.
  */
-function knownHistoryContexts(app: App, cache: HistoryContextCache): Promise<ReadonlySet<string>> {
+function knownHistoryContexts(app: App, cache: HistoryContextCache): Promise<ReadonlySet<string> | undefined> {
   const getHistoryApi = app.getHistoryApi
   if (!getHistoryApi) {
     return Promise.resolve(new Set())
@@ -651,7 +652,7 @@ function knownHistoryContexts(app: App, cache: HistoryContextCache): Promise<Rea
             })
           : // A provider built against an older server-api has no such
             // method. Nothing is known, and that is a cacheable answer.
-            [],
+            undefined,
       )
       // Indexed once per fetch rather than scanned per request: the branch
       // that consults this is the one an open route lets a client repeat
@@ -659,7 +660,7 @@ function knownHistoryContexts(app: App, cache: HistoryContextCache): Promise<Rea
       // vessels. The `vessels.self` spelling at least one provider returns
       // is resolved here, while `app.selfContext` is a single fixed value,
       // so the lookup itself is a plain membership test.
-      .then((listed) => toContextSet(listed, app.selfContext))
+      .then((listed) => (listed === undefined ? undefined : toContextSet(listed, app.selfContext)))
     const entry: KnownContexts = { at: now, contexts, pending: true }
     // Dated from the answer, so a list that took long to arrive is still
     // reused for the whole window. A failure is back-dated instead: the next
@@ -682,13 +683,15 @@ function knownHistoryContexts(app: App, cache: HistoryContextCache): Promise<Rea
 }
 
 /**
- * Contexts a history provider holds data for within a window, or none.
+ * Contexts a history provider holds data for within a window, or undefined
+ * when it could not say.
  *
  * What lets the v2 provider return a vessel the store has never seen, or match
  * a box on positions only history recorded: the store is often far younger
- * than the provider. Best-effort like every other provider call: no provider,
- * a provider without `getContexts`, an error or a hang all answer with no
- * contexts, and the store answers alone.
+ * than the provider. It also spares the provider a read for every vessel it
+ * does not list. Best-effort like every other provider call: no provider
+ * answers with no contexts; a provider without `getContexts`, an error or a
+ * hang answer undefined, so no vessel is ruled out on a list that never came.
  *
  * A window with no start is asked from the epoch, for the same reason the
  * existence probe is; without any window the probe's cached all-time list is
@@ -699,7 +702,7 @@ async function historyContextsIn(
   window: TimeWindow | undefined,
   debug: Debug,
   cache: HistoryContextCache,
-): Promise<ReadonlySet<string>> {
+): Promise<ReadonlySet<string> | undefined> {
   const getHistoryApi = app.getHistoryApi
   if (!getHistoryApi) {
     return new Set()
@@ -725,14 +728,14 @@ async function historyContextsIn(
       if (debug.enabled) {
         debug('History contexts skipped: an earlier windowed query is still running')
       }
-      return new Set()
+      return undefined
     }
     const historyApi = await withTimeout(
       getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
       HISTORY_QUERY_TIMEOUT_MS,
     )
     if (!historyApi.getContexts) {
-      return new Set()
+      return undefined
     }
     const query = historyApi.getContexts({
       from: Temporal.Instant.from(new Date(Math.max(window.from, EXISTENCE_PROBE_FROM_MS)).toISOString()),
@@ -747,7 +750,7 @@ async function historyContextsIn(
     if (debug.enabled) {
       debug(`History contexts unavailable: ${errorDetail(err)}`)
     }
-    return new Set()
+    return undefined
   }
 }
 
