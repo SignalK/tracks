@@ -178,11 +178,20 @@ const element = (tagName: string): StubElement => {
   })
 }
 
+type Answer = { status?: number; ok?: boolean; body?: unknown } | Error | 'stall' | 'stall-body'
+
 async function render(
-  response: { status?: number; ok?: boolean; body?: unknown } | Error | 'stall' | 'stall-body',
-  options: { timeoutMs?: number; imports?: unknown[]; byId?: boolean } = {},
+  response: Answer,
+  /** `own` answers the request for the own vessel's tracks alone, which otherwise gets `response`. */
+  options: { timeoutMs?: number; imports?: unknown[]; byId?: boolean; own?: Answer } = {},
 ) {
   const status = element('p')
+  // Every status the page showed, in order, since the last one overwrites the rest.
+  const shown: string[] = []
+  Object.defineProperty(status, 'textContent', {
+    get: () => shown[shown.length - 1] ?? '',
+    set: (text: string) => shown.push(text),
+  })
   const tbody = element('tbody')
   const table = element('table')
   table.hidden = true
@@ -223,7 +232,8 @@ async function render(
         return Promise.resolve({ status: ok ? 200 : 404, ok, json: () => Promise.resolve({}) })
       }
       requested.push(url)
-      if (response === 'stall-body') {
+      const answer = url.includes('contexts=vessels.self') && options.own !== undefined ? options.own : response
+      if (answer === 'stall-body') {
         return Promise.resolve({
           status: 200,
           ok: true,
@@ -233,26 +243,26 @@ async function render(
             }),
         })
       }
-      if (response === 'stall') {
+      if (answer === 'stall') {
         // Never settles on its own: only the page's own deadline ends it, which
         // is the thing under test.
         return new Promise((_resolve, reject) => {
           init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
         })
       }
-      if (response instanceof Error) {
-        return Promise.reject(response)
+      if (answer instanceof Error) {
+        return Promise.reject(answer)
       }
       return Promise.resolve({
-        status: response.status ?? 200,
-        ok: response.ok ?? true,
-        json: () => (response.body instanceof Error ? Promise.reject(response.body) : Promise.resolve(response.body)),
+        status: answer.status ?? 200,
+        ok: answer.ok ?? true,
+        json: () => (answer.body instanceof Error ? Promise.reject(answer.body) : Promise.resolve(answer.body)),
       })
     },
     abortSignal,
   )
 
-  return { status, tbody, table, requested }
+  return { status, tbody, table, requested, shown }
 }
 
 const feature = (properties: Record<string, unknown>) => ({ type: 'Feature', geometry: null, properties })
@@ -262,12 +272,14 @@ const feature = (properties: Record<string, unknown>) => ({ type: 'Feature', geo
 // actually runs it. The duration is load-bearing: without it the API rejects
 // an unbounded multi-context query and the page shows an error.
 describe('the webapp asks the API for the right thing', () => {
-  const requestedUrl = async () => {
+  /** The list request, or with `own` the one for the own vessel's tracks alone. */
+  const requestedUrl = async (own = false) => {
     const { requested } = await render({ body: { type: 'FeatureCollection', features: [] } })
-    expect(requested).toHaveLength(1)
+    expect(requested).toHaveLength(2)
     // Resolved against where the server mounts the page, which is what makes
     // the relative path meaningful.
-    return new URL(requested[0]!, 'http://localhost/@signalk/tracks-plugin/index.html')
+    const urls = requested.map((url) => new URL(url, 'http://localhost/@signalk/tracks-plugin/index.html'))
+    return urls.find(({ searchParams }) => searchParams.has('contexts') === own)!
   }
 
   it('climbs out of the scoped mount to the v2 endpoint', async () => {
@@ -277,6 +289,15 @@ describe('the webapp asks the API for the right thing', () => {
   it('asks for metadata only, over a bounded window', async () => {
     const { searchParams } = await requestedUrl()
 
+    expect(searchParams.get('geometry')).toBe('false')
+    expect(searchParams.get('duration')).toBe('P30D')
+  })
+
+  it('asks for the own vessel’s tracks alone beside the list', async () => {
+    const { pathname, searchParams } = await requestedUrl(true)
+
+    expect(pathname).toBe('/signalk/v2/api/tracks')
+    expect(searchParams.get('contexts')).toBe('vessels.self')
     expect(searchParams.get('geometry')).toBe('false')
     expect(searchParams.get('duration')).toBe('P30D')
   })
@@ -416,6 +437,34 @@ describe('the webapp renders what the API returns', () => {
     expect(table.hidden).toBe(true)
     expect(status.dataset.state).toBe('error')
     expect(status.textContent).toContain('in time')
+  })
+
+  // A month of AIS traffic can keep a busy store for many seconds, while the
+  // own vessel alone answers at once.
+  it('shows the own vessel while the others load, and keeps it if they never answer', async () => {
+    const own = feature({
+      context: SELF,
+      isSelf: true,
+      from: '2026-09-01T00:00:00Z',
+      to: '2026-09-01T02:00:00Z',
+      pointCount: 12,
+    })
+    const { status, tbody, table, shown } = await render('stall', {
+      timeoutMs: 50,
+      own: { body: { type: 'FeatureCollection', features: [own] } },
+    })
+
+    expect(table.hidden).toBe(false)
+    expect(tbody.children.map((tr) => tr.children[0]!.textContent)).toEqual(['Own Ship'])
+    expect(shown.some((text) => text.startsWith('Loading the other vessels…'))).toBe(true)
+    expect(status.dataset.state).toBe('error')
+    expect(status.textContent).toContain('in time')
+  })
+
+  it('counts the wait up rather than sitting on Loading…', async () => {
+    const { shown } = await render('stall', { timeoutMs: 1300 })
+
+    expect(shown).toContain('Loading… 1 s')
   })
 
   it('reports an unreachable server', async () => {
