@@ -10,6 +10,7 @@ export type StoreMethod =
   | 'getAllTracks'
   | 'getFilteredTracks'
   | 'getFilteredTimedTracks'
+  | 'summarize'
   | 'storeImport'
   | 'getImport'
   | 'findImports'

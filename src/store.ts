@@ -13,6 +13,7 @@ import type {
   TimeWindow,
   TrackCollection,
   TrackParams,
+  TrackSummary,
 } from './types.js'
 import type { TrackQuery } from './timeWindow.js'
 
@@ -129,6 +130,13 @@ export interface TrackStore {
    * keeps it out of a real configuration.
    */
   prune(maxAge: number, keep?: Context): void
+
+  /**
+   * Each context's track in a window as a listing describes it, without its
+   * points: those of `contexts` the store holds, or every one. Optional: a
+   * caller without it reads the points and summarises them itself.
+   */
+  summarize?(contexts: Context[] | undefined, window?: TimeWindow): TrackSummary[] | Promise<TrackSummary[]>
 
   /**
    * Keep a track a client imported. Optional: a store that only records what

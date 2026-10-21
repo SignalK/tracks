@@ -22,6 +22,7 @@ import type {
   TimeWindow,
   TrackCollection,
   TrackParams,
+  TrackSummary,
 } from './types.js'
 
 export class TransactionStateError extends Error {}
@@ -497,6 +498,70 @@ export class SqliteTrackStore implements TrackStore {
   private stored(contexts: Iterable<Context>): Context[] {
     const held = this.db.prepare('SELECT 1 AS found FROM positions WHERE context = ? LIMIT 1')
     return [...contexts].filter((context) => held.get(context) !== undefined)
+  }
+
+  /**
+   * Each context's track in a window as a listing describes it, without its
+   * points: a list of every vessel over weeks would otherwise build every
+   * position only to count them, then copy them all to the main thread.
+   */
+  summarize(contexts: Context[] | undefined, window?: TimeWindow): TrackSummary[] {
+    const clauses: string[] = []
+    const params: (string | number)[] = []
+    if (contexts) {
+      clauses.push(`context IN (${contexts.map(() => '?').join(', ')})`)
+      params.push(...contexts)
+    }
+    if (window) {
+      clauses.push('timestamp >= ?', window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?')
+      params.push(window.from, window.to)
+    }
+    // A list of every vessel reads every row of the window, which in table
+    // order is one sequential pass. Left to choose, SQLite walks the
+    // (context, timestamp) index for the GROUP BY instead, a row lookup per
+    // position: 6.3 s against 4.2 s over 1.17 M rows. Named contexts keep the
+    // index, which reads only theirs.
+    const rows = `FROM positions${contexts ? '' : ' NOT INDEXED'}${clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : ''}`
+    // Grouped by longitude too, since the bounds need every distinct one: a
+    // track across the antimeridian spans the narrower way round. One
+    // statement, so the counts and the bounds come from the same snapshot,
+    // and streamed rather than read whole: 40 MB against a few hundred for
+    // 413,000 groups.
+    const groups = this.db
+      .prepare(
+        `SELECT context, lon, COUNT(*) AS count, MIN(timestamp) AS first, MAX(timestamp) AS last,
+                MIN(lat) AS south, MAX(lat) AS north ${rows} GROUP BY context, lon`,
+      )
+      .iterate(...params) as Iterable<{
+      context: Context
+      lon: number
+      count: number
+      first: number
+      last: number
+      south: number
+      north: number
+    }>
+    const tracks = new Map<
+      Context,
+      Omit<TrackSummary, 'bbox'> & { south: number; north: number; longitudes: number[] }
+    >()
+    for (const { context, lon, count, first, last, south, north } of groups) {
+      const track = tracks.get(context)
+      if (!track) {
+        tracks.set(context, { context, pointCount: count, first, last, south, north, longitudes: [lon] })
+        continue
+      }
+      track.pointCount += count
+      track.first = Math.min(track.first, first)
+      track.last = Math.max(track.last, last)
+      track.south = Math.min(track.south, south)
+      track.north = Math.max(track.north, north)
+      track.longitudes.push(lon)
+    }
+    return [...tracks.values()].map(({ context, pointCount, first, last, south, north, longitudes }) => {
+      const [west, east] = longitudeSpan(longitudes)
+      return { context, pointCount, first, last, bbox: [west, south, east, north] }
+    })
   }
 
   getAllTracks(query?: TrackQuery): Promise<{ context: string; track: LatLngTuple[] }[]> {

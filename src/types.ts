@@ -133,6 +133,19 @@ export interface TimeWindow {
   inclusiveEnd?: boolean
 }
 
+/**
+ * A recorded track in a window as a listing describes it: how many points,
+ * when it starts and ends, and where it lies, without the points themselves.
+ */
+export interface TrackSummary {
+  context: Context
+  pointCount: number
+  first: number
+  last: number
+  /** `[west, south, east, north]`, as `longitudeSpan()` sets it across the antimeridian. */
+  bbox: [number, number, number, number]
+}
+
 export interface Position {
   latitude: number
   longitude: number
