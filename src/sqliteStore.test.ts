@@ -306,14 +306,13 @@ describe('detail at anchor', () => {
       // The stay is read at one point every four seconds, so a burst older
       // than a day keeps two of its five, where the track resolution would
       // keep one.
-      const old = points.filter(({ timestamp }) => timestamp < now - 2 * DAY)
-      const bursts = new Set(old.map(({ timestamp }) => Math.floor(timestamp / (5 * MINUTE))))
-      expect(old.length).toBeGreaterThanOrEqual(2 * bursts.size)
-      expect(old.length).toBeLessThan(5 * bursts.size)
-      expect(old.filter(({ timestamp }) => timestamp < first + 5 * MINUTE).map(({ timestamp }) => timestamp)).toEqual([
-        first,
-        first + 4000,
-      ])
+      // Two days back falls on a burst start, so no burst is cut in half.
+      const before = first + Math.floor((now - 2 * DAY - first) / (5 * MINUTE)) * 5 * MINUTE
+      const expected: number[] = []
+      for (let t = first; t < before; t += 5 * MINUTE) {
+        expected.push(t, t + 4000)
+      }
+      expect(points.map(({ timestamp }) => timestamp).filter((timestamp) => timestamp < before)).toEqual(expected)
     } finally {
       store.close()
     }
