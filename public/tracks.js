@@ -287,6 +287,9 @@ async function load() {
   const progress = { waiting: 'Loading…', answered: false }
   const tick = () => show(`${progress.waiting} ${Math.round((Date.now() - started) / 1000)} s`)
   const ticker = setInterval(tick, 1000)
+  // The status is a live region: busy while it counts, so a screen reader
+  // announces where the wait ended rather than every second of it.
+  status.setAttribute('aria-busy', 'true')
   void ownTracks(deadline).then((own) => {
     // Once the whole list has ended, in rows or a message, it says
     // everything this would.
@@ -301,6 +304,7 @@ async function load() {
     await list(deadline, progress)
   } finally {
     clearInterval(ticker)
+    status.setAttribute('aria-busy', 'false')
   }
 }
 

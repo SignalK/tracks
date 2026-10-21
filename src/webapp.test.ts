@@ -157,6 +157,7 @@ interface StubElement {
   children: StubElement[]
   href?: string
   rel?: string
+  attributes: Record<string, string>
 }
 
 const element = (tagName: string): StubElement => {
@@ -167,9 +168,13 @@ const element = (tagName: string): StubElement => {
     hidden: false,
     dataset: {},
     children: [],
+    attributes: {},
   }
   return Object.assign(el, {
     addEventListener: () => {},
+    setAttribute: (name: string, value: string) => {
+      el.attributes[name] = value
+    },
     append: (...kids: StubElement[]) => el.children.push(...kids),
     replaceChildren: (...kids: StubElement[]) => {
       el.children.length = 0
@@ -505,9 +510,11 @@ describe('the webapp renders what the API returns', () => {
   })
 
   it('counts the wait up rather than sitting on Loading…', async () => {
-    const { shown } = await render('stall', { timeoutMs: 1300 })
+    const { status, shown } = await render('stall', { timeoutMs: 1300 })
 
-    expect(shown).toContain('Loading… 1 s')
+    // How many seconds a slow runner has counted by then is its own business.
+    expect(shown.some((text) => /^Loading… \d+ s$/.test(text))).toBe(true)
+    expect(status.attributes['aria-busy']).toBe('false')
   })
 
   it('reports an unreachable server', async () => {
