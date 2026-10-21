@@ -178,7 +178,8 @@ const element = (tagName: string): StubElement => {
   })
 }
 
-type Answer = { status?: number; ok?: boolean; body?: unknown } | Error | 'stall' | 'stall-body'
+/** A response, or a failure; `delayMs` holds a response back, to order it against the other request. */
+type Answer = { status?: number; ok?: boolean; body?: unknown; delayMs?: number } | Error | 'stall' | 'stall-body'
 
 async function render(
   response: Answer,
@@ -253,11 +254,14 @@ async function render(
       if (answer instanceof Error) {
         return Promise.reject(answer)
       }
-      return Promise.resolve({
+      const reply = {
         status: answer.status ?? 200,
         ok: answer.ok ?? true,
         json: () => (answer.body instanceof Error ? Promise.reject(answer.body) : Promise.resolve(answer.body)),
-      })
+      }
+      return answer.delayMs === undefined
+        ? Promise.resolve(reply)
+        : new Promise((resolve) => setTimeout(() => resolve(reply), answer.delayMs))
     },
     abortSignal,
   )
@@ -459,6 +463,45 @@ describe('the webapp renders what the API returns', () => {
     expect(shown.some((text) => text.startsWith('Loading the other vessels…'))).toBe(true)
     expect(status.dataset.state).toBe('error')
     expect(status.textContent).toContain('in time')
+  })
+
+  // A body still on the way is not an answer yet: the own vessel shows while
+  // it comes, and stays if it never does.
+  it('shows the own vessel while the list’s body is still on the way', async () => {
+    const own = feature({
+      context: SELF,
+      isSelf: true,
+      from: '2026-09-01T00:00:00Z',
+      to: '2026-09-01T02:00:00Z',
+      pointCount: 12,
+    })
+    const { tbody, table, status } = await render('stall-body', {
+      timeoutMs: 80,
+      own: { body: { type: 'FeatureCollection', features: [own] }, delayMs: 10 },
+    })
+
+    expect(table.hidden).toBe(false)
+    expect(tbody.children.map((tr) => tr.children[0]!.textContent)).toEqual(['Own Ship'])
+    expect(status.textContent).toContain('in time')
+  })
+
+  it('clears the own vessel’s rows when the whole list has none', async () => {
+    const own = feature({
+      context: SELF,
+      isSelf: true,
+      from: '2026-09-01T00:00:00Z',
+      to: '2026-09-01T02:00:00Z',
+      pointCount: 12,
+    })
+    const { tbody, table, status, shown } = await render(
+      { body: { type: 'FeatureCollection', features: [] }, delayMs: 20 },
+      { own: { body: { type: 'FeatureCollection', features: [own] } } },
+    )
+
+    expect(shown.some((text) => text.startsWith('Loading the other vessels…'))).toBe(true)
+    expect(table.hidden).toBe(true)
+    expect(tbody.children).toEqual([])
+    expect(status.textContent).toContain('No tracks')
   })
 
   it('counts the wait up rather than sitting on Loading…', async () => {

@@ -254,10 +254,10 @@ function listable(properties) {
  */
 function draw(entries) {
   const sorted = entries.filter(listable).sort((a, b) => String(b.to ?? '').localeCompare(String(a.to ?? '')))
-  if (sorted.length > 0) {
-    tbody.replaceChildren(...sorted.map(row))
-    table.hidden = false
-  }
+  // Replaced even with nothing, so the own vessel's rows shown while the list
+  // loaded do not outlive a list that has none.
+  tbody.replaceChildren(...sorted.map(row))
+  table.hidden = sorted.length === 0
   return sorted
 }
 
@@ -288,10 +288,12 @@ async function load() {
   const tick = () => show(`${progress.waiting} ${Math.round((Date.now() - started) / 1000)} s`)
   const ticker = setInterval(tick, 1000)
   void ownTracks(deadline).then((own) => {
-    // Once the whole list has answered, it says everything this would.
-    if (progress.answered || draw(own).length === 0) {
+    // Once the whole list has ended, in rows or a message, it says
+    // everything this would.
+    if (progress.answered || own.filter(listable).length === 0) {
       return
     }
+    draw(own)
     progress.waiting = 'Loading the other vessels…'
     tick()
   })
@@ -303,24 +305,29 @@ async function load() {
 }
 
 async function list(deadline, progress) {
+  // Every way this ends marks the list answered in the same step as what it
+  // shows, so the own vessel's rows can neither land on top of it nor be held
+  // back while its body is still on the way.
+  const end = (message, state) => {
+    progress.answered = true
+    show(message, state)
+  }
   const imports = allImports(deadline)
   let response
   try {
     response = await fetch(TRACKS_URL, { credentials: 'include', signal: deadline })
   } catch {
-    progress.answered = true
-    show(deadline.aborted ? 'The server did not answer in time.' : 'Could not reach the server.', 'error')
+    end(deadline.aborted ? 'The server did not answer in time.' : 'Could not reach the server.', 'error')
     return
   }
-  progress.answered = true
   // 501 is the server saying no provider is registered, which is a different
   // thing from an error and worth telling the user plainly.
   if (response.status === 501) {
-    show('No track provider is registered on this server.', 'error')
+    end('No track provider is registered on this server.', 'error')
     return
   }
   if (!response.ok) {
-    show(`The server answered ${response.status}.`, 'error')
+    end(`The server answered ${response.status}.`, 'error')
     return
   }
 
@@ -332,7 +339,7 @@ async function list(deadline, progress) {
     // body that stops mid-stream, which the deadline above aborts here rather
     // than at the fetch. Without this the rejection escapes `void load()` and
     // the page sits on "Loading…" forever, which looks like a hang.
-    show(
+    end(
       deadline.aborted ? 'The server did not answer in time.' : 'The server sent a response this page could not read.',
       'error',
     )
@@ -342,7 +349,7 @@ async function list(deadline, progress) {
   // is a failure, not an empty list. Reporting "no tracks" for it would tell
   // the user the opposite of what happened.
   if (body?.type !== 'FeatureCollection' || !Array.isArray(body.features)) {
-    show('The server sent a response this page could not read.', 'error')
+    end('The server sent a response this page could not read.', 'error')
     return
   }
   const listed = body.features.map((feature) => feature?.properties)
@@ -354,6 +361,7 @@ async function list(deadline, progress) {
   const older = (await namesByProvider(listed, unlisted, deadline))
     ? unlisted
     : unlisted.map((properties) => ({ ...properties, id: localId(properties), providerId: undefined }))
+  progress.answered = true
   const sorted = draw([...listed, ...older])
 
   // Checked after filtering, not before: a response of nothing but malformed
