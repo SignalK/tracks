@@ -24,6 +24,9 @@
     "appIcon": "./app-icon.svg",
     "screenshots": [
       "./docs/screenshots/tracks_1.png"
+    ],
+    "recommends": [
+      "@meri-imperiumi/signalk-autostate"
     ]
   },
   "keywords": [
