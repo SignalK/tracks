@@ -37,6 +37,13 @@ const PROVIDER_ID = 'tracks'
  */
 const REQUEST_TIMEOUT_MS = 30_000
 
+/**
+ * How long the list waits for the own vessel's tracks before it is asked
+ * anyway: a third of the ceiling, leaving the rest to the list. They come in
+ * a second or two, so this only ends a request stalled on its way.
+ */
+const OWN_WAIT_MS = REQUEST_TIMEOUT_MS / 3
+
 /** Relative, because the server mounts this under /@signalk/tracks-plugin. */
 const TRACKS_URL = `../../signalk/v2/api/tracks?geometry=false&duration=${WINDOW_V2}`
 /**
@@ -293,10 +300,10 @@ async function load() {
   try {
     // The others are asked for once this is in, not beside it: the store
     // answers one query at a time, so asked together the own vessel's would
-    // wait behind the very traffic it is meant to show before. A stall here
-    // holds back nothing the list could have had, since it asks the server
-    // the same and more.
-    const own = await ownTracks(deadline)
+    // wait behind the very traffic it is meant to show before. Its shorter
+    // timer starts with the deadline, so it ends inside it, and a request
+    // stalled on its way cannot take the list's time with it.
+    const own = await ownTracks(AbortSignal.timeout(OWN_WAIT_MS))
     if (own.filter(listable).length > 0) {
       draw(own)
       waiting = 'Loading the other vessels…'
