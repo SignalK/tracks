@@ -819,7 +819,8 @@ export class SqliteTrackStore implements TrackStore {
    * the store's resolution, so a season at anchor costs what the recording
    * would have without it. A span that has not, a stay at anchor that is
    * still going on, keeps its older part at the spacing an anchor alarm reads
-   * the whole stay at, about `DETAIL_STAY_POINTS` points however long it is.
+   * the whole stay at, about `DETAIL_STAY_POINTS` points, until that spacing
+   * reaches the store's resolution, which it never goes coarser than.
    */
   private thinOldDetail(now: number): void {
     if (this.resolution <= 0) {
