@@ -172,6 +172,9 @@ if (store) {
                   operation.args[3],
                 )
                 break
+              case 'summarize':
+                value = target.summarize(...operation.args)
+                break
               case 'getImport':
                 value = target.getImport(...operation.args)
                 break

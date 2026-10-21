@@ -22,6 +22,7 @@ import type {
   TimeWindow,
   TrackCollection,
   TrackParams,
+  TrackSummary,
 } from './types.js'
 
 export class TransactionStateError extends Error {}
@@ -497,6 +498,55 @@ export class SqliteTrackStore implements TrackStore {
   private stored(contexts: Iterable<Context>): Context[] {
     const held = this.db.prepare('SELECT 1 AS found FROM positions WHERE context = ? LIMIT 1')
     return [...contexts].filter((context) => held.get(context) !== undefined)
+  }
+
+  /**
+   * Each context's track in a window as a listing describes it, without its
+   * points: a list of every vessel over weeks would otherwise build every
+   * position only to count them, then copy them all to the main thread.
+   */
+  summarize(contexts: Context[] | undefined, window?: TimeWindow): TrackSummary[] {
+    const clauses: string[] = []
+    const params: (string | number)[] = []
+    if (contexts) {
+      clauses.push(`context IN (${contexts.map(() => '?').join(', ')})`)
+      params.push(...contexts)
+    }
+    if (window) {
+      clauses.push('timestamp >= ?', window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?')
+      params.push(window.from, window.to)
+    }
+    // A list of every vessel reads every row of the window, which in table
+    // order is one sequential pass. Left to choose, SQLite walks the
+    // (context, timestamp) index for the GROUP BY instead, a row lookup per
+    // position: 5.3 s against 1.4 s over 1.17 M rows. Named contexts keep the
+    // index, which reads only theirs.
+    const rows = `FROM positions${contexts ? '' : ' NOT INDEXED'}${clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : ''}`
+    const totals = this.db
+      .prepare(
+        `SELECT context, COUNT(*) AS pointCount, MIN(timestamp) AS first, MAX(timestamp) AS last,
+                MIN(lat) AS south, MAX(lat) AS north ${rows} GROUP BY context`,
+      )
+      .all(...params) as unknown as (Omit<TrackSummary, 'bbox'> & { south: number; north: number })[]
+    // The bounds need every distinct longitude, since a track across the
+    // antimeridian spans the narrower way round. Streamed rather than read
+    // whole: 39 MB against 229 MB for 413,000 of them, for a second more.
+    const longitudes = new Map<Context, number[]>()
+    const distinct = this.db
+      .prepare(`SELECT context, lon ${rows} GROUP BY context, lon`)
+      .iterate(...params) as Iterable<{
+      context: Context
+      lon: number
+    }>
+    for (const { context, lon } of distinct) {
+      const own = longitudes.get(context)
+      if (own) own.push(lon)
+      else longitudes.set(context, [lon])
+    }
+    return totals.map(({ context, pointCount, first, last, south, north }) => {
+      const [west, east] = longitudeSpan(longitudes.get(context)!)
+      return { context, pointCount, first, last, bbox: [west, south, east, north] }
+    })
   }
 
   getAllTracks(query?: TrackQuery): Promise<{ context: string; track: LatLngTuple[] }[]> {

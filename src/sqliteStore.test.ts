@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it, vi } from 'vitest'
 import { s2 } from 's2js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
-import { clipToBounds, splitAtAntimeridian } from './utils.js'
+import { clipToBounds, longitudeSpan, splitAtAntimeridian } from './utils.js'
 import type { Context, GeoBounds, ImportedTrack, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
 
 const debug = Object.assign(() => {}, { enabled: false })
@@ -151,6 +151,83 @@ describe('requested contexts', () => {
 
     const tracks = await store.getFilteredTimedTracks({ bbox: null, radius: null })
     expect(Object.keys(tracks).sort()).toEqual([ctx, other, third].sort())
+    store.close()
+  })
+})
+
+describe('summaries', () => {
+  const MINUTE = 60_000
+  const third = 'vessels.urn:mrn:imo:mmsi:230000001' as Context
+
+  const seeded = (): SqliteTrackStore => {
+    const store = newStore()
+    for (const [i, position] of (
+      [
+        [60.1, 24.9],
+        [60.3, 25.2],
+        [60.2, 25.0],
+      ] as LatLngTuple[]
+    ).entries()) {
+      store.newPosition(ctx, position, i * MINUTE)
+    }
+    // across the antimeridian
+    for (const [i, position] of (
+      [
+        [-17.8, 179.5],
+        [-17.7, -179.6],
+        [-17.6, 179.9],
+      ] as LatLngTuple[]
+    ).entries()) {
+      store.newPosition(other, position, i * MINUTE)
+    }
+    store.newPosition(third, [59.33, 18.07], 5 * MINUTE)
+    return store
+  }
+
+  /** What the points themselves say, which a summary must match. */
+  const fromPoints = async (store: SqliteTrackStore, context: Context, window?: TimeWindow) => {
+    const points = await store.getTimed(context, window)
+    const [west, east] = longitudeSpan(points.map(({ position }) => position[1]))
+    const lats = points.map(({ position }) => position[0])
+    return {
+      context,
+      pointCount: points.length,
+      first: points[0]!.timestamp,
+      last: points[points.length - 1]!.timestamp,
+      bbox: [west, Math.min(...lats), east, Math.max(...lats)],
+    }
+  }
+
+  it('says what the points of every context say', async () => {
+    const store = seeded()
+
+    const summaries = store.summarize(undefined)
+    expect(summaries.map(({ context }) => context).sort()).toEqual([ctx, other, third].sort())
+    for (const summary of summaries) {
+      expect(summary).toEqual(await fromPoints(store, summary.context))
+    }
+    expect(summaries.find(({ context }) => context === other)!.bbox).toEqual([179.5, -17.8, -179.6, -17.6])
+    store.close()
+  })
+
+  it('keeps to the window, half-open unless its end is inclusive', async () => {
+    const store = seeded()
+
+    for (const window of [
+      { from: MINUTE, to: 2 * MINUTE },
+      { from: MINUTE, to: 2 * MINUTE, inclusiveEnd: true },
+    ]) {
+      const summaries = store.summarize([ctx, third], window)
+      expect(summaries).toEqual([await fromPoints(store, ctx, window)])
+    }
+    store.close()
+  })
+
+  it('leaves out a requested context the store has not recorded', () => {
+    const store = seeded()
+
+    const unknown = 'vessels.urn:mrn:imo:mmsi:230000099' as Context
+    expect(store.summarize([ctx, unknown]).map(({ context }) => context)).toEqual([ctx])
     store.close()
   })
 })

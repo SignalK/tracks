@@ -343,6 +343,9 @@ export class AsyncTrackStore implements TrackStore {
   getFilteredTimedTracks(params: TrackParams, selfPosition?: LatLngTuple, _debug?: Debug, query?: TrackQuery) {
     return this.enqueue('getFilteredTimedTracks', [params, selfPosition, undefined, query])
   }
+  summarize(contexts: Context[] | undefined, window?: TimeWindow) {
+    return this.enqueue('summarize', [contexts, window])
+  }
   storeImport(track: ImportedTrack): Promise<void> {
     return this.enqueue('storeImport', [track], 'acknowledged')
   }

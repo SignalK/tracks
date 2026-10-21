@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { HistoryValuesQuery, TestHarness } from './harness.test-utils.js'
 import type { TrackApi } from './trackApi.js'
-import { fillGaps, MIN_FILLED_GAP_MS } from './trackProvider.js'
+import { SqliteTrackStore } from './sqliteStore.js'
+import { createTrackProvider, fillGaps, MIN_FILLED_GAP_MS } from './trackProvider.js'
 import type { TimedPosition } from './types.js'
 
 /**
@@ -483,6 +484,90 @@ describe('getTracks', () => {
       expect(res.features[0]!.properties.bbox).toEqual([24.9, 60.1, 24.9, 60.1])
     } finally {
       await h.stop()
+    }
+  })
+
+  // A list of every vessel over weeks is answered from summaries, not points,
+  // and has to say what the points themselves would.
+  it('lists the same metadata without geometry as with it', async () => {
+    const h = createHarness({ history: { contexts: [SELF_CONTEXT], rows: [] } })
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [60.1, 24.9],
+          [60.2, 25.0],
+        ],
+        [t0, t0 + 30_000],
+      )
+      // across the antimeridian: its bounds run the short way round
+      h.seedTrack(
+        OTHER_CONTEXT,
+        [
+          [-17.8, 179.5],
+          [-17.7, -179.6],
+          [-17.6, 179.9],
+        ],
+        [t0, t0 + 60 * 60_000, t0 + 3 * 60 * 60_000],
+      )
+      const window = {
+        from: Temporal.Instant.fromEpochMilliseconds(t0 - 60_000),
+        to: Temporal.Instant.fromEpochMilliseconds(t0 + 4 * 60 * 60_000),
+      }
+      const provider = providerOf(h)
+
+      const listed = await provider.getTracks({ ...window, geometry: false })
+      const drawn = await provider.getTracks(window)
+
+      const byContext = (features: { properties: { context?: string } }[]) =>
+        [...features].sort((a, b) => (a.properties.context ?? '').localeCompare(b.properties.context ?? ''))
+      expect(byContext(listed.features)).toEqual(byContext(drawn.features.map((f) => ({ ...f, geometry: null }))))
+      expect(listed.features.find((f) => f.properties.context === OTHER_CONTEXT)!.properties.bbox).toEqual([
+        179.5, -17.8, -179.6, -17.6,
+      ])
+    } finally {
+      await h.stop()
+    }
+  })
+
+  // The points of every AIS target over weeks are what made the list slow:
+  // read in the worker, then copied to the main thread only to be counted.
+  it('lists from summaries, reading points only for what history holds', async () => {
+    const debug = Object.assign(() => {}, { enabled: false })
+    const store = new SqliteTrackStore({ file: ':memory:' }, debug)
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      store.newPosition(SELF_CONTEXT, [60.1, 24.9], t0)
+      store.newPosition(OTHER_CONTEXT, [60.2, 25.0], t0)
+      const reconciled: string[] = []
+      const provider = createTrackProvider({
+        store: () => store,
+        selfContext: () => SELF_CONTEXT,
+        segmentGap: () => 0,
+        contextName: () => undefined,
+        historyContexts: async () => new Set([SELF_CONTEXT]),
+        historyKnows: async () => true,
+        deleted: () => undefined,
+        reconcileWithHistory: async (context, stored) => {
+          reconciled.push(context)
+          return stored
+        },
+        recordedOver: async () => [],
+      })
+      const read = vi.spyOn(store, 'getFilteredTimedTracks')
+
+      const res = await provider.getTracks({
+        from: Temporal.Instant.fromEpochMilliseconds(t0 - 60_000),
+        to: Temporal.Instant.fromEpochMilliseconds(t0 + 60_000),
+        geometry: false,
+      })
+
+      expect(res.features.map((f) => f.properties.context).sort()).toEqual([OTHER_CONTEXT, SELF_CONTEXT].sort())
+      expect(read.mock.calls.map(([params]) => params.contexts)).toEqual([[SELF_CONTEXT]])
+      expect(reconciled).toEqual([SELF_CONTEXT])
+    } finally {
+      store.close()
     }
   })
 

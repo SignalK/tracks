@@ -15,7 +15,15 @@ import type {
   TracksRequest,
   TracksResponse,
 } from './trackApi.js'
-import type { GeoBounds, ImportedTrack, LatLngTuple, StoredImport, TimedPosition, TimeWindow } from './types.js'
+import type {
+  GeoBounds,
+  ImportedTrack,
+  LatLngTuple,
+  StoredImport,
+  TimedPosition,
+  TimeWindow,
+  TrackSummary,
+} from './types.js'
 import { clipToBounds, createInBounds, longitudeSpan, toIsoTimes } from './utils.js'
 
 /**
@@ -316,6 +324,48 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
   }
 
   /**
+   * A listing — `geometry=false` with nothing that reshapes the points: no
+   * box, spacing, budget, simplification or times — answered from the
+   * store's summaries rather than its points. A track's properties are then
+   * its stored count, times and bounds, so reading every position only to
+   * count them is the whole cost of a list over weeks of AIS traffic.
+   *
+   * A context history lists for the window still goes through `matching`,
+   * since history's positions count too; so does the whole query when
+   * history cannot say which contexts it holds.
+   */
+  const listing = async (
+    query: TracksRequest,
+  ): Promise<{ summaries: TrackSummary[]; reconciled: string[] } | undefined> => {
+    const store = deps.store()
+    if (
+      !store?.summarize ||
+      query.geometry !== false ||
+      query.bbox ||
+      query.resolution ||
+      query.maxPoints !== undefined ||
+      query.simplify ||
+      query.epsilon !== undefined ||
+      query.times
+    ) {
+      return undefined
+    }
+    const window = toTimeWindow(query)
+    const listed = await deps.historyContexts(window)
+    if (!listed) {
+      return undefined
+    }
+    const wanted = query.contexts?.length
+      ? [...new Set(query.contexts.map(resolveSelf(deps.selfContext())))]
+      : undefined
+    const summaries = await store.summarize(wanted, window)
+    return {
+      summaries: summaries.filter(({ context }) => !listed.has(context)),
+      reconciled: [...listed].filter((context) => !wanted || wanted.includes(context)),
+    }
+  }
+
+  /**
    * Imported tracks the query matches, each with the points it returns.
    *
    * The same filters as a recorded track, applied to the import's own points:
@@ -443,7 +493,13 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
 
   return {
     async getTracks(query: TracksRequest): Promise<TracksResponse> {
-      const { tracks: matched, resolution: requested } = await matching(query)
+      const listed = await listing(query)
+      const { tracks: matched, resolution: requested } = !listed
+        ? await matching(query)
+        : // An empty contexts list would ask for every context, not none.
+          listed.reconciled.length > 0
+          ? await matching({ ...query, contexts: listed.reconciled })
+          : { tracks: new Map<string, TimedPosition[]>(), resolution: undefined }
       const gap = deps.segmentGap()
       const features: TrackFeature[] = []
       for (const [context, all] of matched) {
@@ -451,6 +507,20 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         if (feature) {
           features.push(feature)
         }
+      }
+      for (const { context, pointCount, first, last, bbox } of listed?.summaries ?? []) {
+        // What shapeFeature reports for the same points, which nothing reshapes.
+        features.push({
+          type: 'Feature',
+          geometry: null,
+          properties: {
+            ...recordedIdentity(context),
+            from: new Date(first).toISOString(),
+            to: new Date(last).toISOString(),
+            bbox,
+            pointCount,
+          },
+        })
       }
       // Each import is a feature of its own, beside any recorded track of
       // the same vessel: an import names a vessel, it does not join its
