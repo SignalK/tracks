@@ -37,10 +37,17 @@ const PROVIDER_ID = 'tracks'
  */
 const REQUEST_TIMEOUT_MS = 30_000
 
+/**
+ * How long the list waits for the own vessel's tracks before it is asked
+ * anyway: a third of the ceiling, leaving the rest to the list. They come in
+ * a second or two, so this only ends a request stalled on its way.
+ */
+const OWN_WAIT_MS = REQUEST_TIMEOUT_MS / 3
+
 /** Relative, because the server mounts this under /@signalk/tracks-plugin. */
 const TRACKS_URL = `../../signalk/v2/api/tracks?geometry=false&duration=${WINDOW_V2}`
 /**
- * The own vessel's tracks alone, asked for beside the whole list: one vessel
+ * The own vessel's tracks alone, asked for before the whole list: one vessel
  * answers at once, while every AIS target a busy receiver heard in a month
  * can take the store many seconds.
  */
@@ -284,54 +291,48 @@ async function load() {
   // A month of AIS traffic can keep a busy store for a while: the wait counts
   // up, and the own vessel's tracks show as soon as they are in.
   const started = Date.now()
-  const progress = { waiting: 'Loading…', answered: false }
-  const tick = () => show(`${progress.waiting} ${Math.round((Date.now() - started) / 1000)} s`)
+  let waiting = 'Loading…'
+  const tick = () => show(`${waiting} ${Math.round((Date.now() - started) / 1000)} s`)
   const ticker = setInterval(tick, 1000)
   // The status is a live region: busy while it counts, so a screen reader
   // announces where the wait ended rather than every second of it.
   status.setAttribute('aria-busy', 'true')
-  void ownTracks(deadline).then((own) => {
-    // Once the whole list has ended, in rows or a message, it says
-    // everything this would.
-    if (progress.answered || own.filter(listable).length === 0) {
-      return
-    }
-    draw(own)
-    progress.waiting = 'Loading the other vessels…'
-    tick()
-  })
   try {
-    await list(deadline, progress)
+    // The others are asked for once this settles, not beside it: the store
+    // answers one query at a time, so asked together the own vessel's would
+    // wait behind the very traffic it is meant to show before. Its shorter
+    // timer starts with the deadline, so it ends inside it, and a request
+    // stalled on its way cannot take the list's time with it.
+    const own = await ownTracks(AbortSignal.timeout(OWN_WAIT_MS))
+    if (own.filter(listable).length > 0) {
+      draw(own)
+      waiting = 'Loading the other vessels…'
+      tick()
+    }
+    await list(deadline)
   } finally {
     clearInterval(ticker)
     status.setAttribute('aria-busy', 'false')
   }
 }
 
-async function list(deadline, progress) {
-  // Every way this ends marks the list answered in the same step as what it
-  // shows, so the own vessel's rows can neither land on top of it nor be held
-  // back while its body is still on the way.
-  const end = (message, state) => {
-    progress.answered = true
-    show(message, state)
-  }
+async function list(deadline) {
   const imports = allImports(deadline)
   let response
   try {
     response = await fetch(TRACKS_URL, { credentials: 'include', signal: deadline })
   } catch {
-    end(deadline.aborted ? 'The server did not answer in time.' : 'Could not reach the server.', 'error')
+    show(deadline.aborted ? 'The server did not answer in time.' : 'Could not reach the server.', 'error')
     return
   }
   // 501 is the server saying no provider is registered, which is a different
   // thing from an error and worth telling the user plainly.
   if (response.status === 501) {
-    end('No track provider is registered on this server.', 'error')
+    show('No track provider is registered on this server.', 'error')
     return
   }
   if (!response.ok) {
-    end(`The server answered ${response.status}.`, 'error')
+    show(`The server answered ${response.status}.`, 'error')
     return
   }
 
@@ -343,7 +344,7 @@ async function list(deadline, progress) {
     // body that stops mid-stream, which the deadline above aborts here rather
     // than at the fetch. Without this the rejection escapes `void load()` and
     // the page sits on "Loading…" forever, which looks like a hang.
-    end(
+    show(
       deadline.aborted ? 'The server did not answer in time.' : 'The server sent a response this page could not read.',
       'error',
     )
@@ -353,7 +354,7 @@ async function list(deadline, progress) {
   // is a failure, not an empty list. Reporting "no tracks" for it would tell
   // the user the opposite of what happened.
   if (body?.type !== 'FeatureCollection' || !Array.isArray(body.features)) {
-    end('The server sent a response this page could not read.', 'error')
+    show('The server sent a response this page could not read.', 'error')
     return
   }
   const listed = body.features.map((feature) => feature?.properties)
@@ -365,7 +366,6 @@ async function list(deadline, progress) {
   const older = (await namesByProvider(listed, unlisted, deadline))
     ? unlisted
     : unlisted.map((properties) => ({ ...properties, id: localId(properties), providerId: undefined }))
-  progress.answered = true
   const sorted = draw([...listed, ...older])
 
   // Checked after filtering, not before: a response of nothing but malformed

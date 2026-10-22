@@ -183,13 +183,17 @@ const element = (tagName: string): StubElement => {
   })
 }
 
-/** A response, or a failure; `delayMs` holds a response back, to order it against the other request. */
-type Answer = { status?: number; ok?: boolean; body?: unknown; delayMs?: number } | Error | 'stall' | 'stall-body'
+/** A response, or a failure. */
+type Answer = { status?: number; ok?: boolean; body?: unknown } | Error | 'stall' | 'stall-body'
 
 async function render(
   response: Answer,
-  /** `own` answers the request for the own vessel's tracks alone, which otherwise gets `response`. */
-  options: { timeoutMs?: number; imports?: unknown[]; byId?: boolean; own?: Answer } = {},
+  /**
+   * `own` answers the request for the own vessel's tracks alone, which otherwise gets `response`.
+   * `timeoutMs` sets every timeout the page starts; `speedUp` runs them that many times faster,
+   * keeping how they compare.
+   */
+  options: { timeoutMs?: number; speedUp?: number; imports?: unknown[]; byId?: boolean; own?: Answer } = {},
 ) {
   const status = element('p')
   // Every status the page showed, in order, since the last one overwrites the rest.
@@ -212,7 +216,11 @@ async function render(
   // The page's own deadline is left alone; only the clock behind it is
   // substituted, so nothing here depends on how the constant is spelled.
   const abortSignal =
-    options.timeoutMs === undefined ? AbortSignal : { timeout: () => AbortSignal.timeout(options.timeoutMs!) }
+    options.timeoutMs !== undefined
+      ? { timeout: () => AbortSignal.timeout(options.timeoutMs!) }
+      : options.speedUp !== undefined
+        ? { timeout: (ms: number) => AbortSignal.timeout(ms / options.speedUp!) }
+        : AbortSignal
   const run = new Function(
     'document',
     'fetch',
@@ -221,9 +229,16 @@ async function render(
   ) as (d: unknown, f: unknown, a: unknown) => Promise<void>
 
   const requested: string[] = []
+  // What happened to the two track requests, in order: asked, read or aborted.
+  const events: string[] = []
   await run(
     document,
     (url: string, init: { signal?: AbortSignal }) => {
+      // As a real fetch does: a request sent after the deadline fails at once,
+      // rather than waiting for an abort that has already happened.
+      if (init.signal?.aborted) {
+        return Promise.reject(init.signal.reason)
+      }
       // Every import, from the plugin's own route; a server without it answers 404.
       if (url.endsWith('/plugins/tracks/imports')) {
         return Promise.resolve(
@@ -238,14 +253,20 @@ async function render(
         return Promise.resolve({ status: ok ? 200 : 404, ok, json: () => Promise.resolve({}) })
       }
       requested.push(url)
-      const answer = url.includes('contexts=vessels.self') && options.own !== undefined ? options.own : response
+      const kind = url.includes('contexts=vessels.self') ? 'own' : 'list'
+      events.push(`asked ${kind}`)
+      const aborted = (reject: (error: Error) => void) => () => {
+        events.push(`aborted ${kind}`)
+        reject(new Error('aborted'))
+      }
+      const answer = kind === 'own' && options.own !== undefined ? options.own : response
       if (answer === 'stall-body') {
         return Promise.resolve({
           status: 200,
           ok: true,
           json: () =>
             new Promise((_resolve, reject) => {
-              init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+              init.signal?.addEventListener('abort', aborted(reject))
             }),
         })
       }
@@ -253,25 +274,25 @@ async function render(
         // Never settles on its own: only the page's own deadline ends it, which
         // is the thing under test.
         return new Promise((_resolve, reject) => {
-          init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+          init.signal?.addEventListener('abort', aborted(reject))
         })
       }
       if (answer instanceof Error) {
         return Promise.reject(answer)
       }
-      const reply = {
+      return Promise.resolve({
         status: answer.status ?? 200,
         ok: answer.ok ?? true,
-        json: () => (answer.body instanceof Error ? Promise.reject(answer.body) : Promise.resolve(answer.body)),
-      }
-      return answer.delayMs === undefined
-        ? Promise.resolve(reply)
-        : new Promise((resolve) => setTimeout(() => resolve(reply), answer.delayMs))
+        json: () => {
+          events.push(`read ${kind}`)
+          return answer.body instanceof Error ? Promise.reject(answer.body) : Promise.resolve(answer.body)
+        },
+      })
     },
     abortSignal,
   )
 
-  return { status, tbody, table, requested, shown }
+  return { status, tbody, table, requested, shown, events }
 }
 
 const feature = (properties: Record<string, unknown>) => ({ type: 'Feature', geometry: null, properties })
@@ -302,13 +323,52 @@ describe('the webapp asks the API for the right thing', () => {
     expect(searchParams.get('duration')).toBe('P30D')
   })
 
-  it('asks for the own vessel’s tracks alone beside the list', async () => {
+  it('asks for the own vessel’s tracks alone', async () => {
     const { pathname, searchParams } = await requestedUrl(true)
 
     expect(pathname).toBe('/signalk/v2/api/tracks')
     expect(searchParams.get('contexts')).toBe('vessels.self')
     expect(searchParams.get('geometry')).toBe('false')
     expect(searchParams.get('duration')).toBe('P30D')
+  })
+
+  // The store answers one query at a time, so the own vessel's, asked beside
+  // the list, waited behind it.
+  it('asks for the others only once the own vessel’s tracks are in', async () => {
+    const { events } = await render(
+      { body: { type: 'FeatureCollection', features: [] } },
+      { own: { body: { type: 'FeatureCollection', features: [] } } },
+    )
+
+    expect(events).toEqual(['asked own', 'read own', 'asked list', 'read list'])
+  })
+
+  // A request can stall on its way while a new one gets through; waiting for
+  // it until the deadline would leave the list no time at all.
+  it('asks for the others anyway when the own vessel’s request stalls', async () => {
+    const { events, tbody, status, shown } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [
+            feature({ context: SELF, isSelf: true, to: '2026-09-01T02:00:00Z', pointCount: 12 }),
+            feature({
+              context: OTHER,
+              contextName: 'Ariadne',
+              isSelf: false,
+              to: '2026-09-02T01:00:00Z',
+              pointCount: 7,
+            }),
+          ],
+        },
+      },
+      { own: 'stall', speedUp: 500 },
+    )
+
+    expect(events).toEqual(['asked own', 'aborted own', 'asked list', 'read list'])
+    expect(shown.some((text) => text.startsWith('Loading the other vessels…'))).toBe(false)
+    expect(tbody.children).toHaveLength(2)
+    expect(status.textContent).toContain('2 tracks')
   })
 })
 
@@ -430,7 +490,10 @@ describe('the webapp renders what the API returns', () => {
   it('gives up on a request that never answers', async () => {
     // AbortSignal.timeout runs on a real timer that fake timers do not drive,
     // so the page's own constant is overridden rather than waited out.
-    const { status, table } = await render('stall', { timeoutMs: 20 })
+    const { status, table } = await render('stall', {
+      timeoutMs: 20,
+      own: { body: { type: 'FeatureCollection', features: [] } },
+    })
 
     expect(table.hidden).toBe(true)
     expect(status.dataset.state).toBe('error')
@@ -441,7 +504,10 @@ describe('the webapp renders what the API returns', () => {
   // arrive and whose body then stops mid-stream is caught too -- stalling only
   // the fetch would leave that path uncovered.
   it('gives up on a response whose body never finishes', async () => {
-    const { status, table } = await render('stall-body', { timeoutMs: 20 })
+    const { status, table } = await render('stall-body', {
+      timeoutMs: 20,
+      own: { body: { type: 'FeatureCollection', features: [] } },
+    })
 
     expect(table.hidden).toBe(true)
     expect(status.dataset.state).toBe('error')
@@ -482,7 +548,7 @@ describe('the webapp renders what the API returns', () => {
     })
     const { tbody, table, status } = await render('stall-body', {
       timeoutMs: 80,
-      own: { body: { type: 'FeatureCollection', features: [own] }, delayMs: 10 },
+      own: { body: { type: 'FeatureCollection', features: [own] } },
     })
 
     expect(table.hidden).toBe(false)
@@ -499,7 +565,7 @@ describe('the webapp renders what the API returns', () => {
       pointCount: 12,
     })
     const { tbody, table, status, shown } = await render(
-      { body: { type: 'FeatureCollection', features: [] }, delayMs: 20 },
+      { body: { type: 'FeatureCollection', features: [] } },
       { own: { body: { type: 'FeatureCollection', features: [own] } } },
     )
 
@@ -507,6 +573,32 @@ describe('the webapp renders what the API returns', () => {
     expect(table.hidden).toBe(true)
     expect(tbody.children).toEqual([])
     expect(status.textContent).toContain('No tracks')
+  })
+
+  it('still lists every vessel when the own vessel’s request fails', async () => {
+    const { tbody, table, status, shown } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [
+            feature({ context: SELF, isSelf: true, to: '2026-09-01T02:00:00Z', pointCount: 12 }),
+            feature({
+              context: OTHER,
+              contextName: 'Ariadne',
+              isSelf: false,
+              to: '2026-09-02T01:00:00Z',
+              pointCount: 7,
+            }),
+          ],
+        },
+      },
+      { own: new Error('offline') },
+    )
+
+    expect(shown.some((text) => text.startsWith('Loading the other vessels…'))).toBe(false)
+    expect(table.hidden).toBe(false)
+    expect(tbody.children).toHaveLength(2)
+    expect(status.textContent).toContain('2 tracks')
   })
 
   it('counts the wait up rather than sitting on Loading…', async () => {
