@@ -268,7 +268,6 @@ export class SqliteTrackStore implements TrackStore {
         s2cell    INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_s2cell ON positions(s2cell);
-      CREATE INDEX IF NOT EXISTS idx_context_timestamp ON positions(context, timestamp);
       -- A separate table rather than a column on positions: this store has no
       -- migration mechanism, so a new table appears harmlessly on a database
       -- written by an older version, where an ALTER TABLE would not.
@@ -365,6 +364,33 @@ export class SqliteTrackStore implements TrackStore {
         span_end    INTEGER NOT NULL
       );
     `)
+    // The position rides along with the vessel and time, so a read of a track
+    // is answered from the index alone, without a lookup in the table for
+    // every row. It replaces the (context, timestamp) index of older
+    // versions, which it serves for every query. That one is dropped first
+    // and in the same transaction, so the new one reuses its pages rather
+    // than growing the file by both, and a build that fails leaves it as it
+    // was.
+    const building = !this.db
+      .prepare("SELECT 1 AS found FROM sqlite_master WHERE name = 'idx_context_time_position'")
+      .get()
+    this.transaction(() =>
+      this.db.exec(`
+        DROP INDEX IF EXISTS idx_context_timestamp;
+        CREATE INDEX IF NOT EXISTS idx_context_time_position ON positions(context, timestamp, lat, lon);
+      `),
+    )
+    if (building) {
+      // The build went through the write-ahead log, which keeps its size,
+      // that of the whole index, until a checkpoint truncates it. A reader
+      // on another connection can hold that off past the busy timeout; the
+      // log then stays until the last connection closes and SQLite removes
+      // it.
+      const { busy } = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number }
+      if (busy) {
+        this.debug('position index built; another connection kept the write-ahead log from being truncated')
+      }
+    }
     // Imports kept before their time was: dated to the first start that knew to.
     const now = Date.now()
     this.db
@@ -461,8 +487,13 @@ export class SqliteTrackStore implements TrackStore {
       clauses.push('timestamp >= ?', window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?')
       params.push(window.from, window.to)
     }
+    // rowid keeps equal times in the order they were stored: an untimed
+    // track is stored at timestamp 0 throughout, and the index alone would
+    // order those by position.
     return this.db
-      .prepare(`SELECT context, timestamp, lat, lon FROM positions WHERE ${clauses.join(' AND ')} ORDER BY timestamp`)
+      .prepare(
+        `SELECT context, timestamp, lat, lon FROM positions WHERE ${clauses.join(' AND ')} ORDER BY timestamp, rowid`,
+      )
       .all(...params) as unknown as PositionRow[]
   }
 
@@ -511,12 +542,10 @@ export class SqliteTrackStore implements TrackStore {
     const windowParams = window ? [window.from, window.to] : []
     const clauses = [...(contexts ? [`context IN (${contexts.map(() => '?').join(', ')})`] : []), ...inWindow]
     const params = [...(contexts ?? []), ...windowParams]
-    // A list of every vessel reads every row of the window, which in table
-    // order is one sequential pass. Left to choose, SQLite walks the
-    // (context, timestamp) index for the GROUP BY instead, a row lookup per
-    // position: 3.3 s against 1.5 s over 1.17 M rows. Named contexts keep the
-    // index, which reads only theirs.
-    const rows = `FROM positions${contexts ? '' : ' NOT INDEXED'}${clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : ''}`
+    // A list of every vessel reads every row of the window from the index, in
+    // vessel order and without touching the table: 0.6 s over 1.17 M rows,
+    // against 1.5 s for one pass over the table.
+    const rows = `FROM positions${clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : ''}`
     // A track across the antimeridian spans the narrower way round, which
     // four longitudes settle for any track narrower than half the globe
     // (`longitudeSpanOf`). Grouping by every distinct longitude instead, to
@@ -1407,7 +1436,7 @@ export class SqliteTrackStore implements TrackStore {
 
   /** Unsigned round-trip check, used by the tests. */
   cellIdsFor(context: Context): bigint[] {
-    const stmt = this.db.prepare('SELECT s2cell FROM positions WHERE context = ? ORDER BY timestamp')
+    const stmt = this.db.prepare('SELECT s2cell FROM positions WHERE context = ? ORDER BY timestamp, rowid')
     stmt.setReadBigInts(true)
     const rows = stmt.all(context) as unknown as { s2cell: bigint }[]
     return rows.map(({ s2cell }) => toUnsigned(s2cell))
