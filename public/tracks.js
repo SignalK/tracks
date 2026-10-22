@@ -298,7 +298,7 @@ async function load() {
   // announces where the wait ended rather than every second of it.
   status.setAttribute('aria-busy', 'true')
   try {
-    // The others are asked for once this is in, not beside it: the store
+    // The others are asked for once this settles, not beside it: the store
     // answers one query at a time, so asked together the own vessel's would
     // wait behind the very traffic it is meant to show before. Its shorter
     // timer starts with the deadline, so it ends inside it, and a request
