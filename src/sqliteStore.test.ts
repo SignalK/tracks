@@ -995,6 +995,30 @@ describe('the position index', () => {
     }
   })
 
+  it('reads an untimed track back in the order it was given', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      // In neither latitude nor longitude order, which the index would
+      // sort equal times by.
+      const track: LatLngTuple[] = [
+        [60.3, 24.1],
+        [60.1, 24.9],
+        [60.2, 24.5],
+      ]
+      const first = new SqliteTrackStore({ file }, debug)
+      first.initialTrack(ctx, track)
+      first.close()
+
+      const store = new SqliteTrackStore({ file }, debug)
+      expect((await store.getTimed(ctx)).map(({ position }) => position)).toEqual(track)
+      expect(store.segments(ctx)).toEqual([track])
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   // Waits out the store's 5 s busy timeout before the checkpoint gives up.
   it('reports a write-ahead log another connection keeps from being truncated', () => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))

@@ -487,8 +487,13 @@ export class SqliteTrackStore implements TrackStore {
       clauses.push('timestamp >= ?', window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?')
       params.push(window.from, window.to)
     }
+    // rowid keeps equal times in the order they were stored: an untimed
+    // track is stored at timestamp 0 throughout, and the index alone would
+    // order those by position.
     return this.db
-      .prepare(`SELECT context, timestamp, lat, lon FROM positions WHERE ${clauses.join(' AND ')} ORDER BY timestamp`)
+      .prepare(
+        `SELECT context, timestamp, lat, lon FROM positions WHERE ${clauses.join(' AND ')} ORDER BY timestamp, rowid`,
+      )
       .all(...params) as unknown as PositionRow[]
   }
 
@@ -1431,7 +1436,7 @@ export class SqliteTrackStore implements TrackStore {
 
   /** Unsigned round-trip check, used by the tests. */
   cellIdsFor(context: Context): bigint[] {
-    const stmt = this.db.prepare('SELECT s2cell FROM positions WHERE context = ? ORDER BY timestamp')
+    const stmt = this.db.prepare('SELECT s2cell FROM positions WHERE context = ? ORDER BY timestamp, rowid')
     stmt.setReadBigInts(true)
     const rows = stmt.all(context) as unknown as { s2cell: bigint }[]
     return rows.map(({ s2cell }) => toUnsigned(s2cell))
