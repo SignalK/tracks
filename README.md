@@ -38,6 +38,21 @@ rarely what anybody wants. Space freed by removing positions is reused for new o
 the file's growth, but the file never shrinks on its own: only an SQLite `VACUUM` returns that
 space to the file system.
 
+### Keeping tracks for years
+
+The own vessel's track is kept here indefinitely, at the track resolution. For a finer track
+over years, and for tracks recorded before Signal K, a history provider is the better place:
+this plugin reads whatever the server's default provider holds for the own vessel and shows it
+as part of its track. Where several providers are installed, the default is chosen under
+**Data → Preferences**.
+
+[signalk-questdb](https://www.npmjs.com/package/signalk-questdb) is one such provider. From
+2.3.0 it can
+[keep the own track past its retention](https://github.com/dirkwa/signalk-questdb#retention-and-the-archive),
+and it
+[imports a chartplotter's GPX export](https://github.com/dirkwa/signalk-questdb#importing-a-gpx-track)
+of any size.
+
 ## Imported tracks
 
 A client can store a track of its own, a GPX from a friend or a passage logged by another
@@ -84,6 +99,9 @@ timed one into the recording; otherwise a track names a vessel only if the file 
 the plugin's own GPX export does. Ticking **Replace what my vessel recorded over the same time**
 as well (`onOverlap=replace`; the default is `keep`) replaces the recording rather than filling
 it.
+
+The file can be at most 25 MiB. A larger export, such as years of a chartplotter's tracks, is
+better imported into a history provider; see [Keeping tracks for years](#keeping-tracks-for-years).
 
 In a timed track, points without a time are skipped, and the answer says how many
 (`skippedPoints`), as it does for the points left out where the recording already has positions
