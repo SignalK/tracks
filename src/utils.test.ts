@@ -13,6 +13,8 @@ import {
   gpxFilename,
   asciiFilename,
   rfc8187,
+  longitudeSpan,
+  longitudeSpanOf,
 } from './utils.js'
 import type { LatLngTuple, TimedPosition } from './types.js'
 
@@ -400,5 +402,61 @@ describe('createMatcher', () => {
     const params = validateParameters({ radius: '500' }, undefined)
 
     expect(() => createMatcher(params, undefined)).toThrow(SelfPositionUnavailableError)
+  })
+})
+
+describe('longitudeSpanOf', () => {
+  const extremesOf = (longitudes: number[]) => {
+    const east = longitudes.filter((lon) => lon >= 0)
+    const west = longitudes.filter((lon) => lon < 0)
+    return {
+      lowest: Math.min(...longitudes),
+      highest: Math.max(...longitudes),
+      lowestEast: east.length > 0 ? Math.min(...east) : null,
+      highestWest: west.length > 0 ? Math.max(...west) : null,
+    }
+  }
+  const width = ([west, east]: [number, number]) => (east >= west ? east - west : east + 360 - west)
+  /** Deterministic, so a failure names the same longitudes on every run. */
+  const random = (() => {
+    let seed = 1
+    return () => {
+      seed = (seed * 48271) % 2147483647
+      return seed / 2147483647
+    }
+  })()
+  const wrap = (lon: number) => ((((lon + 180) % 360) + 360) % 360) - 180
+
+  it.each([
+    ['one point', [24.9]],
+    ['east of the prime meridian', [24.9, 25.2, 25]],
+    ['across the prime meridian', [-1.5, 0.5, 2]],
+    ['across the antimeridian', [179.5, -179.6, 179.9]],
+    ['on the prime meridian', [0, 120, 170]],
+    ['on the antimeridian', [-180, -170, 175]],
+    ['west only', [-120, -100, -60]],
+  ])('gives what every longitude gives for a track %s', (_kind, longitudes) => {
+    expect(longitudeSpanOf(extremesOf(longitudes))).toEqual(longitudeSpan(longitudes))
+  })
+
+  it('agrees with every longitude for any track narrower than half the globe', () => {
+    for (let run = 0; run < 2000; run++) {
+      const start = random() * 360 - 180
+      const extent = random() * 179.9
+      const longitudes = Array.from({ length: 2 + Math.floor(random() * 8) }, () => wrap(start + random() * extent))
+      expect(longitudeSpanOf(extremesOf(longitudes)), longitudes.join(', ')).toEqual(longitudeSpan(longitudes))
+    }
+  })
+
+  it('leaves a track half the globe wide or wider to every longitude', () => {
+    // The widest gap here lies between -150 and -30, clear of both meridians.
+    expect(longitudeSpanOf(extremesOf([-150, -30, 20, 120]))).toBeUndefined()
+    expect(longitudeSpanOf(extremesOf([-90, 0, 90]))).toBeUndefined()
+    for (let run = 0; run < 2000; run++) {
+      const longitudes = Array.from({ length: 2 + Math.floor(random() * 8) }, () => wrap(random() * 360))
+      if (width(longitudeSpan(longitudes)) >= 180) {
+        expect(longitudeSpanOf(extremesOf(longitudes)), longitudes.join(', ')).toBeUndefined()
+      }
+    }
   })
 })

@@ -223,6 +223,20 @@ describe('summaries', () => {
     store.close()
   })
 
+  it('reads every longitude of a track wider than half the globe', async () => {
+    const store = newStore()
+    // Its widest gap, between -150 and -30, holds neither meridian, so no two
+    // extremes bound it.
+    for (const [i, lon] of [-150, -30, 20, 120].entries()) {
+      store.newPosition(ctx, [10, lon], i * MINUTE)
+    }
+
+    const [summary] = store.summarize(undefined)
+    expect(summary).toEqual(await fromPoints(store, ctx))
+    expect(summary!.bbox).toEqual([-30, 10, -150, 10])
+    store.close()
+  })
+
   it('leaves out a requested context the store has not recorded', () => {
     const store = seeded()
 

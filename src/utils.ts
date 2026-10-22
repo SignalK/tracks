@@ -433,3 +433,39 @@ export const longitudeSpan = (longitudes: number[]): [number, number] => {
   }
   return [west, east]
 }
+
+/** The four longitudes `longitudeSpanOf()` needs: the extremes overall, and either side of the prime meridian. */
+export interface LongitudeExtremes {
+  lowest: number
+  highest: number
+  /** The lowest longitude at or east of the prime meridian, if any. */
+  lowestEast: number | null
+  /** The highest longitude west of the prime meridian, if any. */
+  highestWest: number | null
+}
+
+/**
+ * What `longitudeSpan()` gives, from four longitudes rather than every one,
+ * or undefined when they are not enough.
+ *
+ * A track narrower than half the globe leaves a gap wider than half, and a gap
+ * that wide holds the antimeridian or the prime meridian. So it is either the
+ * wrap-around from the highest longitude to the lowest, or the jump across
+ * the prime meridian from the highest one west of it to the lowest one east.
+ * A wider track's widest gap can lie anywhere, and only every longitude finds
+ * it.
+ */
+export const longitudeSpanOf = ({
+  lowest,
+  highest,
+  lowestEast,
+  highestWest,
+}: LongitudeExtremes): [number, number] | undefined => {
+  if (highest - lowest < 180) {
+    return [lowest, highest]
+  }
+  if (lowestEast !== null && highestWest !== null && highestWest + 360 - lowestEast < 180) {
+    return [lowestEast, highestWest]
+  }
+  return undefined
+}
