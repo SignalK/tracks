@@ -21,7 +21,9 @@ plugin settings, whether it is still in range or not. Setting that to 0 keeps
 every position.
 
 So the provider is the finer record of the recent past, and the plugin's store
-keeps the older track, within its own retention. The interval and the retention are both
+keeps the older track, within its own retention. A provider can also keep part
+of its record past its retention, such as the own vessel's positions; it is then
+the finer record of the own track for as long as it holds one. The interval and the retention are both
 settings on the plugin's configuration page, which is where their current
 defaults are shown.
 
