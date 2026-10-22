@@ -453,7 +453,8 @@ export interface LongitudeExtremes {
  * wrap-around from the highest longitude to the lowest, or the jump across
  * the prime meridian from the highest one west of it to the lowest one east.
  * A wider track's widest gap can lie anywhere, and only every longitude finds
- * it.
+ * it. So can a track with a longitude outside ±180, which nothing stops a
+ * source from sending: it is not on the circle this reasoning walks.
  */
 export const longitudeSpanOf = ({
   lowest,
@@ -461,6 +462,9 @@ export const longitudeSpanOf = ({
   lowestEast,
   highestWest,
 }: LongitudeExtremes): [number, number] | undefined => {
+  if (lowest < -180 || highest > 180) {
+    return undefined
+  }
   if (highest - lowest < 180) {
     return [lowest, highest]
   }

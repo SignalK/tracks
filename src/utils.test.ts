@@ -448,6 +448,21 @@ describe('longitudeSpanOf', () => {
     }
   })
 
+  it('leaves a track with a longitude outside ±180 to every longitude', () => {
+    // Every longitude bounds this one as [409.1, 118.5]; its extremes would say [118.5, -138.6].
+    expect(longitudeSpanOf(extremesOf([409.1, -138.6, 118.5]))).toBeUndefined()
+    expect(longitudeSpanOf(extremesOf([-200, 10, 20]))).toBeUndefined()
+    for (let run = 0; run < 2000; run++) {
+      const longitudes = Array.from({ length: 2 + Math.floor(random() * 6) }, () =>
+        random() < 0.3 ? random() * 1080 - 540 : random() * 360 - 180,
+      )
+      const span = longitudeSpanOf(extremesOf(longitudes))
+      if (span !== undefined) {
+        expect(span, longitudes.join(', ')).toEqual(longitudeSpan(longitudes))
+      }
+    }
+  })
+
   it('leaves a track half the globe wide or wider to every longitude', () => {
     // The widest gap here lies between -150 and -30, clear of both meridians.
     expect(longitudeSpanOf(extremesOf([-150, -30, 20, 120]))).toBeUndefined()
