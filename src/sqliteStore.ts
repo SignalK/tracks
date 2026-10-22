@@ -4,7 +4,8 @@ import { s2, geojson } from 's2js'
 import { thin } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
-import { createInBounds, createMatcher, longitudeSpan, splitAtAntimeridian } from './utils.js'
+import { createInBounds, createMatcher, longitudeSpan, longitudeSpanOf, splitAtAntimeridian } from './utils.js'
+import type { LongitudeExtremes } from './utils.js'
 import type {
   BinEntry,
   Context,
@@ -506,61 +507,47 @@ export class SqliteTrackStore implements TrackStore {
    * position only to count them, then copy them all to the main thread.
    */
   summarize(contexts: Context[] | undefined, window?: TimeWindow): TrackSummary[] {
-    const clauses: string[] = []
-    const params: (string | number)[] = []
-    if (contexts) {
-      clauses.push(`context IN (${contexts.map(() => '?').join(', ')})`)
-      params.push(...contexts)
-    }
-    if (window) {
-      clauses.push('timestamp >= ?', window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?')
-      params.push(window.from, window.to)
-    }
+    const inWindow = window ? ['timestamp >= ?', window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?'] : []
+    const windowParams = window ? [window.from, window.to] : []
+    const clauses = [...(contexts ? [`context IN (${contexts.map(() => '?').join(', ')})`] : []), ...inWindow]
+    const params = [...(contexts ?? []), ...windowParams]
     // A list of every vessel reads every row of the window, which in table
     // order is one sequential pass. Left to choose, SQLite walks the
     // (context, timestamp) index for the GROUP BY instead, a row lookup per
-    // position: 6.3 s against 4.2 s over 1.17 M rows. Named contexts keep the
+    // position: 3.3 s against 1.5 s over 1.17 M rows. Named contexts keep the
     // index, which reads only theirs.
     const rows = `FROM positions${contexts ? '' : ' NOT INDEXED'}${clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : ''}`
-    // Grouped by longitude too, since the bounds need every distinct one: a
-    // track across the antimeridian spans the narrower way round. One
-    // statement, so the counts and the bounds come from the same snapshot,
-    // and streamed rather than read whole: 40 MB against a few hundred for
-    // 413,000 groups.
+    // A track across the antimeridian spans the narrower way round, which
+    // four longitudes settle for any track narrower than half the globe
+    // (`longitudeSpanOf`). Grouping by every distinct longitude instead, to
+    // find the widest gap, took 4.2 s over the same rows: one group per
+    // position, nearly.
     const groups = this.db
       .prepare(
-        `SELECT context, lon, COUNT(*) AS count, MIN(timestamp) AS first, MAX(timestamp) AS last,
-                MIN(lat) AS south, MAX(lat) AS north ${rows} GROUP BY context, lon`,
+        `SELECT context, COUNT(*) AS count, MIN(timestamp) AS first, MAX(timestamp) AS last,
+                MIN(lat) AS south, MAX(lat) AS north, MIN(lon) AS lowest, MAX(lon) AS highest,
+                MIN(lon) FILTER (WHERE lon >= 0) AS lowestEast, MAX(lon) FILTER (WHERE lon < 0) AS highestWest
+         ${rows} GROUP BY context`,
       )
-      .iterate(...params) as Iterable<{
+      .all(...params) as unknown as ({
       context: Context
-      lon: number
       count: number
       first: number
       last: number
       south: number
       north: number
-    }>
-    const tracks = new Map<
-      Context,
-      Omit<TrackSummary, 'bbox'> & { south: number; north: number; longitudes: number[] }
-    >()
-    for (const { context, lon, count, first, last, south, north } of groups) {
-      const track = tracks.get(context)
-      if (!track) {
-        tracks.set(context, { context, pointCount: count, first, last, south, north, longitudes: [lon] })
-        continue
-      }
-      track.pointCount += count
-      track.first = Math.min(track.first, first)
-      track.last = Math.max(track.last, last)
-      track.south = Math.min(track.south, south)
-      track.north = Math.max(track.north, north)
-      track.longitudes.push(lon)
-    }
-    return [...tracks.values()].map(({ context, pointCount, first, last, south, north, longitudes }) => {
-      const [west, east] = longitudeSpan(longitudes)
-      return { context, pointCount, first, last, bbox: [west, south, east, north] }
+    } & LongitudeExtremes)[]
+    // A wider track needs every longitude, read for that vessel alone. This
+    // worker's connection makes every write and this runs without yielding,
+    // so the two statements read the same rows.
+    const longitudes = this.db.prepare(
+      `SELECT DISTINCT lon FROM positions WHERE ${['context = ?', ...inWindow].join(' AND ')}`,
+    )
+    return groups.map(({ context, count, first, last, south, north, ...extremes }) => {
+      const [west, east] =
+        longitudeSpanOf(extremes) ??
+        longitudeSpan((longitudes.all(context, ...windowParams) as unknown as { lon: number }[]).map(({ lon }) => lon))
+      return { context, pointCount: count, first, last, bbox: [west, south, east, north] }
     })
   }
 
