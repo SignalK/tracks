@@ -237,6 +237,21 @@ describe('summaries', () => {
     store.close()
   })
 
+  it('reads only the longitudes in the window of a track wider than half the globe', async () => {
+    const store = newStore()
+    for (const [i, lon] of [-150, -30, 20, 120].entries()) {
+      store.newPosition(ctx, [10, lon], i * MINUTE)
+    }
+    // Read too, it would move the widest gap to between 20 and 120.
+    store.newPosition(ctx, [10, -90], 10 * MINUTE)
+    const window = { from: 0, to: 5 * MINUTE }
+
+    const [summary] = store.summarize(undefined, window)
+    expect(summary).toEqual(await fromPoints(store, ctx, window))
+    expect(summary!.bbox).toEqual([-30, 10, -150, 10])
+    store.close()
+  })
+
   it('leaves out a requested context the store has not recorded', () => {
     const store = seeded()
 
