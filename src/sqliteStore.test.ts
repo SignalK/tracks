@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -920,6 +920,74 @@ describe('the connection', () => {
       expect(store['db'].prepare('PRAGMA synchronous').get()).toEqual({ synchronous: 1 })
     } finally {
       store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('the position index', () => {
+  const t0 = Date.parse('2026-06-01T00:00:00Z')
+  const plan = (store: SqliteTrackStore, sql: string, ...args: (string | number)[]) =>
+    (store['db'].prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args) as { detail: string }[])
+      .map(({ detail }) => detail)
+      .join(' | ')
+
+  it('answers a track read and a listing from the index alone', () => {
+    const store = newStore()
+    store.newPosition(ctx, [60.1, 24.9], t0)
+
+    expect(
+      plan(
+        store,
+        'SELECT timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp',
+        ctx,
+        t0,
+        t0 + 1,
+      ),
+    ).toContain('COVERING INDEX idx_context_time_position')
+    expect(
+      plan(
+        store,
+        'SELECT context, COUNT(*), MIN(lat), MAX(lon) FROM positions WHERE timestamp >= ? GROUP BY context',
+        t0,
+      ),
+    ).toContain('COVERING INDEX idx_context_time_position')
+    store.close()
+  })
+
+  it('replaces the narrower index on a database an older version wrote', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const older = new DatabaseSync(file)
+      older.exec(`
+        CREATE TABLE positions (context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);
+        CREATE INDEX idx_s2cell ON positions(s2cell);
+        CREATE INDEX idx_context_timestamp ON positions(context, timestamp);
+      `)
+      // Enough rows for the old index to fill pages the new one can take over.
+      const insert = older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)')
+      older.exec('BEGIN')
+      for (let i = 0; i < 5000; i++) {
+        insert.run(ctx, t0 + i * 1000, 60.1, 24.9)
+      }
+      older.exec('COMMIT')
+      older.close()
+
+      const store = new SqliteTrackStore({ file }, debug)
+      const indexes = store['db']
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'positions' ORDER BY name")
+        .all() as { name: string }[]
+      expect(indexes.map(({ name }) => name)).toEqual(['idx_context_time_position', 'idx_s2cell'])
+      // Built over the old index's pages, so none of them are left over, and
+      // the write-ahead log the build went through is emptied.
+      expect(store['db'].prepare('PRAGMA freelist_count').get()).toEqual({ freelist_count: 0 })
+      expect(statSync(`${file}-wal`).size).toBe(0)
+      const track = await store.getTimed(ctx)
+      expect(track).toHaveLength(5000)
+      expect(track[0]).toEqual({ position: [60.1, 24.9], timestamp: t0 })
+      store.close()
+    } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
