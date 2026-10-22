@@ -955,7 +955,10 @@ describe('the position index', () => {
     store.close()
   })
 
-  it('replaces the narrower index on a database an older version wrote', async () => {
+  it.each([
+    ['the narrower index', 'CREATE INDEX idx_context_timestamp ON positions(context, timestamp);'],
+    ['no index by vessel and time', ''],
+  ])('builds the index on a database an older version wrote with %s', async (_, index) => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
     try {
       const file = join(dir, 'tracks.db')
@@ -963,7 +966,7 @@ describe('the position index', () => {
       older.exec(`
         CREATE TABLE positions (context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);
         CREATE INDEX idx_s2cell ON positions(s2cell);
-        CREATE INDEX idx_context_timestamp ON positions(context, timestamp);
+        ${index}
       `)
       // Enough rows for the old index to fill pages the new one can take over.
       const insert = older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)')
@@ -991,6 +994,33 @@ describe('the position index', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  // Waits out the store's 5 s busy timeout before the checkpoint gives up.
+  it('reports a write-ahead log another connection keeps from being truncated', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const reader = new DatabaseSync(file)
+      reader.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE positions (context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);
+        CREATE INDEX idx_context_timestamp ON positions(context, timestamp);
+      `)
+      reader.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+      // A read in progress, as a backup or an sqlite3 shell can hold one.
+      reader.exec('BEGIN')
+      reader.prepare('SELECT COUNT(*) FROM positions').get()
+
+      const log = Object.assign(vi.fn(), { enabled: false })
+      const store = new SqliteTrackStore({ file }, log)
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('kept the write-ahead log from being truncated'))
+      reader.exec('COMMIT')
+      reader.close()
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
 })
 
 describe('a transaction whose rollback fails', () => {

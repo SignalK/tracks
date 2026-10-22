@@ -371,17 +371,25 @@ export class SqliteTrackStore implements TrackStore {
     // and in the same transaction, so the new one reuses its pages rather
     // than growing the file by both, and a build that fails leaves it as it
     // was.
-    const older = this.db.prepare("SELECT 1 AS found FROM sqlite_master WHERE name = 'idx_context_timestamp'").get()
+    const building = !this.db
+      .prepare("SELECT 1 AS found FROM sqlite_master WHERE name = 'idx_context_time_position'")
+      .get()
     this.transaction(() =>
       this.db.exec(`
         DROP INDEX IF EXISTS idx_context_timestamp;
         CREATE INDEX IF NOT EXISTS idx_context_time_position ON positions(context, timestamp, lat, lon);
       `),
     )
-    if (older) {
+    if (building) {
       // The build went through the write-ahead log, which keeps its size,
-      // that of the whole index, until a checkpoint truncates it.
-      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+      // that of the whole index, until a checkpoint truncates it. A reader
+      // on another connection can hold that off past the busy timeout; the
+      // log then stays until the last connection closes and SQLite removes
+      // it.
+      const { busy } = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number }
+      if (busy) {
+        this.debug('position index built; another connection kept the write-ahead log from being truncated')
+      }
     }
     // Imports kept before their time was: dated to the first start that knew to.
     const now = Date.now()
