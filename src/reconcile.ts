@@ -1,5 +1,36 @@
 import { uncoveredBetween } from './timeWindow.js'
-import type { TimedPosition } from './types.js'
+import type { TimeWindow, TimedPosition } from './types.js'
+
+/**
+ * Whether the store's own points already answer a window at the resolution the
+ * query asked for.
+ *
+ * The store records at its own spacing, which is the same as — or finer than —
+ * what a coarse query (a "show every AIS track" viewport query, an overnight
+ * track) is drawn from. In that case the provider would only re-supply buckets
+ * the store already holds, so asking it per poll is pure cost. Only when the
+ * query is finer than the store's spacing, or extends past what it holds, does
+ * the provider add anything.
+ *
+ * One bucket of slack at each end: a store read for the same window can be a
+ * bucket short at its edges without missing anything meaningful.
+ */
+export function storeCoversWindow(stored: TimedPosition[], window: TimeWindow, resolutionMs: number): boolean {
+  if (stored.length < 2 || !(resolutionMs > 0)) {
+    return false
+  }
+  const slack = Math.max(resolutionMs, 1000)
+  let widest = 0
+  for (let i = 1; i < stored.length; i++) {
+    const gap = stored[i].timestamp - stored[i - 1].timestamp
+    if (gap > widest) widest = gap
+  }
+  return (
+    stored[0].timestamp <= window.from + slack &&
+    stored[stored.length - 1].timestamp >= window.to - slack &&
+    widest <= resolutionMs + slack
+  )
+}
 
 /**
  * Combines positions from a history provider with the plugin's own store.

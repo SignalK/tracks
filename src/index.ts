@@ -23,7 +23,7 @@ import type { TrackApi } from './trackApi.js'
 import { AsyncTrackStore } from './asyncTrackStore.js'
 import type { TrackStore } from './store.js'
 import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
-import { fillFromHistory, reconcile } from './reconcile.js'
+import { fillFromHistory, reconcile, storeCoversWindow } from './reconcile.js'
 import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
 import { fromGpx, toGpx } from './gpx.js'
@@ -1228,6 +1228,11 @@ export default function ThePlugin(app: App): Plugin {
           // before this plugin was installed — would otherwise never be asked
           // about.
           const asked = window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
+          // The store already answers this at the asked resolution: the
+          // provider would only re-supply its buckets.
+          if (storeCoversWindow(stored, asked, effective)) {
+            return stored
+          }
           const history = await visibleHistory(context, asked, effective)
           // `failed` is deliberately not escalated here: the v2 contract has
           // no per-context error and no 404, so a provider outage degrades to
@@ -1336,7 +1341,12 @@ export default function ThePlugin(app: App): Plugin {
         // history: `/self/track` with no parameters is the common case, and
         // skipping the provider there would quietly serve store-only data.
         const window = query.window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
-        const history = await visibleHistory(context, window, effectiveResolution)
+        // Skip the provider when the store already covers the window at the
+        // asked resolution (a coarse all-tracks request, for instance).
+        const covered = storeCoversWindow(stored, window, effectiveResolution)
+        const history = covered
+          ? { points: [] as TimedPosition[], resolutionMs: effectiveResolution, coarsened: false, failed: false }
+          : await visibleHistory(context, window, effectiveResolution)
         const points = withHistory(history, stored)
         // 404 only for a vessel neither source knows at all. A known vessel
         // with nothing inside the window is an empty track, not a missing one.
