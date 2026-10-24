@@ -63,6 +63,14 @@ export function simplify(points: TimedPosition[], epsilon: number): TimedPositio
         worstAt = i
       }
     }
+    // A segment too wide to measure reads Infinity for every point, so the
+    // first one would always be the worst. Splitting there peels off one
+    // point per pass, which is quadratic and keeps every point of a passage
+    // longer than SPAN_LIMIT. Splitting in the middle keeps one point and
+    // halves the span until each part can be measured.
+    if (worst === Infinity) {
+      worstAt = (first + last) >> 1
+    }
     if (worstAt >= 0 && worst > epsilon) {
       keep[worstAt] = 1
       stack.push([first, worstAt], [worstAt, last])
@@ -97,9 +105,9 @@ function perpendicularDistance(p: TimedPosition, a: TimedPosition, b: TimedPosit
   // longitude by cos(80) and reports a point 111 km off the line as 19 km.
   const cos = Math.cos((((a.position[LAT] + b.position[LAT]) / 2) * Math.PI) / 180)
   const originLng = a.position[LNG]
-  // Beyond this the flat projection stops being trustworthy, so the point is
-  // kept rather than measured: keeping a point that could have gone costs a
-  // little geometry, dropping one that should have stayed loses the shape.
+  // Beyond this the flat projection stops being trustworthy, so the segment
+  // is split rather than measured: keeping a point that could have gone costs
+  // a little geometry, dropping one that should have stayed loses the shape.
   //
   // Both spans are checked, longitude after scaling, so the limit means the
   // same ground distance either way. Near the equator that scale is ~1, and
