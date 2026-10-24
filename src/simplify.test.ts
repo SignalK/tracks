@@ -124,6 +124,24 @@ describe('simplify', () => {
     expect(simplify(longLeg, 100_000)).toHaveLength(2)
   })
 
+  // A month of passage-making spans more than ten degrees between its first
+  // and last fix, though no leg between two fixes comes close. Splitting such
+  // a track at its first point kept every point until the rest was narrow
+  // enough to measure, and took time quadratic in the length of the track.
+  it('simplifies a passage spanning more than ten degrees', () => {
+    const passage = Array.from({ length: 3001 }, (_, i) => at(0, i * 0.01, i * 1000))
+
+    expect(simplify(passage, 100).length).toBeLessThan(10)
+  })
+
+  it('still keeps a corner on a passage spanning more than ten degrees', () => {
+    const east = Array.from({ length: 1500 }, (_, i) => at(0, i * 0.01))
+    const northeast = Array.from({ length: 501 }, (_, i) => at(i * 0.01, 15 + i * 0.01))
+    const passage = [...east, ...northeast]
+
+    expect(simplify(passage, 100)).toContainEqual(at(0, 15))
+  })
+
   // The antimeridian is written 179.9 then -179.9: a tenth of a degree apart
   // on the ground, 359.8 apart numerically. Read literally, a straight line
   // across it spans most of the globe and every point on it measures
