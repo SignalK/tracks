@@ -44,6 +44,8 @@ export interface TrackProviderDeps {
   selfContext: () => string
   /** Gap in ms that starts a new segment; 0 leaves the track as one line. */
   segmentGap: () => number
+  /** The store's recording resolution in ms, the coarsest a box query reads history at. */
+  recordingResolution: () => number
   /**
    * The vessel's name for `contextName`, or undefined when unknown.
    *
@@ -267,10 +269,12 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     }
 
     // A provider aggregates to one position per bucket of the resolution it is
-    // asked for, so a box query asks at the recording resolution: at the
+    // asked for, so a box query asks at the recording resolution: at a coarser
     // requested one, a crossing shorter than a bucket would be aggregated away
-    // before the match could see it.
-    const historyResolution = bounds ? undefined : resolution
+    // before the match could see it. A finer requested one is asked as it is,
+    // or a box over a harbour would get one point per recording interval
+    // however finely history holds it.
+    const historyResolution = bounds ? Math.min(resolution ?? Infinity, deps.recordingResolution()) : resolution
 
     const result = new Map<string, TimedPosition[]>()
     // Reconciled per context rather than in one pass: a history provider is

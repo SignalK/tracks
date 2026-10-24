@@ -1207,6 +1207,7 @@ export default function ThePlugin(app: App): Plugin {
         store: () => tracks,
         selfContext: () => app.selfContext,
         segmentGap: () => segmentGap,
+        recordingResolution: () => storeResolution,
         contextName: (context: string) =>
           contextName(
             context,

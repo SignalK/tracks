@@ -574,6 +574,7 @@ describe('getTracks', () => {
         store: () => store,
         selfContext: () => SELF_CONTEXT,
         segmentGap: () => 0,
+        recordingResolution: () => 60_000,
         contextName: () => undefined,
         historyContexts: async () => new Set([SELF_CONTEXT]),
         historyKnows: async () => true,
@@ -1046,6 +1047,49 @@ describe('positions only a history provider holds', () => {
       const res = await providerOf(h).getTracks(query)
       expect(res.features.map((f) => f.properties.context)).toEqual([OTHER_CONTEXT])
       expect(await providerOf(h).getTrackContexts(query)).toEqual([OTHER_CONTEXT])
+    } finally {
+      await h.stop()
+    }
+  })
+
+  it('reads history for a box at a requested resolution finer than the recording', async () => {
+    const asked: (number | undefined)[] = []
+    const h = createHarness({
+      config: { resolution: MINUTE },
+      history: {
+        contexts: [OTHER_CONTEXT],
+        aggregatesFirst: true,
+        // Two minutes inside the box, a row every ten seconds.
+        rows: Array.from({ length: 13 }, (_, i) => [new Date(t0 + i * 10_000).toISOString(), [24.5 + i * 0.001, 60.5]]),
+        onValues: (query) => asked.push(query.resolution),
+      },
+    })
+    try {
+      const res = await providerOf(h).getTracks({
+        ...window,
+        bbox,
+        resolution: Temporal.Duration.from({ seconds: 10 }),
+      })
+      expect(asked).toEqual([10])
+      expect(res.features[0]!.properties.pointCount).toBe(13)
+    } finally {
+      await h.stop()
+    }
+  })
+
+  it('reads history for a box at the recording resolution when the request is coarser', async () => {
+    const asked: (number | undefined)[] = []
+    const h = createHarness({
+      config: { resolution: MINUTE },
+      history: {
+        contexts: [OTHER_CONTEXT],
+        rows: rows([60.5, 24.5], [60.6, 24.6]),
+        onValues: (query) => asked.push(query.resolution),
+      },
+    })
+    try {
+      await providerOf(h).getTracks({ ...window, bbox, resolution: Temporal.Duration.from({ minutes: 10 }) })
+      expect(asked).toEqual([60])
     } finally {
       await h.stop()
     }
