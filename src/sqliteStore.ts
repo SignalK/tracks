@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import type { StatementSync } from 'node:sqlite'
 import { s2, geojson } from 's2js'
-import { thin } from './timeWindow.js'
+import { thin, Thinner } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
 import { createInBounds, createMatcher, longitudeSpan, longitudeSpanOf, splitAtAntimeridian } from './utils.js'
@@ -28,7 +28,7 @@ import type {
 
 export class TransactionStateError extends Error {}
 
-const toTimed = ({ lat, lon, timestamp }: PositionRow): TimedPosition => ({
+const toTimed = ({ lat, lon, timestamp }: Omit<PositionRow, 'context'>): TimedPosition => ({
   position: [lat, lon],
   timestamp,
 })
@@ -177,6 +177,12 @@ export interface SqliteStoreConfig {
 }
 
 const DEFAULT_MAX_CELLS = 8
+/**
+ * The span of positions one read in `getTimed` holds at a time: a day, at
+ * most 86,400 rows at one per second.
+ */
+const READ_SPAN_MS = 24 * 60 * 60 * 1000
+
 /**
  * How long a stretch recorded finer than the store's resolution keeps all of
  * that detail. The swing around an anchor matters while the boat lies there
@@ -506,19 +512,55 @@ export class SqliteTrackStore implements TrackStore {
     return this.getTimed(context, window).then((points) => points.map(({ position }) => position))
   }
 
-  getTimed(context: Context, window?: TimeWindow): Promise<TimedPosition[]> {
+  /**
+   * A context's positions in a window, thinned to `resolution` when one is
+   * given.
+   *
+   * Read a day at a time and thinned as each day arrives, so the points are
+   * the ones `thin()` keeps without every row of the window being held first:
+   * years of track at a fine resolution would otherwise be copied out whole
+   * before most of it is dropped, which is enough to exhaust a small board's
+   * memory. A day per query rather than a row per step, because node:sqlite
+   * builds rows in bulk at about twice the speed it hands them out one by one.
+   */
+  getTimed(context: Context, window?: TimeWindow, resolution?: number): Promise<TimedPosition[]> {
     // An unknown context rejects; a known but stationary one resolves with
     // points. Resolving [] for both would make the two indistinguishable and
     // the route could not answer 404.
     if (!this.knows(context)) {
       return Promise.reject(new Error(`No track for ${context}`))
     }
-    return Promise.resolve(
-      this.rowsFor(context, window).map(({ lat, lon, timestamp }) => ({
-        position: [lat, lon] as LatLngTuple,
-        timestamp,
-      })),
+    const start = window?.from ?? Number.NEGATIVE_INFINITY
+    const end = window?.to ?? Number.POSITIVE_INFINITY
+    const endClause = !window || window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?'
+    // One bound per side in every statement: given a second lower bound on
+    // timestamp, SQLite enters the index at the first and filters on the other,
+    // so each seek would scan from the start of the window again.
+    //
+    // Each read starts at the next recorded time, so a window spanning years
+    // of gaps costs one seek per day that has positions, not one per day.
+    const next = this.db.prepare(
+      `SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND ${endClause} ORDER BY timestamp LIMIT 1`,
     )
+    // Ordered as rowsFor() orders them, so equal times keep the order they were stored in.
+    const columns = 'SELECT timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ?'
+    const day = this.db.prepare(`${columns} AND timestamp < ? ORDER BY timestamp, rowid`)
+    const lastDay = this.db.prepare(`${columns} AND ${endClause} ORDER BY timestamp, rowid`)
+    const nextAfter = (from: number) => (next.get(context, from, end) as { timestamp: number } | undefined)?.timestamp
+    const thinner = resolution ? new Thinner(resolution) : undefined
+    const points: TimedPosition[] = []
+    for (let from = nextAfter(start); from !== undefined; from = nextAfter(from + READ_SPAN_MS)) {
+      const rows =
+        from + READ_SPAN_MS < end ? day.all(context, from, from + READ_SPAN_MS) : lastDay.all(context, from, end)
+      for (const row of rows as unknown as Omit<PositionRow, 'context'>[]) {
+        if (thinner) {
+          thinner.push(toTimed(row))
+        } else {
+          points.push(toTimed(row))
+        }
+      }
+    }
+    return Promise.resolve(thinner ? thinner.finish() : points)
   }
 
   private contexts(): Context[] {
@@ -661,8 +703,10 @@ export class SqliteTrackStore implements TrackStore {
     const tracks = await Promise.all(
       contexts.map((context) => {
         const rows = near?.get(context)
-        const read = rows ? Promise.resolve(rows.map(toTimed)) : this.getTimed(context, query?.window)
-        return read.then((points) => ({ context, points: thin(points, query?.resolution) }))
+        const read = rows
+          ? Promise.resolve(thin(rows.map(toTimed), query?.resolution))
+          : this.getTimed(context, query?.window, query?.resolution)
+        return read.then((points) => ({ context, points }))
       }),
     )
     return tracks.reduce<TimedTrackCollection>((acc, { context, points }) => {

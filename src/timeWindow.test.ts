@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseDuration, parseTrackQuery, segment, thin, thinToBudget, TimeWindowError } from './timeWindow.js'
+import { parseDuration, parseTrackQuery, segment, thin, Thinner, thinToBudget, TimeWindowError } from './timeWindow.js'
 import type { TimedPosition } from './types.js'
 
 const MINUTE = 60 * 1000
@@ -143,6 +143,20 @@ describe('thin', () => {
     const p = points(0, 100, 200, 300, 400, 500)
     p[3] = { ...p[3]!, breakBefore: true }
     expect(thin(p, 1000).map((x) => x.timestamp - NOW)).toEqual([0, 200, 300, 500])
+  })
+
+  // What a store reading row by row relies on to return what thinning the
+  // whole read would.
+  it('thins points fed one at a time as it thins them all at once', () => {
+    const p = points(0, 100, 200, 1000, 1100, 2000, 2050)
+    p[2] = { ...p[2]!, span: 300 }
+    for (const track of [p, p.slice(0, 2), p.slice(0, 1), []]) {
+      const thinner = new Thinner(1000)
+      for (const point of track) {
+        thinner.push(point)
+      }
+      expect(thinner.finish()).toEqual(thin(track, 1000))
+    }
   })
 })
 
