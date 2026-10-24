@@ -331,8 +331,7 @@ describe('clip reads', () => {
   const outside: LatLngTuple = [59, 20]
 
   /** A day outside, an hour inside, a day outside, an hour inside, an hour outside; one fix a minute. */
-  const seeded = (): { store: SqliteTrackStore; all: TimedPosition[] } => {
-    const store = newStore()
+  const seeded = (store = newStore()): { store: SqliteTrackStore; all: TimedPosition[] } => {
     const legs: [LatLngTuple, number][] = [
       [outside, 24 * 60],
       [inside, 60],
@@ -395,7 +394,8 @@ describe('clip reads', () => {
   // cell order. The middle visit lies in another corner of the box than the
   // first and the last, so cell order and time order differ.
   it('reads the visits of a named vessel in time order whatever cells they lie in', async () => {
-    const store = newStore()
+    // Counting one row of box and window: never fewer in the window, so read by cell.
+    const store = new SqliteTrackStore({ file: ':memory:', readProbeLimit: 1 }, debug)
     const legs: [LatLngTuple, number][] = [
       [outside, 60],
       [[60.9, 24.9], 30],
@@ -422,6 +422,42 @@ describe('clip reads', () => {
     const unnamed = await store.getFilteredTimedTracks(clipped)
     expect(named[ctx]).toEqual(unnamed[ctx])
     expect(clipToBounds(named[ctx]!, box)).toEqual(clipToBounds(all, box))
+    store.close()
+  })
+
+  // The box holds two hours of the vessel's three days. A window of forty
+  // minutes holds fewer rows than the box, the whole track more, and either
+  // read must give what the read without named vessels gives.
+  it('reads a named vessel by time for a short window and by cell for a long one', async () => {
+    const { store } = seeded(new SqliteTrackStore({ file: ':memory:', readProbeLimit: 1000 }, debug))
+    const db = store['db']
+    const prepare = db.prepare.bind(db)
+    const prepared: string[] = []
+    vi.spyOn(db, 'prepare').mockImplementation((sql: string) => {
+      prepared.push(sql)
+      return prepare(sql)
+    })
+    const clipped = { bbox: box, radius: null, intersects: true, clip: true }
+    const enter = 24 * 60 * MINUTE
+    // The statements that read positions, as opposed to the counts before them.
+    const reads = [
+      [
+        { from: enter - 10 * MINUTE, to: enter + 30 * MINUTE },
+        'lon FROM positions INDEXED BY idx_context_time_position',
+      ],
+      [{ from: 0, to: 3 * 24 * 60 * MINUTE }, 'lon FROM positions INDEXED BY idx_context_s2cell'],
+    ] as const
+    for (const [window, read] of reads) {
+      prepared.length = 0
+      const named = await store.getFilteredTimedTracks({ ...clipped, contexts: [ctx] }, undefined, undefined, {
+        window,
+      })
+      for (const [, other] of reads) {
+        expect(prepared.some((sql) => sql.includes(other))).toBe(other === read)
+      }
+      const unnamed = await store.getFilteredTimedTracks(clipped, undefined, undefined, { window })
+      expect(named[ctx]).toEqual(unnamed[ctx])
+    }
     store.close()
   })
 
