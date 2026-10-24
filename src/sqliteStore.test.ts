@@ -391,6 +391,40 @@ describe('clip reads', () => {
     store.close()
   })
 
+  // A named vessel is read one cell range at a time, so its times arrive in
+  // cell order. The middle visit lies in another corner of the box than the
+  // first and the last, so cell order and time order differ.
+  it('reads the visits of a named vessel in time order whatever cells they lie in', async () => {
+    const store = newStore()
+    const legs: [LatLngTuple, number][] = [
+      [outside, 60],
+      [[60.9, 24.9], 30],
+      [outside, 60],
+      [[60.1, 24.1], 30],
+      [outside, 60],
+      [[60.9, 24.9], 30],
+      [outside, 60],
+    ]
+    const all: TimedPosition[] = []
+    for (const [position, minutes] of legs) {
+      for (let i = 0; i < minutes; i++) {
+        all.push({ position, timestamp: all.length * MINUTE })
+      }
+    }
+    store.initialTrack(
+      ctx,
+      all.map(({ position }) => position),
+      all.map(({ timestamp }) => timestamp),
+    )
+
+    const clipped = { bbox: box, radius: null, intersects: true, clip: true }
+    const named = await store.getFilteredTimedTracks({ ...clipped, contexts: [ctx] })
+    const unnamed = await store.getFilteredTimedTracks(clipped)
+    expect(named[ctx]).toEqual(unnamed[ctx])
+    expect(clipToBounds(named[ctx]!, box)).toEqual(clipToBounds(all, box))
+    store.close()
+  })
+
   it('keeps the edge points inside the time window', async () => {
     const { store } = seeded()
     const enter = 24 * 60 * MINUTE
@@ -1021,7 +1055,7 @@ describe('the position index', () => {
   it.each([
     ['the narrower index', 'CREATE INDEX idx_context_timestamp ON positions(context, timestamp);'],
     ['no index by vessel and time', ''],
-  ])('builds the index on a database an older version wrote with %s', async (_, index) => {
+  ])('builds the indexes on a database an older version wrote with %s', async (_, index) => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
     try {
       const file = join(dir, 'tracks.db')
@@ -1044,7 +1078,7 @@ describe('the position index', () => {
       const indexes = store['db']
         .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'positions' ORDER BY name")
         .all() as { name: string }[]
-      expect(indexes.map(({ name }) => name)).toEqual(['idx_context_time_position', 'idx_s2cell'])
+      expect(indexes.map(({ name }) => name)).toEqual(['idx_context_s2cell', 'idx_context_time_position', 'idx_s2cell'])
       // Built over the old index's pages, so none of them are left over, and
       // the write-ahead log the build went through is emptied.
       expect(store['db'].prepare('PRAGMA freelist_count').get()).toEqual({ freelist_count: 0 })

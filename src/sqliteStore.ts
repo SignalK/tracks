@@ -377,13 +377,18 @@ export class SqliteTrackStore implements TrackStore {
     // and in the same transaction, so the new one reuses its pages rather
     // than growing the file by both, and a build that fails leaves it as it
     // was.
-    const building = !this.db
-      .prepare("SELECT 1 AS found FROM sqlite_master WHERE name = 'idx_context_time_position'")
-      .get()
+    //
+    // (context, s2cell) reads a box for one vessel without its whole window:
+    // the cell index alone mixes every vessel near the box, and the index
+    // above finds the vessel but orders its rows by time.
+    const building = ['idx_context_time_position', 'idx_context_s2cell'].some(
+      (name) => !this.db.prepare('SELECT 1 AS found FROM sqlite_master WHERE name = ?').get(name),
+    )
     this.transaction(() =>
       this.db.exec(`
         DROP INDEX IF EXISTS idx_context_timestamp;
         CREATE INDEX IF NOT EXISTS idx_context_time_position ON positions(context, timestamp, lat, lon);
+        CREATE INDEX IF NOT EXISTS idx_context_s2cell ON positions(context, s2cell);
       `),
     )
     if (building) {
@@ -394,7 +399,7 @@ export class SqliteTrackStore implements TrackStore {
       // it.
       const { busy } = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number }
       if (busy) {
-        this.debug('position index built; another connection kept the write-ahead log from being truncated')
+        this.debug('position indexes built; another connection kept the write-ahead log from being truncated')
       }
     }
     // Imports kept before their time was: dated to the first start that knew to.
@@ -760,6 +765,31 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   /**
+   * The positions of named contexts within a cell covering, one range at a
+   * time through (context, s2cell).
+   *
+   * Asked for the context and every range at once, SQLite chose the (context,
+   * timestamp) index and walked each vessel's whole window, testing every row
+   * against the covering: a view over a harbour visited once read years of
+   * the own track. Here each range is one seek that reads only its rows.
+   */
+  private *namedNearBounds(
+    contexts: Context[],
+    ranges: bigint[],
+    inWindow: string,
+    timeParams: number[],
+  ): Generator<PositionRow> {
+    const read = this.db.prepare(
+      `SELECT context, timestamp, lat, lon FROM positions INDEXED BY idx_context_s2cell WHERE context = ? AND s2cell BETWEEN ? AND ?${inWindow}`,
+    )
+    for (const context of contexts) {
+      for (let i = 0; i < ranges.length; i += 2) {
+        yield* read.all(context, ranges[i]!, ranges[i + 1]!, ...timeParams) as unknown as PositionRow[]
+      }
+    }
+  }
+
+  /**
    * Per context, the positions a track clipped to `bounds` is made of, and
    * only those: every position inside the box within the window, plus the one
    * either side of each stretch inside, which carries the line to the edge.
@@ -792,16 +822,19 @@ export class SqliteTrackStore implements TrackStore {
     const timeParams = window ? [window.from, window.to] : []
     const inWindow = timeClauses.map((c) => ` AND ${c}`).join('')
     const named = contexts ? [...contexts] : []
-    const inContexts = contexts ? ` AND context IN (${named.map(() => '?').join(', ')})` : ''
 
-    const inside = this.db
-      .prepare(
-        `SELECT context, timestamp, lat, lon FROM positions WHERE (${clause.where})${inContexts}${inWindow} ORDER BY context, timestamp`,
-      )
-      .all(...clause.params, ...named, ...timeParams) as unknown as PositionRow[]
+    const inside: Iterable<PositionRow> = contexts
+      ? this.namedNearBounds(named, clause.params, inWindow, timeParams)
+      : (this.db
+          .prepare(
+            `SELECT context, timestamp, lat, lon FROM positions WHERE (${clause.where})${inWindow} ORDER BY context, timestamp`,
+          )
+          .all(...clause.params, ...timeParams) as unknown as PositionRow[])
     const inBounds = createInBounds(bounds)
     const times = new Map<Context, number[]>()
+    let insideRows = 0
     for (const { context, timestamp, lat, lon } of inside) {
+      insideRows++
       if (inBounds([lat, lon])) {
         const list = times.get(context)
         if (list) {
@@ -810,6 +843,10 @@ export class SqliteTrackStore implements TrackStore {
           times.set(context, [timestamp])
         }
       }
+    }
+    // Read range by range, the named contexts' times come in cell order.
+    for (const list of times.values()) {
+      list.sort((a, b) => a - b)
     }
 
     const columns = 'SELECT rowid AS id, context, timestamp, lat, lon FROM positions WHERE context = ?'
@@ -838,7 +875,7 @@ export class SqliteTrackStore implements TrackStore {
       )
     }
     if (this.debug.enabled) {
-      this.debug(`clip covering ${clause.cells} cells -> ${inside.length} rows -> ${near.size} contexts`)
+      this.debug(`clip covering ${clause.cells} cells -> ${insideRows} rows -> ${near.size} contexts`)
     }
     return near
   }
