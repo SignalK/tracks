@@ -250,29 +250,62 @@ function thinStretch(points: TimedPosition[], resolution: number): TimedPosition
   if (points.length <= 2) {
     return points
   }
-  const result: TimedPosition[] = []
-  let lastKept = Number.NEGATIVE_INFINITY
-  let previous: TimedPosition | undefined
-  // The longest pause since the last kept point, while points are being dropped.
-  let droppedPause: number | undefined
-  let keptLast = false
+  const thinner = new Thinner(resolution)
   for (const point of points) {
-    const pause = previous ? pauseBetween(previous, point) : 0
-    keptLast = point.timestamp - lastKept >= resolution
-    if (keptLast) {
-      result.push(droppedPause === undefined ? point : { ...point, pauseBefore: Math.max(droppedPause, pause) })
-      lastKept = point.timestamp
-      droppedPause = undefined
-    } else {
-      droppedPause = Math.max(droppedPause ?? pause, pause)
+    thinner.push(point)
+  }
+  return thinner.finish()
+}
+
+/**
+ * One stretch thinned as `thin()` thins it, fed a point at a time.
+ *
+ * Lets a reader thin a track while reading it, holding only the points it
+ * keeps: a long window read at a fine resolution would otherwise hold every
+ * row before dropping most of them. `thin()` runs through this too, so the two
+ * cannot drift apart.
+ */
+export class Thinner {
+  private readonly kept: TimedPosition[] = []
+  // A stretch of two points or fewer is returned as given, as `thin()` does.
+  private readonly head: TimedPosition[] = []
+  private count = 0
+  private lastKept = Number.NEGATIVE_INFINITY
+  private previous: TimedPosition | undefined
+  // The longest pause since the last kept point, while points are being dropped.
+  private droppedPause: number | undefined
+  private keptLast = false
+
+  constructor(private readonly resolution: number) {}
+
+  push(point: TimedPosition): void {
+    if (this.count++ < 2) {
+      this.head.push(point)
     }
-    previous = point
+    const pause = this.previous ? pauseBetween(this.previous, point) : 0
+    this.keptLast = point.timestamp - this.lastKept >= this.resolution
+    if (this.keptLast) {
+      this.kept.push(
+        this.droppedPause === undefined ? point : { ...point, pauseBefore: Math.max(this.droppedPause, pause) },
+      )
+      this.lastKept = point.timestamp
+      this.droppedPause = undefined
+    } else {
+      this.droppedPause = Math.max(this.droppedPause ?? pause, pause)
+    }
+    this.previous = point
   }
-  const last = points[points.length - 1]
-  if (last && !keptLast) {
-    result.push({ ...last, pauseBefore: droppedPause ?? 0 })
+
+  /** The points kept, the last one included whether or not its spacing allowed it. */
+  finish(): TimedPosition[] {
+    if (this.count <= 2) {
+      return this.head
+    }
+    if (this.previous && !this.keptLast) {
+      this.kept.push({ ...this.previous, pauseBefore: this.droppedPause ?? 0 })
+    }
+    return this.kept
   }
-  return result
 }
 
 /**

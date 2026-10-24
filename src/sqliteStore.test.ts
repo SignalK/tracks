@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it, vi } from 'vitest'
 import { s2 } from 's2js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
+import { thin } from './timeWindow.js'
 import { clipToBounds, longitudeSpan, splitAtAntimeridian } from './utils.js'
 import type { Context, GeoBounds, ImportedTrack, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
 
@@ -82,6 +83,68 @@ describe('bbox queries', () => {
 
     const tracks = await store.getFilteredTracks({ bbox: { sw: [-18, 179], ne: [-17, -179] }, radius: null })
     expect(Object.keys(tracks)).toEqual([ctx])
+    store.close()
+  })
+})
+
+describe('a window read at a resolution', () => {
+  const MINUTE = 60_000
+  // Uneven spacing and recording pauses, so thinning has choices to make.
+  const seeded = (): SqliteTrackStore => {
+    const store = newStore()
+    let t = 0
+    for (let i = 0; i < 2000; i++) {
+      t += i % 97 === 0 ? 15 * MINUTE : 1000 + (i % 7) * 300
+      store.newPosition(ctx, [60 + i * 1e-5, 24 + i * 1e-5], t)
+    }
+    return store
+  }
+
+  it('keeps what thinning the whole window keeps', async () => {
+    const store = seeded()
+    const window: TimeWindow = { from: 0, to: 40 * 60 * MINUTE }
+    for (const resolution of [5000, MINUTE]) {
+      const thinned = await store.getTimed(ctx, window, resolution)
+      expect(thinned.length).toBeLessThan((await store.getTimed(ctx, window)).length)
+      expect(thinned).toEqual(thin(await store.getTimed(ctx, window), resolution))
+    }
+    store.close()
+  })
+
+  it('serves a filtered query the same points', async () => {
+    const store = seeded()
+    const params = { bbox: null, radius: null, contexts: [ctx] }
+    const tracks = await store.getFilteredTimedTracks(params, undefined, undefined, { resolution: MINUTE })
+    expect(tracks[ctx]).toEqual(thin(await store.getTimed(ctx), MINUTE))
+    store.close()
+  })
+
+  // Four days from late on the first, with a pause longer than a day, so a
+  // read crosses midnight, skips a whole day, and ends inside a day it read.
+  it('reads every position of windows that span several days', async () => {
+    const HOUR = 60 * MINUTE
+    const store = newStore()
+    const times: number[] = []
+    let t = 22 * HOUR
+    for (let i = 0; i < 3000; i++) {
+      t += i === 1500 ? 30 * HOUR : MINUTE + (i % 5) * 7000
+      times.push(t)
+      store.newPosition(ctx, [60 + i * 1e-5, 24 + i * 1e-5], t)
+    }
+    const windows: (TimeWindow | undefined)[] = [
+      undefined,
+      { from: 0, to: times[2600]! },
+      { from: times[100]!, to: times[2600]!, inclusiveEnd: true },
+    ]
+    for (const window of windows) {
+      const all = await store.getTimed(ctx, window)
+      const inside = (time: number) =>
+        !window || (time >= window.from && (window.inclusiveEnd ? time <= window.to : time < window.to))
+      expect(all.map(({ timestamp }) => timestamp)).toEqual(times.filter(inside))
+      for (const resolution of [5 * MINUTE, HOUR]) {
+        expect(await store.getTimed(ctx, window, resolution)).toEqual(thin(all, resolution))
+      }
+    }
     store.close()
   })
 })
