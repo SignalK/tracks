@@ -118,6 +118,35 @@ describe('a window read at a resolution', () => {
     expect(tracks[ctx]).toEqual(thin(await store.getTimed(ctx), MINUTE))
     store.close()
   })
+
+  // Four days from late on the first, with a pause longer than a day, so a
+  // read crosses midnight, skips a whole day, and ends inside a day it read.
+  it('reads every position of windows that span several days', async () => {
+    const HOUR = 60 * MINUTE
+    const store = newStore()
+    const times: number[] = []
+    let t = 22 * HOUR
+    for (let i = 0; i < 3000; i++) {
+      t += i === 1500 ? 30 * HOUR : MINUTE + (i % 5) * 7000
+      times.push(t)
+      store.newPosition(ctx, [60 + i * 1e-5, 24 + i * 1e-5], t)
+    }
+    const windows: (TimeWindow | undefined)[] = [
+      undefined,
+      { from: 0, to: times[2600]! },
+      { from: times[100]!, to: times[2600]!, inclusiveEnd: true },
+    ]
+    for (const window of windows) {
+      const all = await store.getTimed(ctx, window)
+      const inside = (time: number) =>
+        !window || (time >= window.from && (window.inclusiveEnd ? time <= window.to : time < window.to))
+      expect(all.map(({ timestamp }) => timestamp)).toEqual(times.filter(inside))
+      for (const resolution of [5 * MINUTE, HOUR]) {
+        expect(await store.getTimed(ctx, window, resolution)).toEqual(thin(all, resolution))
+      }
+    }
+    store.close()
+  })
 })
 
 describe('requested contexts', () => {
