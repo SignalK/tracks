@@ -128,6 +128,8 @@ export interface E2EOptions {
   historyProvider?: string
   /** Port to boot on, when a test needs its own server. */
   port?: number
+  /** Write no plugin-config-data/tracks.json, as after an App Store install; `config` is then ignored. */
+  unconfigured?: boolean
 }
 
 export async function startServer(options: E2EOptions = {}): Promise<E2EServer> {
@@ -136,20 +138,22 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
   installPlugin(configDir, repoRoot)
 
   mkdirSync(join(configDir, 'plugin-config-data'), { recursive: true })
-  writeFileSync(
-    join(configDir, 'plugin-config-data', 'tracks.json'),
-    JSON.stringify(
-      {
-        enabled: true,
-        configuration: {
-          resolution: 0,
-          ...options.config,
+  if (!options.unconfigured) {
+    writeFileSync(
+      join(configDir, 'plugin-config-data', 'tracks.json'),
+      JSON.stringify(
+        {
+          enabled: true,
+          configuration: {
+            resolution: 0,
+            ...options.config,
+          },
         },
-      },
-      null,
-      2,
-    ),
-  )
+        null,
+        2,
+      ),
+    )
+  }
 
   if (options.historyProvider) {
     // The server reads this as `settings.historyApi.defaultProvider`; without
