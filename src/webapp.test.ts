@@ -1289,12 +1289,14 @@ describe('the history import section', () => {
 
   // Between stop() and the next start() the route answers 404, as on a
   // config save; the progress shown must not freeze there.
-  it('keeps following an import across a refused answer', async () => {
+  it('keeps following an import across a refused or unreadable answer', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const { status } = page()
     const answers = [
       answer(200, { provider: true, state: running }),
       answer(404, { message: 'Tracks API not available because tracks plugin is not enabled' }),
+      // A body that does not read, as a proxy's error page would be.
+      { ok: true, status: 200, json: () => Promise.reject(new SyntaxError('Unexpected token <')) },
       answer(200, { provider: true, state: { ...running, running: false, finishedAt: running.startedAt } }),
     ]
     const fetch = vi.fn(() => Promise.resolve(answers.shift()))
@@ -1302,7 +1304,8 @@ describe('the history import section', () => {
     await startHistory()
     await vi.advanceTimersByTimeAsync(POLL_MS)
     await vi.advanceTimersByTimeAsync(POLL_MS)
-    expect(fetch).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(POLL_MS)
+    expect(fetch).toHaveBeenCalledTimes(4)
     expect(status.textContent).toMatch(/^Imported on /)
   })
 
