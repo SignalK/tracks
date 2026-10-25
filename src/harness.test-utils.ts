@@ -92,11 +92,13 @@ export interface HarnessOptions {
   withoutTrackApi?: boolean
   /**
    * A history provider for the history import to read, and for reads to
-   * leave alone. `contexts` is what `getContexts` lists, and `rows` what
-   * `getValues` returns.
+   * leave alone. `rows` is what `getValues` returns.
    */
   history?: {
-    /** Read on every `getContexts` call, so a getter can count the calls. */
+    /**
+     * What `getContexts` lists. The plugin no longer asks, and a provider
+     * offers it all the same, so a getter here can show nothing does.
+     */
     contexts?: string[]
     rows?: unknown[]
     /** Fail the windowed read, leaving the provider unable to answer at all. */

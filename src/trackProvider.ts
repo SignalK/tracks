@@ -55,7 +55,8 @@ export interface TrackProviderDeps {
   contextName: (context: string) => string | undefined
   /**
    * Whether the history import could bring a vessel's track back into the
-   * recording: the own vessel's, where a history provider is installed. A
+   * recording: the own vessel's, where a history provider is installed or an
+   * import has started already, which goes on once its provider is back. A
    * delete of it then leaves its span behind even where the store held
    * nothing, so a later import leaves it deleted.
    */
@@ -803,10 +804,7 @@ export function fillGaps(
 ): { runs: TimedPosition[][]; overlapping: number } {
   const covered: [number, number][] = []
   for (const { timestamp } of [...recorded].sort((a, b) => a.timestamp - b.timestamp)) {
-    const last = covered.at(-1)
-    if (last && timestamp <= last[1]) {
-      last[1] = Math.max(last[1], timestamp)
-    } else {
+    if (covered.at(-1)?.[1] !== timestamp) {
       covered.push([timestamp, timestamp])
     }
   }

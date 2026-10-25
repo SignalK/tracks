@@ -11,7 +11,7 @@ const iso = (ms: number) => new Date(ms).toISOString()
 // Two hours a second apart, three days ago: before the store recorded anything.
 const from = startOfDay(Date.now()) - 3 * DAY_MS + 10 * HOUR
 const rows = Array.from({ length: 7200 }, (_, i) => [iso(from + i * 1000), [24 + i * 1e-5, 60]])
-const history = { contexts: [SELF_CONTEXT], rows, aggregatesFirst: true }
+const history = { rows, aggregatesFirst: true }
 
 const withHarness = async (run: (h: TestHarness) => Promise<void>, options?: HarnessOptions) => {
   const h = createHarness(options)

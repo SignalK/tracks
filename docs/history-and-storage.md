@@ -154,10 +154,11 @@ A read or a write that fails stops the import, keeping the day it was on, and
 the plugin's status says so. It goes on from that day when started again, or a minute after
 the plugin next starts.
 
-## If a vessel was not moving
+## Where the store has nothing
 
-The store has nothing, and the track is correctly empty for that period rather
-than filled in. A gap in a track means the vessel was not being
-recorded — which, with the **Pause recording while navigation.state is one of**
-setting, may be deliberate. A history import fills such a gap of the own
-vessel from what a provider recorded meanwhile.
+A track is empty for a period the store holds no positions for, rather than
+filled in. That says the vessel was not being recorded, not that it stood
+still: the plugin was not running, or recording was paused, deliberately with
+the **Pause recording while navigation.state is one of** setting. A history
+import fills such a gap of the own vessel from what a provider recorded
+meanwhile.
