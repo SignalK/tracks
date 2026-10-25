@@ -117,7 +117,9 @@ export function createReachesBounds(bounds: GeoBounds): (track: TimedPosition[])
  * one's entry, and appears in each. A line that crosses the box between two
  * points outside it is a stretch of its own, those two points: a sparse
  * track, an import with fixes kilometres apart say, would otherwise vanish
- * from a view it runs straight through.
+ * from a view it runs straight through. A point marked `breakBefore` has no
+ * line from the one before it, so none is drawn across the box between
+ * them: the sqlite store marks one where it skipped what lay between.
  *
  * Bounds crossing the antimeridian are handled by `createInBounds` and
  * `createCrossesBounds`.
@@ -128,12 +130,17 @@ export function clipToBounds(points: TimedPosition[], bounds: GeoBounds): TimedP
   const result: TimedPosition[] = []
   let inside = false
   for (const [i, point] of points.entries()) {
+    // A point that starts a new line has no line from the one before it, to
+    // enter or cross the box by, and ends a stretch inside without an exit.
+    const previous = point.breakBefore ? undefined : points[i - 1]
+    if (point.breakBefore) {
+      inside = false
+    }
     if (inBounds(point.position)) {
       if (!inside) {
-        const entry = points[i - 1]
-        const first = entry ?? point
+        const first = previous ?? point
         result.push(result.length > 0 ? { ...first, breakBefore: true } : first)
-        if (entry) {
+        if (previous) {
           result.push(point)
         }
         inside = true
@@ -143,11 +150,8 @@ export function clipToBounds(points: TimedPosition[], bounds: GeoBounds): TimedP
     } else if (inside) {
       result.push(point)
       inside = false
-    } else {
-      const previous = points[i - 1]
-      if (previous && crosses(previous.position, point.position)) {
-        result.push(result.length > 0 ? { ...previous, breakBefore: true } : previous, point)
-      }
+    } else if (previous && crosses(previous.position, point.position)) {
+      result.push(result.length > 0 ? { ...previous, breakBefore: true } : previous, point)
     }
   }
   return result

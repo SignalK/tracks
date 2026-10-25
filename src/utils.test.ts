@@ -112,6 +112,31 @@ describe('clipToBounds', () => {
     ])
   })
 
+  it('draws no line into a point that starts a new one', () => {
+    // The line from the second point to the third runs through the box, but
+    // the third starts a new line, as does the last.
+    const points: TimedPosition[] = [
+      { position: [60.5, 24.5], timestamp: 0 },
+      { position: [60.5, 25.5], timestamp: 60_000 },
+      { position: [60.5, 23.5], timestamp: 120_000, breakBefore: true },
+      { position: [60.5, 24.4], timestamp: 180_000 },
+      { position: [60.6, 24.6], timestamp: 240_000, breakBefore: true },
+    ]
+    expect(shape(clipToBounds(points, { sw: [...box.sw], ne: [...box.ne] }))).toEqual([
+      [[60.5, 24.5], false],
+      [[60.5, 25.5], false],
+      [[60.5, 23.5], true],
+      [[60.5, 24.4], false],
+      [[60.6, 24.6], true],
+    ])
+    // Nor out of the box: a stretch inside ends at its last point there.
+    const leaving: TimedPosition[] = [
+      { position: [60.5, 24.5], timestamp: 0 },
+      { position: [62, 26], timestamp: 60_000, breakBefore: true },
+    ]
+    expect(shape(clipToBounds(leaving, { sw: [...box.sw], ne: [...box.ne] }))).toEqual([[[60.5, 24.5], false]])
+  })
+
   it('leaves out a line that passes beside the box', () => {
     expect(clipToBounds(track([59, 23], [59.5, 26], [62, 26]), { sw: [...box.sw], ne: [...box.ne] })).toEqual([])
   })

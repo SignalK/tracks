@@ -370,6 +370,34 @@ describe('clip reads', () => {
   // An own-vessel trail asked for a view over a busy anchorage must not read
   // the AIS traffic recorded there. That is a cost with no visible effect on
   // the answer, so the spy on the clip read is what pins it.
+  it('marks a stretch read apart from the one before, so no line is drawn between them across the box', async () => {
+    const store = newStore()
+    // In, out to the east, half an hour round the north, back in from the west.
+    const positions: LatLngTuple[] = [
+      [60.5, 24.5],
+      [60.5, 25.5],
+      ...Array.from({ length: 28 }, (_, i): LatLngTuple => [62, 25.5 - i * 0.1]),
+      [60.5, 23.5],
+      [60.5, 24.4],
+    ]
+    const all = positions.map((position, i) => ({ position, timestamp: i * MINUTE }))
+    store.initialTrack(
+      ctx,
+      positions,
+      all.map(({ timestamp }) => timestamp),
+    )
+    const tracks = await store.getFilteredTimedTracks({
+      bbox: box,
+      radius: null,
+      intersects: true,
+      clip: true,
+      contexts: [ctx],
+    })
+    expect(tracks[ctx]).toHaveLength(4)
+    expect(clipToBounds(tracks[ctx]!, box)).toEqual(clipToBounds(all, box))
+    store.close()
+  })
+
   it('reads near the box only the requested contexts', async () => {
     const { store, all } = seeded()
     store.newPosition(other, inside, MINUTE)
