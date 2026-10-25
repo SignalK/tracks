@@ -221,14 +221,19 @@ describe('the history import through a real history provider', () => {
       return filled >= 20 ? last : undefined
     }, 120_000)
 
-    // On a failure, what the provider says it holds for those fixes.
+    // On a failure, what the provider says it holds since the fixes were sent.
     const held = done
       ? ''
       : await fetch(
           `${server.url}/signalk/v2/api/history/values?paths=navigation.position&resolution=1` +
             `&from=${new Date(t0 - MINUTE).toISOString()}&to=${new Date().toISOString()}`,
-        ).then((res) => res.text())
-    expect(done, `${JSON.stringify(last)} ${held.slice(0, 1500)}`).toBeDefined()
+        )
+          .then((res) => res.json() as Promise<{ data?: [string, unknown][] }>)
+          .then(({ data = [] }) => {
+            const rows = data.filter(([, value]) => value !== null)
+            return `${rows.length} of ${data.length} rows hold a position: ${JSON.stringify(rows.slice(0, 25))}`
+          })
+    expect(done, `${JSON.stringify(last)} ${held}`).toBeDefined()
     expect(done!.error).toBeUndefined()
     expect(Date.parse(done!.firstDay!)).toBeLessThanOrEqual(t0)
     // The provider also holds the fixes the tests above fed, stamped when
