@@ -192,12 +192,12 @@ describe('the history import through a real history provider', () => {
     if (!available || !server) return
     // Moored, the plugin records nothing of the own vessel, and the provider
     // records on. It stamps a fix with the time it arrives, not the one the
-    // fix carries, so these are sent as now, and north of everything the
-    // tests above fed.
+    // fix carries, so these are sent as now, and a degree north of everything
+    // the tests above fed.
     await server.feedState(server.selfContext, 'moored')
     const t0 = Date.now()
     for (let i = 1; i <= 20; i++) {
-      await server.feed(server.selfContext, [60.1 + i * 1e-5, 24.9], Date.now())
+      await server.feed(server.selfContext, [61 + i * 1e-5, 24.9], Date.now())
     }
     await server.feedState(server.selfContext, 'sailing')
 
@@ -210,7 +210,7 @@ describe('the history import through a real history provider', () => {
       )
       const { data = [] } = (await res.json()) as { data?: [string, [number, number] | null][] }
       return data.flatMap(([time, value]) =>
-        value && value[1] > 60.1 ? [{ time: Date.parse(time), lat: value[1] }] : [],
+        value && value[1] >= 61 ? [{ time: Date.parse(time), lat: value[1] }] : [],
       )
     }
     let held: { time: number; lat: number }[] = []
@@ -230,7 +230,7 @@ describe('the history import through a real history provider', () => {
       >
       const track = tracks[server!.selfContext]
       return (track?.coordinates.flat() ?? []).flatMap(([, lat], i) =>
-        lat > 60.1 ? [{ time: Date.parse(track!.times.flat()[i]!), lat }] : [],
+        lat >= 61 ? [{ time: Date.parse(track!.times.flat()[i]!), lat }] : [],
       )
     }
     expect(await recorded()).toEqual([])
