@@ -782,10 +782,12 @@ export class SqliteTrackStore implements TrackStore {
    * against the covering: a view over a harbour visited once read years of
    * the own track. Read by cell, each range is one seek over the vessel's
    * rows inside it, at any time: the cost is the rows the box holds, the cost
-   * by time the rows the window holds. So both are counted, each at most to
-   * `readProbeLimit` from an index alone, the window only up to the box's
-   * count, and the window is read by time only where it holds fewer: a short
-   * window over a box the vessel has long been in.
+   * by time the rows the window holds. So both are counted from an index
+   * alone, the window only up to the box's count, and the window is read by
+   * time only where it holds fewer: a short window over a box the vessel has
+   * long been in. Each count stops at `readProbeLimit`; where both reach it,
+   * both are counted once more to eight times that, so a day at one fix a
+   * second, 86,400 rows, is told from a box of months.
    */
   private *namedNearBounds(
     contexts: Context[],
@@ -803,11 +805,18 @@ export class SqliteTrackStore implements TrackStore {
     let byCell: StatementSync | undefined
     for (const context of contexts) {
       let boxRows = 0
-      for (let i = 0; i < clause.params.length && boxRows < this.readProbeLimit; i += 2) {
-        const left = this.readProbeLimit - boxRows
-        boxRows += (boxCount.get(context, clause.params[i]!, clause.params[i + 1]!, left) as { n: number }).n
+      let windowRows = 0
+      for (const limit of [this.readProbeLimit, 8 * this.readProbeLimit]) {
+        boxRows = 0
+        for (let i = 0; i < clause.params.length && boxRows < limit; i += 2) {
+          const left = limit - boxRows
+          boxRows += (boxCount.get(context, clause.params[i]!, clause.params[i + 1]!, left) as { n: number }).n
+        }
+        windowRows = boxRows > 0 ? (windowCount.get(context, ...timeParams, boxRows) as { n: number }).n : 0
+        if (boxRows < limit || windowRows < boxRows) {
+          break
+        }
       }
-      const windowRows = boxRows > 0 ? (windowCount.get(context, ...timeParams, boxRows) as { n: number }).n : 0
       if (windowRows < boxRows) {
         byTime ??= this.db.prepare(
           `SELECT context, timestamp, lat, lon FROM positions INDEXED BY idx_context_time_position WHERE context = ? AND (${clause.where})${inWindow}`,
