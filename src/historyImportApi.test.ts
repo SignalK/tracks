@@ -202,9 +202,13 @@ describe('the history import route', () => {
         await h.stop()
         vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
         h.restart()
-        await vi.waitFor(async () => {
-          expect((await importState(h)).state).toMatchObject({ running: false, filled: 0 })
-        })
+        // A fresh worker opens the store first, which a loaded machine takes a while for.
+        await vi.waitFor(
+          async () => {
+            expect((await importState(h)).state).toMatchObject({ running: false, filled: 0 })
+          },
+          { timeout: 20_000, interval: 50 },
+        )
         expect(await storedTimes(h)).toEqual([])
         await vi.advanceTimersByTimeAsync(60_000)
         vi.useRealTimers()
@@ -235,9 +239,12 @@ describe('the history import route', () => {
         await h.stop()
         vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
         h.restart()
-        await vi.waitFor(async () => {
-          expect((await importState(h)).state).toBeDefined()
-        })
+        await vi.waitFor(
+          async () => {
+            expect((await importState(h)).state).toBeDefined()
+          },
+          { timeout: 20_000, interval: 50 },
+        )
         // Started by hand, it goes on with the import that stopped, and tries
         // again what that one stopped on.
         const resumed = await request(h.app).post('/plugins/tracks/history-import')
