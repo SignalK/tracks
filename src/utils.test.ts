@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   clipToBounds,
+  createCrossesBounds,
   createInBounds,
+  createReachesBounds,
   resolveContext,
   toIsoTimes,
   validateParameters,
@@ -16,7 +18,7 @@ import {
   longitudeSpan,
   longitudeSpanOf,
 } from './utils.js'
-import type { LatLngTuple, TimedPosition } from './types.js'
+import type { LatLngTuple, TimedPosition, TrackParams } from './types.js'
 
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
 
@@ -92,7 +94,26 @@ describe('clipToBounds', () => {
       [[0, -179.5], false],
       [[0, -170], false],
     ])
-    expect(clipToBounds(track([0, 170], [0, -170]), { sw: [-1, 179], ne: [1, -179] })).toEqual([])
+    // Neither point is inside, but the line between them runs through the box.
+    expect(shape(clipToBounds(track([0, 170], [0, -170]), { sw: [-1, 179], ne: [1, -179] }))).toEqual([
+      [[0, 170], false],
+      [[0, -170], false],
+    ])
+    expect(clipToBounds(track([2, 170], [2, -170]), { sw: [-1, 179], ne: [1, -179] })).toEqual([])
+  })
+
+  it('keeps a line that crosses the box between two points outside it, as a stretch of its own', () => {
+    const points = track([60.2, 24.2], [62, 26], [59, 23], [59, 22])
+    expect(shape(clipToBounds(points, { sw: [...box.sw], ne: [...box.ne] }))).toEqual([
+      [[60.2, 24.2], false],
+      [[62, 26], false],
+      [[62, 26], true],
+      [[59, 23], false],
+    ])
+  })
+
+  it('leaves out a line that passes beside the box', () => {
+    expect(clipToBounds(track([59, 23], [59.5, 26], [62, 26]), { sw: [...box.sw], ne: [...box.ne] })).toEqual([])
   })
 
   it('returns a track that never leaves the box unchanged', () => {
@@ -395,7 +416,71 @@ describe('rfc8187', () => {
   })
 })
 
+describe('createCrossesBounds', () => {
+  const crosses = createCrossesBounds({ sw: [60, 24], ne: [61, 25] })
+
+  it('finds a line through the box, a corner or an edge of it', () => {
+    expect(crosses([59, 23], [62, 26])).toBe(true)
+    expect(crosses([59.9, 24.5], [60.1, 23.9])).toBe(true)
+    expect(crosses([59, 24], [60, 24])).toBe(true)
+    expect(crosses([59, 23], [59.5, 26])).toBe(false)
+    expect(crosses([59.9, 23.9], [59.9, 23.9])).toBe(false)
+  })
+
+  it('takes a line across the antimeridian the short way round', () => {
+    const nearGreenwich = createCrossesBounds({ sw: [-1, 0], ne: [1, 10] })
+    expect(nearGreenwich([0, 170], [0, -170])).toBe(false)
+    const nearFiji = createCrossesBounds({ sw: [-1, 179], ne: [1, -179] })
+    expect(nearFiji([0, 170], [0, -170])).toBe(true)
+    expect(nearFiji([0, -170], [0, 170])).toBe(true)
+    expect(createCrossesBounds({ sw: [-1, 175], ne: [1, 178] })([0, -170], [0, 170])).toBe(true)
+  })
+})
+
+describe('createReachesBounds', () => {
+  const reaches = createReachesBounds({ sw: [60, 24], ne: [61, 25] })
+  const at = (position: LatLngTuple, breakBefore?: true): TimedPosition => ({
+    position,
+    timestamp: 0,
+    ...(breakBefore ? { breakBefore } : {}),
+  })
+
+  it('finds a point inside or a line through, but not a line a break leaves undrawn', () => {
+    expect(reaches([at([59, 23]), at([60.5, 24.5])])).toBe(true)
+    expect(reaches([at([59, 23]), at([62, 26])])).toBe(true)
+    expect(reaches([at([59, 23]), at([62, 26], true)])).toBe(false)
+    expect(reaches([at([59, 23]), at([59.5, 26])])).toBe(false)
+  })
+})
+
 describe('createMatcher', () => {
+  it('matches a track that crosses the box between two points outside it', () => {
+    const params = { bbox: { sw: [60, 24], ne: [61, 25] }, radius: null, intersects: true } as TrackParams
+    const matches = createMatcher(params, undefined)
+    expect(
+      matches([
+        [59, 23],
+        [62, 26],
+      ]),
+    ).toBe(true)
+    expect(
+      matches([
+        [59, 23],
+        [59.5, 26],
+      ]),
+    ).toBe(false)
+    // The last position, as v1 asks, is still a point.
+    expect(
+      createMatcher(
+        { ...params, intersects: false },
+        undefined,
+      )([
+        [59, 23],
+        [62, 26],
+      ]),
+    ).toBe(false)
+  })
+
   // The query is well-formed; the server just has no position to measure from.
   // Distinct from a malformed radius, and reported differently.
   it('signals an outage when a radius query has no self position', () => {

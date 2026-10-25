@@ -35,6 +35,71 @@ export function createInBounds(bounds: GeoBounds): (position: LatLngTuple | null
   }
 }
 
+/** Whether the line from (x0, y0) to (x1, y1) meets the box, its edges included (Liang-Barsky). */
+function lineMeetsBox(x0: number, y0: number, x1: number, y1: number, box: [number, number, number, number]): boolean {
+  const [minX, maxX, minY, maxY] = box
+  const dx = x1 - x0
+  const dy = y1 - y0
+  let enter = 0
+  let leave = 1
+  for (const [p, q] of [
+    [-dx, x0 - minX],
+    [dx, maxX - x0],
+    [-dy, y0 - minY],
+    [dy, maxY - y0],
+  ] as const) {
+    if (p === 0) {
+      if (q < 0) {
+        return false
+      }
+    } else if (p < 0) {
+      enter = Math.max(enter, q / p)
+    } else {
+      leave = Math.min(leave, q / p)
+    }
+    if (enter > leave) {
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * Whether the line between two positions passes through `bounds`, ends
+ * included. The line runs the short way round, as a track across the
+ * antimeridian is drawn, and straight in latitude and longitude.
+ */
+export function createCrossesBounds(bounds: GeoBounds): (a: LatLngTuple, b: LatLngTuple) => boolean {
+  const minLat = bounds.sw[LAT]
+  const maxLat = bounds.ne[LAT]
+  const minLng = bounds.sw[LNG]
+  const maxLng = (bounds.sw[LNG] > bounds.ne[LNG] ? 360 : 0) + bounds.ne[LNG]
+  return (a, b) => {
+    const span = b[LNG] - a[LNG]
+    const end = span > 180 ? b[LNG] - 360 : span < -180 ? b[LNG] + 360 : b[LNG]
+    // Taken the short way, the line can run past ±180, and a box crossing
+    // the antimeridian runs up to 540: a turn either way covers both.
+    return [-360, 0, 360].some((turn) =>
+      lineMeetsBox(a[LNG] + turn, a[LAT], end + turn, b[LAT], [minLng, maxLng, minLat, maxLat]),
+    )
+  }
+}
+
+/**
+ * Whether a track reaches into `bounds`: a point inside, or the line between
+ * two that crosses it. A point marked `breakBefore` starts a new line, so the
+ * gap before it is not one.
+ */
+export function createReachesBounds(bounds: GeoBounds): (track: TimedPosition[]) => boolean {
+  const inBounds = createInBounds(bounds)
+  const crosses = createCrossesBounds(bounds)
+  return (track) =>
+    track.some(
+      ({ position, breakBefore }, i) =>
+        inBounds(position) || (i > 0 && !breakBefore && crosses(track[i - 1]!.position, position)),
+    )
+}
+
 /**
  * Cut a track down to the parts inside `bounds`.
  *
@@ -43,12 +108,17 @@ export function createInBounds(bounds: GeoBounds): (position: LatLngTuple | null
  * each stretch after the first starts with `breakBefore`, so a track that
  * leaves the box and comes back is not joined by a line across the outside.
  * An outside point between two stretches is both one's exit and the next
- * one's entry, and appears in each.
+ * one's entry, and appears in each. A line that crosses the box between two
+ * points outside it is a stretch of its own, those two points: a sparse
+ * track, an import with fixes kilometres apart say, would otherwise vanish
+ * from a view it runs straight through.
  *
- * Bounds crossing the antimeridian are handled by `createInBounds`.
+ * Bounds crossing the antimeridian are handled by `createInBounds` and
+ * `createCrossesBounds`.
  */
 export function clipToBounds(points: TimedPosition[], bounds: GeoBounds): TimedPosition[] {
   const inBounds = createInBounds(bounds)
+  const crosses = createCrossesBounds(bounds)
   const result: TimedPosition[] = []
   let inside = false
   for (const [i, point] of points.entries()) {
@@ -67,6 +137,11 @@ export function clipToBounds(points: TimedPosition[], bounds: GeoBounds): TimedP
     } else if (inside) {
       result.push(point)
       inside = false
+    } else {
+      const previous = points[i - 1]
+      if (previous && crosses(previous.position, point.position)) {
+        result.push(result.length > 0 ? { ...previous, breakBefore: true } : previous, point)
+      }
     }
   }
   return result
@@ -243,8 +318,10 @@ export function createMatcher(
 ): (track: LatLngTuple[]) => boolean {
   if (params.bbox) {
     const inBounds = createInBounds(params.bbox)
+    const crosses = createCrossesBounds(params.bbox)
     return params.intersects
-      ? (track: LatLngTuple[]) => track.some(inBounds)
+      ? (track: LatLngTuple[]) =>
+          track.some((position, i) => inBounds(position) || (i > 0 && crosses(track[i - 1]!, position)))
       : (track: LatLngTuple[]) => inBounds(lastPoint(track))
   } else if (params.radius !== null) {
     if (!selfPosition) {
