@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import type { StatementSync } from 'node:sqlite'
 import { s2, geojson } from 's2js'
+import { outsideSpans } from './recycleBin.js'
 import { thin, Thinner } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
@@ -11,6 +12,7 @@ import type {
   Context,
   Debug,
   GeoBounds,
+  HistoryImportState,
   ImportedPoint,
   ImportedTrack,
   StoredImport,
@@ -379,6 +381,18 @@ export class SqliteTrackStore implements TrackStore {
         context     TEXT    NOT NULL,
         span_start  INTEGER NOT NULL,
         span_end    INTEGER NOT NULL
+      );
+      -- How far the import of a vessel's track from a history provider got,
+      -- so a restart goes on from there; see historyImport.ts.
+      CREATE TABLE IF NOT EXISTS history_imports (
+        context     TEXT PRIMARY KEY,
+        started_at  INTEGER NOT NULL,
+        first_day   INTEGER,
+        next_day    INTEGER,
+        filled      INTEGER NOT NULL,
+        in_gap      INTEGER,
+        finished_at INTEGER,
+        error       TEXT
       );
     `)
     // The position rides along with the vessel and time, so a read of a track
@@ -1180,6 +1194,20 @@ export class SqliteTrackStore implements TrackStore {
       if (first === undefined || last === undefined) continue
       const { id } = this.binRecorded(context, first.timestamp, last.timestamp, deletedAt, keepEmpty)
       if (id !== undefined) binned.push(id)
+    }
+    this.fill(context, segments)
+    return binned
+  }
+
+  /**
+   * Write positions into a vessel's recording as they come, past the
+   * throttle, and keep them as imported rather than thin them as detail.
+   */
+  private fill(context: Context, segments: TimedPosition[][]): void {
+    for (const points of segments) {
+      const first = points[0]
+      const last = points.at(-1)
+      if (first === undefined || last === undefined) continue
       this.excludeFromDetail(context, first.timestamp, last.timestamp)
     }
     // The next live fix would otherwise open a detail span from the last one
@@ -1190,7 +1218,68 @@ export class SqliteTrackStore implements TrackStore {
         this.store(context, position, timestamp)
       }
     }
-    return binned
+  }
+
+  /** How far the import of a vessel's track from a history provider got, or undefined before one started. */
+  historyImport(context: Context): HistoryImportState | undefined {
+    const row = this.db.prepare('SELECT * FROM history_imports WHERE context = ?').get(context) as
+      | {
+          started_at: number
+          first_day: number | null
+          next_day: number | null
+          filled: number
+          in_gap: number | null
+          finished_at: number | null
+          error: string | null
+        }
+      | undefined
+    if (!row) {
+      return undefined
+    }
+    return {
+      context,
+      startedAt: row.started_at,
+      ...(row.first_day === null ? {} : { firstDay: row.first_day }),
+      ...(row.next_day === null ? {} : { nextDay: row.next_day }),
+      filled: row.filled,
+      ...(row.in_gap === 1 ? { inGap: true } : {}),
+      ...(row.finished_at === null ? {} : { finishedAt: row.finished_at }),
+      ...(row.error === null ? {} : { error: row.error }),
+    }
+  }
+
+  /**
+   * Write the runs a day of history filled into the recording, together with
+   * the state of the import they bring it to, so a restart never finds the
+   * one without the other. Nothing is binned: an import from history only
+   * fills where the recording has nothing. What lies in a span deleted from
+   * the recording is left out here too, in the same transaction, so a delete
+   * that lands while the day is on its way still holds.
+   */
+  saveHistoryImport(state: HistoryImportState, runs: TimedPosition[][]): void {
+    const deleted = this.deletedSpans().filter(({ context }) => context === state.context)
+    this.fill(
+      state.context,
+      runs.map((run) => outsideSpans(run, deleted)),
+    )
+    this.db
+      .prepare(
+        `INSERT INTO history_imports (context, started_at, first_day, next_day, filled, in_gap, finished_at, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(context) DO UPDATE SET started_at = excluded.started_at, first_day = excluded.first_day,
+           next_day = excluded.next_day, filled = excluded.filled, in_gap = excluded.in_gap,
+           finished_at = excluded.finished_at, error = excluded.error`,
+      )
+      .run(
+        state.context,
+        state.startedAt,
+        state.firstDay ?? null,
+        state.nextDay ?? null,
+        state.filled,
+        state.inGap ? 1 : null,
+        state.finishedAt ?? null,
+        state.error ?? null,
+      )
   }
 
   /**

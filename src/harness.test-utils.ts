@@ -5,6 +5,7 @@ import express from 'express'
 import type { Express } from 'express'
 import ThePlugin from './index.js'
 import type { ContextPosition } from './index.js'
+import type { TrackStore } from './store.js'
 import type { TrackApi } from './trackApi.js'
 import type { Debug, LatLngTuple, Position } from './types.js'
 
@@ -67,6 +68,8 @@ export interface TestHarness {
   trackProvider: () => TrackApi | undefined
   /** How many times the plugin registered a provider. */
   registrations: () => number
+  /** The plugin's store, read directly: its routes reconcile with history, which a test may need to see past. */
+  store: () => TrackStore | undefined
 }
 
 export interface HarnessOptions {
@@ -126,6 +129,8 @@ export interface HarnessOptions {
      * only the earliest of `rows` in each bucket of the asked resolution.
      */
     aggregatesFirst?: boolean
+    /** With `aggregatesFirst`, stamp each bucket at its end rather than at the earliest row in it. */
+    stampsAtEnd?: boolean
     /** Answer each `getValues` this long after it is asked, as a provider scanning years does. */
     valuesDelayMs?: number
     /** Called with every `getValues` query, so a test can see what was asked. */
@@ -163,17 +168,24 @@ export interface HistoryValuesQuery {
   resolution?: number
 }
 
-/** History rows as `[time, …]`, keeping the earliest row in each bucket. */
-function firstPerBucket(rows: unknown[], bucketMs: number): unknown[] {
+/** History rows as `[time, …]`, keeping the earliest row in each bucket, stamped at the bucket's end if asked. */
+function firstPerBucket(rows: unknown[], bucketMs: number, stampAtEnd = false): unknown[] {
   const seen = new Set<number>()
-  return rows.filter((row) => {
-    const bucket = Math.floor(Date.parse(String((row as unknown[])[0])) / bucketMs)
-    if (seen.has(bucket)) {
-      return false
-    }
-    seen.add(bucket)
-    return true
-  })
+  return rows
+    .filter((row) => {
+      const bucket = Math.floor(Date.parse(String((row as unknown[])[0])) / bucketMs)
+      if (seen.has(bucket)) {
+        return false
+      }
+      seen.add(bucket)
+      return true
+    })
+    .map((row) => {
+      if (!stampAtEnd) return row
+      const [time, ...rest] = row as unknown[]
+      const end = (Math.floor(Date.parse(String(time)) / bucketMs) + 1) * bucketMs
+      return [new Date(end).toISOString(), ...rest]
+    })
 }
 
 export function createHarness(options: HarnessOptions = {}): TestHarness {
@@ -224,7 +236,11 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
                             values: [],
                             data:
                               options.history?.aggregatesFirst === true
-                                ? firstPerBucket(options.history.rows ?? [], (query.resolution ?? 1) * 1000)
+                                ? firstPerBucket(
+                                    options.history.rows ?? [],
+                                    (query.resolution ?? 1) * 1000,
+                                    options.history.stampsAtEnd === true,
+                                  )
                                 : (options.history?.rows ?? []),
                           })
                     },
@@ -334,5 +350,6 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     statuses,
     trackProvider: () => trackProvider,
     registrations: () => registrations,
+    store: () => plugin.getTracks(),
   }
 }

@@ -39,6 +39,15 @@
         </form>
         <p id="import-status" role="status" hidden></p>
       </section>
+      <section id="history" aria-labelledby="history-title" hidden>
+        <h2 id="history-title">Import from history</h2>
+        <p>
+          A history provider holds your vessel's track. Importing it fills the time this plugin did not record, at the
+          finest resolution the provider keeps. What was recorded stays as it is, and deleted parts stay deleted.
+        </p>
+        <p id="history-status" role="status"></p>
+        <button type="button" id="history-start" hidden></button>
+      </section>
       <section id="bin" aria-labelledby="bin-title">
         <h2 id="bin-title">Recycle bin</h2>
         <p id="bin-status" role="status">Loading…</p>
@@ -83,5 +92,6 @@
     <script type="module" src="./tracks.js"></script>
     <script type="module" src="./bin.js"></script>
     <script type="module" src="./import.js"></script>
+    <script type="module" src="./history.js"></script>
   </body>
 </html>

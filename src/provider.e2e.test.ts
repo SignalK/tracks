@@ -64,7 +64,8 @@ beforeAll(async () => {
   server = await startServer({
     // A different port from plugin.e2e.test.ts so the two files never collide.
     port: 4790,
-    config: { source: 'history', resolution: 1000, pointsToKeep: 500 },
+    // Moored pauses the own vessel's recording, which the history import fills.
+    config: { source: 'history', resolution: 1000, pointsToKeep: 500, pauseWhenState: ['moored'] },
     // Named rather than left to registration order: any other history
     // provider in the server checkout would otherwise become the default and
     // answer these queries with nothing.
@@ -79,6 +80,9 @@ beforeAll(async () => {
         managedContainer: false,
         recordSelf: true,
         recordOthers: false,
+        // Every fix, not one each two seconds of wall clock: the history
+        // import test feeds a fix a second and counts what comes back.
+        defaultSamplingRate: 0,
       },
     },
     timeoutSeconds: 120,
@@ -176,4 +180,49 @@ describe('bootstrap through a real history provider', () => {
     const track = (await server.api(`${SELF_PATH}?from=1990-01-01T00:00:00Z&to=1990-01-02T00:00:00Z`)) as TrackResponse
     expect(track.coordinates).toEqual([])
   })
+})
+
+describe('the history import through a real history provider', () => {
+  interface ImportState {
+    startedAt: string
+    firstDay?: string
+    filled: number
+    finishedAt?: string
+    error?: string
+  }
+
+  it('fills what the recording paused for from what the provider recorded', async () => {
+    if (!available || !server) return
+    // Moored, the plugin records nothing of the own vessel, and the provider
+    // records on. An hour back, away from the fixes the tests above fed.
+    const t0 = Date.now() - 60 * MINUTE
+    await server.feedState(server.selfContext, 'moored')
+    for (let i = 0; i < 20; i++) {
+      await server.feed(server.selfContext, [60.1 + i * 1e-5, 24.9], t0 + i * 1000)
+    }
+    await server.feedState(server.selfContext, 'sailing')
+
+    // Asked again until the provider has made the fixes readable: what an
+    // import fills is the recording afterwards, so each run adds only what
+    // the runs before it could not see.
+    let filled = 0
+    let last: ImportState | undefined
+    const done = await eventually(async () => {
+      const started = await server!.plugin('/history-import', { method: 'POST' })
+      expect(started.status).toBe(202)
+      const { startedAt } = (started.body as { state: ImportState }).state
+      last = await eventually(async () => {
+        const { body } = await server!.plugin('/history-import')
+        const state = (body as { state?: ImportState }).state
+        return state?.startedAt === startedAt && state.finishedAt !== undefined ? state : undefined
+      }, 60_000)
+      filled += last?.filled ?? 0
+      return filled >= 20 ? last : undefined
+    }, 120_000)
+
+    expect(done, JSON.stringify(last)).toBeDefined()
+    expect(done!.error).toBeUndefined()
+    expect(Date.parse(done!.firstDay!)).toBeLessThanOrEqual(t0)
+    expect(filled).toBe(20)
+  }, 300_000)
 })

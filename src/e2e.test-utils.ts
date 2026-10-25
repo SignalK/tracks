@@ -39,6 +39,8 @@ export interface E2EServer {
   configDir: string
   /** Send a position delta as a provider would, over the WebSocket API. */
   feed: (context: string, position: [number, number], timestamp?: number, source?: string) => Promise<void>
+  /** Send a vessel's navigation.state, as signalk-autostate would. */
+  feedState: (context: string, state: string) => Promise<void>
   /** GET a path under /signalk/v1/api and parse the JSON. */
   api: (path: string) => Promise<unknown>
   /**
@@ -226,7 +228,15 @@ export async function startServer(options: E2EOptions = {}): Promise<E2EServer> 
           url,
           configDir,
           selfContext: typeof self === 'string' ? self : `vessels.${String(self)}`,
-          feed: (context, position, timestamp, source) => feedDelta(url, context, position, timestamp, source),
+          feed: (context, position, timestamp, source) =>
+            feedDelta(
+              url,
+              context,
+              { path: 'navigation.position', value: { latitude: position[0], longitude: position[1] } },
+              timestamp,
+              source,
+            ),
+          feedState: (context, state) => feedDelta(url, context, { path: 'navigation.state', value: state }),
           // Both bounded: a route that accepts the connection and then never
           // finishes would otherwise hang the suite on the request rather than
           // failing it, and vitest's own timeout is the wrong place to notice.
@@ -268,7 +278,7 @@ async function request(url: string, init?: RequestOptions): Promise<{ status: nu
 }
 
 /**
- * Push a position delta over the WebSocket API.
+ * Push a delta over the WebSocket API.
  *
  * Via the real delta path rather than by calling the plugin: that is what makes
  * this an end-to-end test rather than a slower unit test.
@@ -276,7 +286,7 @@ async function request(url: string, init?: RequestOptions): Promise<{ status: nu
 async function feedDelta(
   url: string,
   context: string,
-  position: [number, number],
+  value: { path: string; value: unknown },
   timestamp?: number,
   source = 'e2e.gps',
 ): Promise<void> {
@@ -292,7 +302,7 @@ async function feedDelta(
         {
           $source: source,
           timestamp: new Date(timestamp ?? Date.now()).toISOString(),
-          values: [{ path: 'navigation.position', value: { latitude: position[0], longitude: position[1] } }],
+          values: [value],
         },
       ],
     }),

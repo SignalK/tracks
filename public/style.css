@@ -70,14 +70,16 @@ h2 {
 }
 
 #bin-status,
-#import-status {
+#import-status,
+#history-status {
   color: GrayText;
   margin: 0 0 1rem;
 }
 
 .error,
 #bin-status[data-state='error'],
-#import-status[data-state='error'] {
+#import-status[data-state='error'],
+#history-status[data-state='error'] {
   color: crimson;
 }
 

@@ -5,6 +5,7 @@ import type { SqliteTrackStore, SqliteStoreConfig } from './sqliteStore.js'
 import type {
   Debug,
   Context,
+  HistoryImportState,
   ImportedTrack,
   ImportFilter,
   LatLngTuple,
@@ -369,6 +370,12 @@ export class AsyncTrackStore implements TrackStore {
   }
   deletedSpans() {
     return this.enqueue('deletedSpans', [])
+  }
+  historyImport(context: Context) {
+    return this.enqueue('historyImport', [context])
+  }
+  saveHistoryImport(state: HistoryImportState, runs: TimedPosition[][]): Promise<void> {
+    return this.enqueue('saveHistoryImport', [state, runs], 'acknowledged')
   }
   getImport(id: string) {
     return this.enqueue('getImport', [id])

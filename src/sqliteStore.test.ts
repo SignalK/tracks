@@ -700,6 +700,25 @@ describe('detail at anchor', () => {
     }
   })
 
+  it('leaves what a history import fills over a stay at anchor unthinned', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE }, debug)
+    try {
+      const now = Date.now()
+      const from = now - 30 * DAY
+      anchored(store, from)
+      const filled = Array.from({ length: 120 }, (_, i) => ({
+        position: [61, 25 + i * 1e-6] as [number, number],
+        timestamp: from + 4 * MINUTE + i * 1000,
+      }))
+      store.saveHistoryImport({ context: self, startedAt: now, filled: 120 }, [filled])
+      store.prune(Infinity, self, now)
+      const points = await store.getTimed(self)
+      expect(points.filter(({ position }) => position[0] === 61)).toHaveLength(120)
+    } finally {
+      store.close()
+    }
+  })
+
   it('thins detail recorded before a restart', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-detail-'))
     const file = join(dir, 'tracks.db')
@@ -1421,5 +1440,61 @@ describe('imported tracks', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('history import', () => {
+  it('keeps how far an import got, and what it filled, across a reopen', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-history-import-'))
+    const file = join(dir, 'tracks.db')
+    try {
+      const first = new SqliteTrackStore({ file }, debug)
+      expect(first.historyImport(ctx)).toBeUndefined()
+      const state = { context: ctx, startedAt: 5000, firstDay: 0, nextDay: 4000, filled: 2, inGap: true }
+      first.saveHistoryImport(state, [
+        [
+          { position: [60, 24], timestamp: 1000 },
+          { position: [60, 24.001], timestamp: 2000 },
+        ],
+      ])
+      first.close()
+      const second = new SqliteTrackStore({ file }, debug)
+      expect(second.historyImport(ctx)).toEqual(state)
+      expect((await second.getTimed(ctx)).map(({ timestamp }) => timestamp)).toEqual([1000, 2000])
+      const failed = { ...state, error: 'provider unavailable' }
+      second.saveHistoryImport(failed, [])
+      expect(second.historyImport(ctx)).toEqual(failed)
+      const finished = { context: ctx, startedAt: 5000, firstDay: 0, nextDay: 5000, filled: 2, finishedAt: 6000 }
+      second.saveHistoryImport(finished, [])
+      expect(second.historyImport(ctx)).toEqual(finished)
+      expect(second.historyImport(other)).toBeUndefined()
+      second.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('bins nothing where it fills', async () => {
+    const store = newStore()
+    store.newPosition(ctx, [59, 23], 1500)
+    store.saveHistoryImport({ context: ctx, startedAt: 5000, filled: 2 }, [
+      [
+        { position: [60, 24], timestamp: 1000 },
+        { position: [60, 24.001], timestamp: 2000 },
+      ],
+    ])
+    expect((await store.getTimed(ctx)).map(({ timestamp }) => timestamp)).toEqual([1000, 1500, 2000])
+    expect(store.binEntries()).toEqual([])
+    store.close()
+  })
+
+  it('leaves out what lies in a span deleted from the recording', async () => {
+    const store = newStore()
+    store.binRecorded(ctx, 1500, 2500, 9000, true)
+    store.saveHistoryImport({ context: ctx, startedAt: 5000, filled: 3 }, [
+      [1000, 2000, 3000].map((timestamp) => ({ position: [60, 24] as LatLngTuple, timestamp })),
+    ])
+    expect((await store.getTimed(ctx)).map(({ timestamp }) => timestamp)).toEqual([1000, 3000])
+    store.close()
   })
 })

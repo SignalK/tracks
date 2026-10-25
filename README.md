@@ -110,6 +110,24 @@ always kept beside the recording this way, since that API has no such choice yet
 needs write access on a Signal K server that lets a plugin say so, and administrator rights on
 an older one.
 
+### Importing from a history provider
+
+With a history provider installed, the Tracks webapp offers **Import from history**. It copies
+the own vessel's track from the provider into this plugin's recording, a day at a time from the
+first day the provider holds to the moment it was started, at the finest resolution the
+provider keeps, one position a second at most. Like a GPX import it fills only stretches of at
+least five minutes where the recording has nothing, so what the plugin recorded itself stays as
+it is, and a deleted span stays deleted.
+
+The import runs on the server. How far it got shows in the webapp and in the plugin's status,
+and a stop or a restart breaks it off only until a minute after the plugin starts again, when
+it goes on with the next day. Started again once it has finished, it fills only what is still
+missing. A day under way at a second a position is up to 86,400 rows in the plugin's file.
+
+It needs administrator rights. `GET /plugins/tracks/history-import` says whether a provider is
+installed (`provider`) and how far the import got (`state`), and `POST` starts it, or resumes
+one that stopped.
+
 The webapp lists every imported track, however old and whether or not it has times, next to
 the last 30 days of recorded ones, so a passage imported from years ago can be found there. It
 can be deleted there on a Signal K server that deletes tracks by id.

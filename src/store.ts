@@ -2,6 +2,7 @@ import type {
   BinEntry,
   Context,
   Debug,
+  HistoryImportState,
   ImportedTrack,
   StoredImport,
   ImportFilter,
@@ -189,6 +190,14 @@ export interface TrackStore {
   binEntries?(): BinEntry[] | Promise<BinEntry[]>
   /** Every deleted span of a recorded track, purged or not: what history must not show. */
   deletedSpans?(): RecordedSpan[] | Promise<RecordedSpan[]>
+
+  /**
+   * The import of a vessel's track from a history provider: how far it got,
+   * and the write of each day it fills with the state that day brings it to,
+   * resolving once committed. Optional like the import methods.
+   */
+  historyImport?(context: Context): HistoryImportState | undefined | Promise<HistoryImportState | undefined>
+  saveHistoryImport?(state: HistoryImportState, runs: TimedPosition[][]): void | Promise<void>
 
   /**
    * Release any resources held by the store.
