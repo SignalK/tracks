@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { simplify, simplifyToBudget } from './simplify.js'
+import { significance, simplify, simplifyToBudget } from './simplify.js'
 import type { TimedPosition } from './types.js'
 
 const at = (lat: number, lng: number, t = 0): TimedPosition => ({ position: [lat, lng], timestamp: t })
@@ -223,5 +223,47 @@ describe('simplifyToBudget', () => {
       expect(n).toBeLessThanOrEqual(previous)
       previous = n
     }
+  })
+})
+
+describe('significance', () => {
+  // Deterministic, so a failing track can be rebuilt from its seed.
+  const random = (seed: number) => () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    return seed / 2147483648
+  }
+  const r = random(7)
+  const tracks: [string, TimedPosition[]][] = [
+    ['a zigzag', Array.from({ length: 400 }, (_, i) => at(60 + (i % 2 ? 30 * M : 0), 24 + i * 0.0002, i))],
+    ['a random walk', Array.from({ length: 1000 }, (_, i) => at(60 + r() * 0.002, 24 + i * 0.0001 + r() * 0.0005, i))],
+    [
+      'a swing at anchor with GPS noise',
+      Array.from({ length: 2000 }, (_, i) =>
+        at(-17.7 + Math.sin(i / 300) * 40 * M + r() * 2 * M, 177.2 + Math.cos(i / 300) * 40 * M + r() * 2 * M, i),
+      ),
+    ],
+    ['a straight line', Array.from({ length: 50 }, (_, i) => at(60, 24 + i * 0.001, i))],
+    ['one position repeated', Array.from({ length: 20 }, (_, i) => at(60, 24, i))],
+    ['a passage over 30 degrees', Array.from({ length: 3001 }, (_, i) => at(r() * 0.01, i * 0.01, i))],
+    [
+      'a crossing of the antimeridian',
+      Array.from({ length: 200 }, (_, i) => at(r() * 0.01, ((179 + i * 0.01 + 180) % 360) - 180, i)),
+    ],
+    ['two positions', [at(60, 24), at(61, 25, 1)]],
+    ['one position', [at(60, 24)]],
+    ['no positions', []],
+  ]
+
+  it.each(tracks)('keeps at each tolerance exactly what simplify() keeps, for %s', (_, track) => {
+    const values = significance(track)
+    for (const epsilon of [0.5, 2, 10, 50, 300, 5000, 2_000_000]) {
+      expect(track.filter((_, i) => values[i]! > epsilon)).toEqual(simplify(track, epsilon))
+    }
+  })
+
+  it('gives the endpoints Infinity', () => {
+    const values = significance(tracks[0]![1])
+    expect(values[0]).toBe(Infinity)
+    expect(values[values.length - 1]).toBe(Infinity)
   })
 })
