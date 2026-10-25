@@ -212,7 +212,10 @@ const KEEP_LEVEL = 31
  * most of positions for reads that save little.
  */
 const MIN_READ_LEVEL = 4
-/** The levels from `lowest` up. */
+/**
+ * The levels from `lowest` up, for a query to name one by one: each is then a
+ * seek on (context, level, timestamp), where a range of levels would walk them.
+ */
 const levelsUp = (lowest: number): number[] => Array.from({ length: KEEP_LEVEL - lowest + 1 }, (_, i) => lowest + i)
 const SIGNIFICANT_LEVELS = levelsUp(MIN_READ_LEVEL).join(', ')
 /**
@@ -221,8 +224,19 @@ const SIGNIFICANT_LEVELS = levelsUp(MIN_READ_LEVEL).join(', ')
  * per second.
  */
 const LEVEL_DAY_MS = 24 * 60 * 60 * 1000
-/** The default for SqliteStoreConfig.refineBudget. */
+/**
+ * The default for SqliteStoreConfig.refineBudget: tens of milliseconds of a
+ * Pi between two reads, which keeps up with a fix a second and is short
+ * enough that a read waiting behind it goes unnoticed.
+ */
 const DEFAULT_REFINE_BUDGET = 6000
+/**
+ * What refining one day costs beyond its positions, counted against the
+ * budget as positions: the statements each day runs. A receiver records
+ * thousands of AIS vessels with a fix or two a day, and without this one call
+ * would take on thousands of days, with every read waiting behind it.
+ */
+const REFINE_DAY_COST = 50
 /**
  * The most positions refined as one piece. Longer stretches, a day at one
  * fix a second say, are cut here, where the time moves on, so a call never
@@ -375,6 +389,10 @@ export class SqliteTrackStore implements TrackStore {
    * one of the pass past its context's frontier.
    */
   private refinePartial: { context: Context; day: number; next: number; stale: boolean } | undefined
+  /** See refining(). */
+  private refineStatements:
+    | Record<'select' | 'copy' | 'visit' | 'unstale' | 'frontier' | 'deleteSignificant' | 'deleteVisits', StatementSync>
+    | undefined
 
   constructor(config: SqliteStoreConfig, debug: Debug) {
     this.maxCells = config.maxCells ?? DEFAULT_MAX_CELLS
@@ -529,6 +547,9 @@ export class SqliteTrackStore implements TrackStore {
         hour        INTEGER NOT NULL,
         PRIMARY KEY (context, lat_cell, lon_cell, hour)
       ) WITHOUT ROWID;
+      -- A refined day's visits are cleared by hour, which the key, led by the
+      -- cells a box read asks for, cannot seek.
+      CREATE INDEX IF NOT EXISTS idx_level_visits_hour ON level_visits(context, hour);
       -- Per context, the last day refineLevels() has refined, and the refined
       -- days a change has since sent back to it.
       CREATE TABLE IF NOT EXISTS level_frontier (
@@ -1512,6 +1533,8 @@ export class SqliteTrackStore implements TrackStore {
    * refining.
    */
   private refineDay(context: Context, day: number, from: number, budget: number, stale: boolean): number {
+    budget -= REFINE_DAY_COST
+    const statements = this.refining()
     const dayStart = day * LEVEL_DAY_MS
     const dayEnd = dayStart + LEVEL_DAY_MS
     if (from === Number.NEGATIVE_INFINITY) {
@@ -1526,11 +1549,11 @@ export class SqliteTrackStore implements TrackStore {
           : (through + 1) * LEVEL_DAY_MS
       this.deleteSignificant(context, clearFrom, dayEnd)
     }
-    const select = this.db.prepare(
-      'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?',
-    )
     const read = (limit: number) =>
-      select.all(context, Math.max(from, dayStart), dayEnd, limit) as unknown as (Omit<PositionRow, 'context'> & {
+      statements.select.all(context, Math.max(from, dayStart), dayEnd, limit) as unknown as (Omit<
+        PositionRow,
+        'context'
+      > & {
         id: number
       })[]
     const limit = budget + LEVEL_PIECE_MAX
@@ -1546,13 +1569,6 @@ export class SqliteTrackStore implements TrackStore {
         cuts = this.piecesOf(rows)
       }
     }
-    const copy = this.db.prepare(
-      `INSERT INTO significant (position, context, timestamp, lat, lon, level)
-       SELECT rowid, context, timestamp, lat, lon, ? FROM positions WHERE rowid = ?`,
-    )
-    const visit = this.db.prepare(
-      'INSERT OR IGNORE INTO level_visits (context, lat_cell, lon_cell, hour) VALUES (?, ?, ?, ?)',
-    )
     const visits = new Set<string>()
     let stopped = false
     for (let p = 1; p < cuts.length; p++) {
@@ -1561,7 +1577,7 @@ export class SqliteTrackStore implements TrackStore {
       for (const [i, row] of piece.entries()) {
         const level = levelOf(values[i]!)
         if (level >= MIN_READ_LEVEL) {
-          copy.run(level, row.id)
+          statements.copy.run(level, row.id)
         }
         visits.add(`${visitCell(row.lat)} ${visitCell(row.lon)} ${Math.floor(row.timestamp / VISIT_HOUR_MS)}`)
       }
@@ -1574,22 +1590,43 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     for (const key of visits) {
-      visit.run(context, ...key.split(' ').map(Number))
+      statements.visit.run(context, ...key.split(' ').map(Number))
     }
     if (stopped) {
       return budget
     }
     if (stale) {
-      this.db.prepare('DELETE FROM level_stale WHERE context = ? AND day = ?').run(context, day)
+      statements.unstale.run(context, day)
     } else {
-      this.db
-        .prepare(
-          'INSERT INTO level_frontier (context, through) VALUES (?, ?) ON CONFLICT(context) DO UPDATE SET through = excluded.through',
-        )
-        .run(context, day)
+      statements.frontier.run(context, day)
       this.levelFrontier.set(context, day)
     }
     return budget
+  }
+
+  /** refineDay()'s statements, prepared once: it runs for every day of every vessel. */
+  private refining() {
+    return (this.refineStatements ??= {
+      select: this.db.prepare(
+        'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?',
+      ),
+      copy: this.db.prepare(
+        `INSERT INTO significant (position, context, timestamp, lat, lon, level)
+         SELECT rowid, context, timestamp, lat, lon, ? FROM positions WHERE rowid = ?`,
+      ),
+      visit: this.db.prepare(
+        'INSERT OR IGNORE INTO level_visits (context, lat_cell, lon_cell, hour) VALUES (?, ?, ?, ?)',
+      ),
+      unstale: this.db.prepare('DELETE FROM level_stale WHERE context = ? AND day = ?'),
+      frontier: this.db.prepare(
+        'INSERT INTO level_frontier (context, through) VALUES (?, ?) ON CONFLICT(context) DO UPDATE SET through = excluded.through',
+      ),
+      // Every level named, so each is a seek on the time index, not a walk over the context's rows.
+      deleteSignificant: this.db.prepare(
+        `DELETE FROM significant WHERE context = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
+      ),
+      deleteVisits: this.db.prepare('DELETE FROM level_visits WHERE context = ? AND hour >= ? AND hour < ?'),
+    })
   }
 
   /**
@@ -1618,6 +1655,12 @@ export class SqliteTrackStore implements TrackStore {
    * measured against positions that have since gone or come: a read could
    * otherwise draw a position that is gone, or leave out one the change made
    * significant.
+   *
+   * Called by every write that changes the positions of a day: a fix dated
+   * into a refined day, `initialTrack` (through `clearLevels`), `recordTrack`,
+   * `binRecorded`, `restoreFromBin`, both retentions and detail thinning. A
+   * stay still going on, thinned at the spacing of the last prune, sends back
+   * only what aged since then, so its days are not refined again every hour.
    */
   private invalidateLevels(context: Context, from: number, to: number): void {
     const through = this.levelFrontier.get(context)
@@ -1665,15 +1708,9 @@ export class SqliteTrackStore implements TrackStore {
 
   /** Take a context's significant positions, and its visits, from `from` until `to` out. */
   private deleteSignificant(context: Context, from: number, to: number): void {
-    // Every level named, so each is a seek on the time index, not a walk over the context's rows.
-    this.db
-      .prepare(
-        `DELETE FROM significant WHERE context = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
-      )
-      .run(context, from, to)
-    this.db
-      .prepare('DELETE FROM level_visits WHERE context = ? AND hour >= ? AND hour < ?')
-      .run(context, Math.floor(from / VISIT_HOUR_MS), Math.ceil(to / VISIT_HOUR_MS))
+    const statements = this.refining()
+    statements.deleteSignificant.run(context, from, to)
+    statements.deleteVisits.run(context, Math.floor(from / VISIT_HOUR_MS), Math.ceil(to / VISIT_HOUR_MS))
   }
 
   /** Forget a context's levels, for one whose positions are all gone or replaced. */

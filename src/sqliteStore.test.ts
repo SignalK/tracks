@@ -326,6 +326,24 @@ describe('significance levels', () => {
     store.close()
   })
 
+  // A receiver's AIS traffic is thousands of vessels with a fix or two a
+  // day; counted by positions alone, one call would take on all their days.
+  it('charges each day a cost of its own, so many small days take several calls', () => {
+    const store = newStore()
+    for (let c = 0; c < 300; c++) {
+      store.newPosition(`vessels.urn:mrn:imo:mmsi:${200000000 + c}` as Context, [60, 24 + c * 1e-4], day0)
+    }
+    const refined = () => (store['db'].prepare('SELECT count(*) AS n FROM level_frontier').get() as { n: number }).n
+    store.refineLevels(later)
+    expect(refined()).toBeGreaterThan(0)
+    expect(refined()).toBeLessThan(300)
+    for (let i = 0; i < 10 && refined() < 300; i++) {
+      store.refineLevels(later)
+    }
+    expect(refined()).toBe(300)
+    store.close()
+  })
+
   it('stops after its budget and goes on where it stopped', async () => {
     const store = new SqliteTrackStore({ file: ':memory:', refineBudget: 1000 }, debug)
     for (let d = 0; d < 3; d++) {
