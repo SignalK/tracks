@@ -380,8 +380,9 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
    *
    * The same filters as a recorded track, applied to the import's own points:
    * a context names the vessel it was imported for, a window needs times, a
-   * box needs a point inside it and clips like a recorded track. Never
-   * reconciled with history, which knows nothing of an import.
+   * box needs a point inside it or a line through it and clips like a
+   * recorded track. Never reconciled with history, which knows nothing of an
+   * import.
    */
   const matchingImports = async (
     query: TracksRequest,

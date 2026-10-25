@@ -1025,6 +1025,31 @@ describe('clip reads', () => {
     store.close()
   })
 
+  it('takes two positions recorded at the same time for the line they are, between two stretches', async () => {
+    const store = newStore()
+    // Out to the east and, at the same time, to the west: the line between
+    // the two runs through the box, and nothing lies between them.
+    const positions: LatLngTuple[] = [
+      [60.5, 24.5],
+      [60.5, 25.5],
+      [60.5, 23.5],
+      [60.5, 24.4],
+    ]
+    const times = [0, MINUTE, MINUTE, 21 * MINUTE]
+    const all = positions.map((position, i) => ({ position, timestamp: times[i]! }))
+    store.initialTrack(ctx, positions, times)
+    const tracks = await store.getFilteredTimedTracks({
+      bbox: box,
+      radius: null,
+      intersects: true,
+      clip: true,
+      contexts: [ctx],
+    })
+    expect(tracks[ctx]).toHaveLength(4)
+    expect(clipToBounds(tracks[ctx]!, box)).toEqual(clipToBounds(all, box))
+    store.close()
+  })
+
   it('reads near the box only the requested contexts', async () => {
     const { store, all } = seeded()
     store.newPosition(other, inside, MINUTE)
