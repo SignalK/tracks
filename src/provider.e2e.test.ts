@@ -233,7 +233,17 @@ describe('the history import through a real history provider', () => {
             const rows = data.filter(([, value]) => value !== null)
             return `${rows.length} of ${data.length} rows hold a position: ${JSON.stringify(rows.slice(0, 25))}`
           })
-    expect(done, `${JSON.stringify(last)} ${held}`).toBeDefined()
+    // And what the plugin recorded meanwhile, which v1's collection route
+    // reads from the store alone, with the state it recorded under.
+    const recorded = done
+      ? ''
+      : JSON.stringify({
+          state: await server.api('/vessels/self/navigation/state'),
+          times: ((await server.api('/tracks?times&timespan=15m')) as Record<string, { times?: string[][] }>)[
+            server.selfContext
+          ]?.times,
+        })
+    expect(done, `${JSON.stringify(last)} ${held} recorded: ${recorded}`).toBeDefined()
     expect(done!.error).toBeUndefined()
     expect(Date.parse(done!.firstDay!)).toBeLessThanOrEqual(t0)
     // The provider also holds the fixes the tests above fed, stamped when
