@@ -133,6 +133,15 @@ export interface TrackStore {
   prune(maxAge: number, keep?: Context): void
 
   /**
+   * Housekeeping between reads: work through what a store keeps so that a
+   * read at a tolerance can skip what simplifying drops, a bounded amount per
+   * call. The plugin calls it on a timer; it is no part of the Track API.
+   * Optional: a store without it reads every position, and the caller
+   * simplifies them all.
+   */
+  refineLevels?(): void
+
+  /**
    * Each context's track in a window as a listing describes it, without its
    * points: those of `contexts` the store holds, or every one. Optional: a
    * caller without it reads the points and summarises them itself.
