@@ -86,8 +86,20 @@ export function createCrossesBounds(bounds: GeoBounds): (a: LatLngTuple, b: LatL
     const span = b[LNG] - a[LNG]
     const end = span > 180 ? b[LNG] - 360 : span < -180 ? b[LNG] + 360 : b[LNG]
     // Taken the short way, the line can run past ±180, and a box crossing
-    // the antimeridian runs up to 540: a turn either way covers both.
-    return TURNS.some((turn) => lineMeetsBox(a[LNG] + turn, a[LAT], end + turn, b[LAT], box))
+    // the antimeridian runs up to 540: a turn either way covers both. A turn
+    // that leaves the line wholly east or west of the box is passed over
+    // before the clip, which most lines of a track elsewhere are.
+    for (const turn of TURNS) {
+      const from = a[LNG] + turn
+      const to = end + turn
+      if (Math.max(from, to) < minLng || Math.min(from, to) > maxLng) {
+        continue
+      }
+      if (lineMeetsBox(from, a[LAT], to, b[LAT], box)) {
+        return true
+      }
+    }
+    return false
   }
 }
 

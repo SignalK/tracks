@@ -116,6 +116,21 @@ if (store) {
           }
           continue
         }
+        if (operation.method === 'refineLevels') {
+          i++
+          // Housekeeping, in a transaction of its own: a failure takes back
+          // what it refined and nothing else, and never stops the recording.
+          if (!writeFailure) {
+            try {
+              target.transaction(() => target.refineLevels(...operation.args))
+            } catch (error) {
+              if (error instanceof TransactionStateError) throw error
+              debug(`Refining levels failed: ${errorText(error)}`)
+            }
+          }
+          results.push({ id: operation.id })
+          continue
+        }
         if (isWrite(operation)) {
           const first = i
           while (i < operations.length && isWrite(operations[i]!)) i++

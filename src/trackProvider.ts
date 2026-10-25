@@ -220,6 +220,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         // thinning cannot drop the point inside it, and a clipped one keeps
         // the points that carry it to the box edge.
         ...(resolution === undefined || bounds ? {} : { resolution }),
+        ...readTolerance(query, deps.segmentGap()),
       },
     )
 
@@ -610,6 +611,28 @@ function shapeFeature(
       ...(query.times && timed ? { coordTimes: segments.map(toIsoTimes) } : {}),
     },
   }
+}
+
+/**
+ * The tolerance a query will be simplified to, where it is known before the
+ * read: an explicit `epsilon`, or the one `simplify` sizes to the box. Passed
+ * to the store, which may then leave out what simplifying drops. A tolerance
+ * sized to the track itself is known only once the track is read.
+ *
+ * None where what follows the read judges a track by the points it is
+ * given, since what a tolerance leaves out lies between them:
+ * - tracks split at pauses: `segment()` would read a straight leg as a stop;
+ * - a box without `clip`: a track matches on its points inside, and those a
+ *   level leaves out can be all it had there.
+ */
+function readTolerance(query: TracksRequest, gap: number): { tolerance?: number } {
+  if (gap > 0 || (query.bbox && query.clip !== true)) {
+    return {}
+  }
+  if (query.epsilon !== undefined && query.epsilon > 0) {
+    return { tolerance: query.epsilon }
+  }
+  return query.simplify === true && query.bbox ? { tolerance: extentEpsilon(query.bbox) } : {}
 }
 
 /**

@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type { StatementSync } from 'node:sqlite'
 import { s2, geojson } from 's2js'
 import { outsideSpans } from './recycleBin.js'
+import { significance } from './simplify.js'
 import { thin, Thinner } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
@@ -35,12 +36,15 @@ const toTimed = ({ lat, lon, timestamp }: Omit<PositionRow, 'context'>): TimedPo
   timestamp,
 })
 
-/** Sorted times grouped into `[first, last]` stretches, split where two lie more than `gap` apart. */
-const stretchesOf = (times: number[], gap: number): [number, number][] => {
+/**
+ * Sorted times grouped into `[first, last]` stretches, split where two lie
+ * more than `gap` apart, or the gap it gives for the two.
+ */
+const stretchesOf = (times: number[], gap: number | ((last: number, time: number) => number)): [number, number][] => {
   const stretches: [number, number][] = []
   for (const time of times) {
     const current = stretches[stretches.length - 1]
-    if (current && time - current[1] <= gap) {
+    if (current && time - current[1] <= (typeof gap === 'number' ? gap : gap(current[1], time))) {
       current[1] = time
     } else {
       stretches.push([time, time])
@@ -181,6 +185,11 @@ export interface SqliteStoreConfig {
    * choose between reading a named vessel by cell and by time.
    */
   readProbeLimit?: number
+  /**
+   * Positions one `refineLevels()` call refines, rounded up to the piece it is
+   * in. Tests lower it.
+   */
+  refineBudget?: number
   /** A gap longer than this ms starts a new track segment. */
   segmentGap?: number
 }
@@ -188,11 +197,122 @@ export interface SqliteStoreConfig {
 const DEFAULT_MAX_CELLS = 8
 /** See SqliteStoreConfig.readProbeLimit: counting this many index entries takes about 10 ms on a Pi 5. */
 const DEFAULT_READ_PROBE_LIMIT = 50_000
+
 /**
- * The span of positions one read in `getTimed` holds at a time: a day, at
- * most 86,400 rows at one per second.
+ * Significance levels, kept by `refineLevels()`. A position's level is
+ * floor(log2(significance / LEVEL_BASE_M)), its `significance()` in quarter
+ * metres as a power of two, so a read at a tolerance t needs only the levels
+ * from floor(log2(t / LEVEL_BASE_M)) up: every position simplifying to t
+ * keeps is further off than t. KEEP_LEVEL is a position no tolerance leaves
+ * out, an end of a piece.
  */
-const READ_SPAN_MS = 24 * 60 * 60 * 1000
+const LEVEL_BASE_M = 0.25
+const KEEP_LEVEL = 31
+/**
+ * The lowest level `significant` holds, and so the lowest a read filters on.
+ * Below a 4 m tolerance nearly every position qualifies: the table would copy
+ * most of positions for reads that save little.
+ */
+const MIN_READ_LEVEL = 4
+/**
+ * The levels from `lowest` up, for a query to name one by one: each is then a
+ * seek on (context, level, timestamp), where a range of levels would walk them.
+ */
+const levelsUp = (lowest: number): number[] => Array.from({ length: KEEP_LEVEL - lowest + 1 }, (_, i) => lowest + i)
+const SIGNIFICANT_LEVELS = levelsUp(MIN_READ_LEVEL).join(', ')
+/**
+ * The days levels are refined in, one never mixing with the next, and the
+ * span one read in `getTimed` holds at a time: at most 86,400 rows at one
+ * per second.
+ */
+const LEVEL_DAY_MS = 24 * 60 * 60 * 1000
+/**
+ * The default for SqliteStoreConfig.refineBudget: tens of milliseconds of a
+ * Pi between two reads, which keeps up with a fix a second and is short
+ * enough that a read waiting behind it goes unnoticed.
+ */
+const DEFAULT_REFINE_BUDGET = 6000
+/**
+ * What refining one day costs beyond its positions, counted against the
+ * budget as positions: the statements each day runs. A receiver records
+ * thousands of AIS vessels with a fix or two a day, and without this one call
+ * would take on thousands of days, with every read waiting behind it.
+ */
+const REFINE_DAY_COST = 50
+/**
+ * The most positions refined as one piece. Longer stretches, a day at one
+ * fix a second say, are cut here, where the time moves on, so a call never
+ * has to finish more than this many to stop. Each cut keeps the two
+ * positions at it at KEEP_LEVEL, a handful a day.
+ */
+const LEVEL_PIECE_MAX = 6000
+
+const dayOf = (timestamp: number): number => Math.floor(timestamp / LEVEL_DAY_MS)
+const levelOf = (significance: number): number =>
+  significance === Infinity
+    ? KEEP_LEVEL
+    : significance > 0
+      ? Math.max(0, Math.min(KEEP_LEVEL - 1, Math.floor(Math.log2(significance / LEVEL_BASE_M))))
+      : 0
+
+/**
+ * The cells and hours `level_visits` keeps of each refined day: a hundredth
+ * of a degree, about a kilometre, and an hour.
+ */
+const VISIT_CELL_DEG = 0.01
+const VISIT_HOUR_MS = 60 * 60 * 1000
+const visitCell = (degrees: number): number => Math.floor(degrees / VISIT_CELL_DEG)
+
+/** A span of time a read covers, `from` included unless it says otherwise. */
+interface TimeRange {
+  from: number
+  to: number
+  inclusiveEnd: boolean
+  exclusiveStart?: boolean
+}
+const isEmpty = ({ from, to, inclusiveEnd, exclusiveStart }: TimeRange): boolean =>
+  from > to || (from === to && (!inclusiveEnd || exclusiveStart === true))
+/** The time condition for a range, one bound per side, binding `from` and then `to`. */
+const inRange = (range: TimeRange): string =>
+  ` AND ${range.exclusiveStart ? 'timestamp > ?' : 'timestamp >= ?'} AND ${range.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?'}`
+
+/** The days of a context `significant` holds: through its frontier, but for those a change sent back. */
+interface RefinedDays {
+  through: number
+  stale: Set<number>
+}
+const isRefined = (refined: RefinedDays | undefined, day: number): boolean =>
+  refined !== undefined && day <= refined.through && !refined.stale.has(day)
+/** The part of `range` up to the end of the frontier day, which `significant` holds but for stale days. */
+const refinedIn = (refined: RefinedDays | undefined, range: TimeRange): TimeRange | undefined => {
+  if (!refined) {
+    return undefined
+  }
+  const end = (refined.through + 1) * LEVEL_DAY_MS
+  const part = end <= range.to ? { ...range, to: end, inclusiveEnd: false } : range
+  return isEmpty(part) ? undefined : part
+}
+/** The parts of `range` `significant` does not hold, in order: the stale days and all after the frontier. */
+const unrefinedIn = (refined: RefinedDays | undefined, range: TimeRange): TimeRange[] => {
+  if (!refined) {
+    return isEmpty(range) ? [] : [range]
+  }
+  const parts: TimeRange[] = []
+  for (const day of [...[...refined.stale].sort((a, b) => a - b), refined.through + 1]) {
+    const start = day * LEVEL_DAY_MS
+    const end = day > refined.through ? Number.POSITIVE_INFINITY : start + LEVEL_DAY_MS
+    const part: TimeRange = {
+      from: Math.max(range.from, start),
+      to: Math.min(range.to, end),
+      inclusiveEnd: range.to < end && range.inclusiveEnd,
+      exclusiveStart: range.from >= start && range.exclusiveStart === true,
+    }
+    if (!isEmpty(part)) {
+      parts.push(part)
+    }
+  }
+  return parts
+}
 
 /**
  * How long a stretch recorded finer than the store's resolution keeps all of
@@ -237,6 +357,7 @@ export class SqliteTrackStore implements TrackStore {
   private readonly selectImportedPoints: StatementSync
   private readonly maxCells: number
   private readonly readProbeLimit: number
+  private readonly refineBudget: number
   private readonly segmentGap: number
   private readonly retention: number
   private readonly binRetention: number
@@ -252,12 +373,33 @@ export class SqliteTrackStore implements TrackStore {
    * row that has not changed.
    */
   private readonly lastName = new Map<string, { name: string; timestamp: number }>()
+  /**
+   * Per detail span still open, the spacing and cutoff `thinOldDetail` last
+   * thinned it at.
+   */
+  private readonly lastThin = new Map<number, { spacing: number; cutoff: number }>()
   /** The detail span each context is in, if any; see `noteDetail`. */
   private readonly detail = new Map<string, { id: number; end: number; saved: number }>()
+  /** Per context, the last day refineLevels() has refined; a copy of level_frontier. */
+  private readonly levelFrontier = new Map<string, number>()
+  /** The last refinable day as of the newest pass over every context. */
+  private refinedThrough: number | undefined
+  /** Where the pass over the contexts goes on after running out of budget. */
+  private refineResume: string | undefined
+  /**
+   * A day refineLevels() stopped inside, to go on from `next`: a stale one, or
+   * one of the pass past its context's frontier.
+   */
+  private refinePartial: { context: Context; day: number; next: number; stale: boolean } | undefined
+  /** See refining(). */
+  private refineStatements:
+    | Record<'select' | 'copy' | 'visit' | 'unstale' | 'frontier' | 'deleteSignificant' | 'deleteVisits', StatementSync>
+    | undefined
 
   constructor(config: SqliteStoreConfig, debug: Debug) {
     this.maxCells = config.maxCells ?? DEFAULT_MAX_CELLS
     this.readProbeLimit = config.readProbeLimit ?? DEFAULT_READ_PROBE_LIMIT
+    this.refineBudget = config.refineBudget ?? DEFAULT_REFINE_BUDGET
     this.segmentGap = config.segmentGap ?? DEFAULT_SEGMENT_GAP
     this.retention = config.retention ?? 0
     this.binRetention = config.binRetention ?? 0
@@ -382,6 +524,45 @@ export class SqliteTrackStore implements TrackStore {
         span_start  INTEGER NOT NULL,
         span_end    INTEGER NOT NULL
       );
+      -- The positions of refined days from MIN_READ_LEVEL up, copied with
+      -- their level: what a read at a tolerance reads instead of positions.
+      -- A table of its own rather than a column, so refining writes only the
+      -- few positions that carry a track's shape and never a row of
+      -- positions or its indexes. position is the row in positions, which
+      -- orders positions recorded at the same time.
+      CREATE TABLE IF NOT EXISTS significant (
+        position    INTEGER NOT NULL,
+        context     TEXT    NOT NULL,
+        timestamp   INTEGER NOT NULL,
+        lat         REAL    NOT NULL,
+        lon         REAL    NOT NULL,
+        level       INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_significant_time ON significant(context, level, timestamp);
+      -- The hours of refined days each context had a position in each cell
+      -- of VISIT_CELL_DEG: where a box read at a tolerance finds a vessel,
+      -- since the positions a level keeps in the box can be none at all.
+      CREATE TABLE IF NOT EXISTS level_visits (
+        context     TEXT    NOT NULL,
+        lat_cell    INTEGER NOT NULL,
+        lon_cell    INTEGER NOT NULL,
+        hour        INTEGER NOT NULL,
+        PRIMARY KEY (context, lat_cell, lon_cell, hour)
+      ) WITHOUT ROWID;
+      -- A refined day's visits are cleared by hour, which the key, led by the
+      -- cells a box read asks for, cannot seek.
+      CREATE INDEX IF NOT EXISTS idx_level_visits_hour ON level_visits(context, hour);
+      -- Per context, the last day refineLevels() has refined, and the refined
+      -- days a change has since sent back to it.
+      CREATE TABLE IF NOT EXISTS level_frontier (
+        context     TEXT    PRIMARY KEY,
+        through     INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS level_stale (
+        context     TEXT    NOT NULL,
+        day         INTEGER NOT NULL,
+        PRIMARY KEY (context, day)
+      ) WITHOUT ROWID;
       -- How far the import of a vessel's track from a history provider got,
       -- so a restart goes on from there; see historyImport.ts.
       CREATE TABLE IF NOT EXISTS history_imports (
@@ -395,6 +576,7 @@ export class SqliteTrackStore implements TrackStore {
         error       TEXT
       );
     `)
+    this.loadLevels()
     // The position rides along with the vessel and time, so a read of a track
     // is answered from the index alone, without a lookup in the table for
     // every row. It replaces the (context, timestamp) index of older
@@ -468,6 +650,14 @@ export class SqliteTrackStore implements TrackStore {
       this.lastStored.set(context, timestamp)
     }
     this.store(context, position, timestamp)
+    // A fix dated into a day refined already, as one from a clock that jumped
+    // back is, or into the day being refined or one before it.
+    const through = this.levelFrontier.get(context)
+    const day = dayOf(timestamp)
+    const partial = this.refinePartial
+    if ((through !== undefined && day <= through) || (partial?.context === context && day <= partial.day)) {
+      this.invalidateLevels(context, timestamp, timestamp)
+    }
   }
 
   /**
@@ -507,6 +697,7 @@ export class SqliteTrackStore implements TrackStore {
     // Replaces the context's history, matching the in-memory store: a caller
     // installing a known track is authoritative for the window it covers.
     this.db.prepare('DELETE FROM positions WHERE context = ?').run(context)
+    this.clearLevels(context)
     // Bypasses the throttle: these points are already at whatever resolution
     // the caller recorded them at, and they are back-dated, so throttling
     // against the newest-seen timestamp would drop most of them.
@@ -544,7 +735,8 @@ export class SqliteTrackStore implements TrackStore {
 
   /**
    * A context's positions in a window, thinned to `resolution` when one is
-   * given.
+   * given. At a `tolerance`, only those simplifying to it can keep, where
+   * `significant` holds the day; see `levelsFrom`.
    *
    * Read a day at a time and thinned as each day arrives, so the points are
    * the ones `thin()` keeps without every row of the window being held first:
@@ -553,16 +745,41 @@ export class SqliteTrackStore implements TrackStore {
    * memory. A day per query rather than a row per step, because node:sqlite
    * builds rows in bulk at about twice the speed it hands them out one by one.
    */
-  getTimed(context: Context, window?: TimeWindow, resolution?: number): Promise<TimedPosition[]> {
+  getTimed(context: Context, window?: TimeWindow, resolution?: number, tolerance?: number): Promise<TimedPosition[]> {
     // An unknown context rejects; a known but stationary one resolves with
     // points. Resolving [] for both would make the two indistinguishable and
     // the route could not answer 404.
     if (!this.knows(context)) {
       return Promise.reject(new Error(`No track for ${context}`))
     }
-    const start = window?.from ?? Number.NEGATIVE_INFINITY
-    const end = window?.to ?? Number.POSITIVE_INFINITY
-    const endClause = !window || window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?'
+    const range: TimeRange = {
+      from: window?.from ?? Number.NEGATIVE_INFINITY,
+      to: window?.to ?? Number.POSITIVE_INFINITY,
+      inclusiveEnd: !window || window.inclusiveEnd === true,
+    }
+    const thinner = resolution ? new Thinner(resolution) : undefined
+    const points: TimedPosition[] = []
+    for (const row of this.daysOf(context, range, this.levelsFrom(tolerance))) {
+      if (thinner) {
+        thinner.push(toTimed(row))
+      } else {
+        points.push(toTimed(row))
+      }
+    }
+    return Promise.resolve(thinner ? thinner.finish() : points)
+  }
+
+  /**
+   * A context's positions in `range`, a day at a time and in the order
+   * rowsFor() keeps. With `levels`, the days `significant` holds come from
+   * it, only the positions at those levels; every other day is read whole.
+   */
+  private *daysOf(
+    context: Context,
+    range: TimeRange,
+    levels: number[] | undefined,
+  ): Generator<Omit<PositionRow, 'context'>> {
+    const refined = levels ? this.refinedDays(context) : undefined
     // One bound per side in every statement: given a second lower bound on
     // timestamp, SQLite enters the index at the first and filters on the other,
     // so each seek would scan from the start of the window again.
@@ -570,27 +787,65 @@ export class SqliteTrackStore implements TrackStore {
     // Each read starts at the next recorded time, so a window spanning years
     // of gaps costs one seek per day that has positions, not one per day.
     const next = this.db.prepare(
-      `SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND ${endClause} ORDER BY timestamp LIMIT 1`,
+      `SELECT timestamp FROM positions WHERE context = ?${inRange(range)} ORDER BY timestamp LIMIT 1`,
     )
+    const day = ' AND timestamp >= ? AND timestamp < ?'
     // Ordered as rowsFor() orders them, so equal times keep the order they were stored in.
-    const columns = 'SELECT timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ?'
-    const day = this.db.prepare(`${columns} AND timestamp < ? ORDER BY timestamp, rowid`)
-    const lastDay = this.db.prepare(`${columns} AND ${endClause} ORDER BY timestamp, rowid`)
-    const nextAfter = (from: number) => (next.get(context, from, end) as { timestamp: number } | undefined)?.timestamp
-    const thinner = resolution ? new Thinner(resolution) : undefined
-    const points: TimedPosition[] = []
-    for (let from = nextAfter(start); from !== undefined; from = nextAfter(from + READ_SPAN_MS)) {
-      const rows =
-        from + READ_SPAN_MS < end ? day.all(context, from, from + READ_SPAN_MS) : lastDay.all(context, from, end)
-      for (const row of rows as unknown as Omit<PositionRow, 'context'>[]) {
-        if (thinner) {
-          thinner.push(toTimed(row))
-        } else {
-          points.push(toTimed(row))
-        }
-      }
+    const positions = 'SELECT timestamp, lat, lon FROM positions WHERE context = ?'
+    const whole = {
+      day: this.db.prepare(`${positions}${day} ORDER BY timestamp, rowid`),
+      last: this.db.prepare(`${positions}${inRange(range)} ORDER BY timestamp, rowid`),
     }
-    return Promise.resolve(thinner ? thinner.finish() : points)
+    // Sorted below: read level by level, they come in level order.
+    const significant =
+      levels &&
+      `SELECT position AS id, timestamp, lat, lon FROM significant INDEXED BY idx_significant_time WHERE context = ? AND level IN (${levels.join(', ')})`
+    const byLevel =
+      significant && refined
+        ? { day: this.db.prepare(`${significant}${day}`), last: this.db.prepare(`${significant}${inRange(range)}`) }
+        : undefined
+    // The first and last position of the range, which a track read whole
+    // starts and ends at. A range starting or ending inside a refined day
+    // would otherwise start at the next position the level keeps, which on a
+    // straight leg can be hours on.
+    const edge = (order: string) =>
+      this.db
+        .prepare(
+          `SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context = ?${inRange(range)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`,
+        )
+        .get(context, range.from, range.to) as unknown as (Omit<PositionRow, 'context'> & { id: number }) | undefined
+    const edges = byLevel ? [edge('ASC'), edge('DESC')] : []
+    for (let from = range.from; ;) {
+      const row = next.get(context, from, range.to) as { timestamp: number } | undefined
+      if (!row) {
+        return
+      }
+      const start = row.timestamp
+      const end = (dayOf(start) + 1) * LEVEL_DAY_MS
+      // The last day is the one the range ends in. One ending just as the
+      // range does is read as any other: a position at its end is the next
+      // day's.
+      const last = end > range.to
+      if (byLevel && isRefined(refined, dayOf(start))) {
+        const rows = (last
+          ? byLevel.last.all(context, start, range.to)
+          : byLevel.day.all(context, start, end)) as unknown as (Omit<PositionRow, 'context'> & { id: number })[]
+        for (const edge of edges) {
+          if (edge && dayOf(edge.timestamp) === dayOf(start) && !rows.some(({ id }) => id === edge.id)) {
+            rows.push(edge)
+          }
+        }
+        yield* rows.sort((a, b) => a.timestamp - b.timestamp || a.id - b.id)
+      } else {
+        yield* (last
+          ? whole.last.all(context, start, range.to)
+          : whole.day.all(context, start, end)) as unknown as Omit<PositionRow, 'context'>[]
+      }
+      if (last) {
+        return
+      }
+      from = end
+    }
   }
 
   private contexts(): Context[] {
@@ -713,7 +968,10 @@ export class SqliteTrackStore implements TrackStore {
     const requested = params.contexts ? new Set(params.contexts) : undefined
     // A clipped query needs only the stretches near the box, so it reads those
     // instead of every position each candidate has in the window.
-    const near = params.bbox && params.clip ? this.rowsNearBounds(params.bbox, query?.window, requested) : undefined
+    const near =
+      params.bbox && params.clip
+        ? this.rowsNearBounds(params.bbox, query?.window, requested, query?.tolerance)
+        : undefined
     // The cell prefilter reads every row of every vessel near the box, at any
     // time, so for named contexts, which are read anyway, it only adds cost: a
     // view over a busy harbour would turn one own-vessel query into a scan of
@@ -740,7 +998,7 @@ export class SqliteTrackStore implements TrackStore {
                 query?.resolution,
               ),
             )
-          : this.getTimed(context, query?.window, query?.resolution)
+          : this.getTimed(context, query?.window, query?.resolution, query?.tolerance)
         return read.then((points) => ({ context, points }))
       }),
     )
@@ -877,11 +1135,18 @@ export class SqliteTrackStore implements TrackStore {
     bounds: GeoBounds,
     window?: TimeWindow,
     contexts?: ReadonlySet<Context>,
+    tolerance?: number,
   ): Map<Context, NumberedRow[]> {
     const near = new Map<Context, NumberedRow[]>()
     const clause = this.coveringClause(bounds)
     if (!clause) {
       return near
+    }
+    // Only named vessels are read by level: without them the cell index
+    // serves every vessel near the box, and `significant` has none.
+    const levels = contexts ? this.levelsFrom(tolerance) : undefined
+    if (contexts && levels) {
+      return this.nearBoundsByLevel(bounds, clause, window, [...contexts], levels)
     }
     const timeClauses = window ? ['timestamp >= ?', window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?'] : []
     const timeParams = window ? [window.from, window.to] : []
@@ -962,6 +1227,519 @@ export class SqliteTrackStore implements TrackStore {
     return near
   }
 
+  /** The levels a read at `tolerance` metres needs, or undefined to read every position. */
+  private levelsFrom(tolerance: number | undefined): number[] | undefined {
+    if (tolerance === undefined || !(tolerance > 0)) {
+      return undefined
+    }
+    const lowest = Math.min(Math.floor(Math.log2(tolerance / LEVEL_BASE_M)), KEEP_LEVEL)
+    if (!(lowest >= MIN_READ_LEVEL)) {
+      return undefined
+    }
+    return levelsUp(lowest)
+  }
+
+  /** The days of a context `significant` holds, or undefined while it holds none. */
+  private refinedDays(context: Context): RefinedDays | undefined {
+    const through = this.levelFrontier.get(context)
+    if (through === undefined) {
+      return undefined
+    }
+    const stale = this.db.prepare('SELECT day FROM level_stale WHERE context = ?').all(context) as unknown as {
+      day: number
+    }[]
+    return { through, stale: new Set(stale.map(({ day }) => day)) }
+  }
+
+  /**
+   * rowsNearBounds() for named contexts at a tolerance: what the track
+   * simplified to it is made of near `bounds`. Where `significant` holds the
+   * day, the times the vessel was in the box are the hours `level_visits`
+   * has it in a cell the box overlaps: the positions a level keeps there can
+   * be none at all, only a line across it, which the clip then draws. Each
+   * stretch around those times is read from `significant` at `levels`, with
+   * the nearest position kept either side. The rest of the window is read
+   * from positions as without a tolerance, so a track reads the same before
+   * its days are refined as after, but for the positions the tolerance
+   * leaves out. The window's first and last positions count as kept, as in
+   * `getTimed`.
+   *
+   * What `significant` holds of a day not refined, one a change sent back
+   * while it was being refined again, is in positions too: read from there
+   * for that day, those rows only repeat, and are never nearer as a
+   * neighbour.
+   */
+  private nearBoundsByLevel(
+    bounds: GeoBounds,
+    clause: { where: string; params: bigint[]; cells: number },
+    window: TimeWindow | undefined,
+    contexts: Context[],
+    levels: number[],
+  ): Map<Context, NumberedRow[]> {
+    const near = new Map<Context, NumberedRow[]>()
+    const range: TimeRange = window
+      ? { from: window.from, to: window.to, inclusiveEnd: window.inclusiveEnd === true }
+      : { from: Number.NEGATIVE_INFINITY, to: Number.POSITIVE_INFINITY, inclusiveEnd: true }
+    const inBounds = createInBounds(bounds)
+    // Each shape of range is a statement of its own; most repeat per stretch.
+    const statements = new Map<string, StatementSync>()
+    const query = (sql: string): StatementSync => {
+      let statement = statements.get(sql)
+      if (!statement) {
+        statement = this.db.prepare(sql)
+        statements.set(sql, statement)
+      }
+      return statement
+    }
+    const fromSignificant = `SELECT position AS id, context, timestamp, lat, lon FROM significant INDEXED BY idx_significant_time WHERE context = ?`
+    const fromPositions = 'SELECT rowid AS id, context, timestamp, lat, lon FROM positions WHERE context = ?'
+    const visited = this.db.prepare(
+      `SELECT DISTINCT hour FROM level_visits
+       WHERE context = ? AND lat_cell BETWEEN ? AND ? AND lon_cell BETWEEN ? AND ? AND hour >= ? AND hour <= ?`,
+    )
+    const cells = splitAtAntimeridian(bounds).map(({ sw, ne }) => [
+      visitCell(sw[0]),
+      visitCell(ne[0]),
+      visitCell(sw[1]),
+      visitCell(ne[1]),
+    ])
+    const later = (a: NumberedRow, b: NumberedRow) =>
+      a.timestamp > b.timestamp || (a.timestamp === b.timestamp && a.id > b.id)
+    let insideRows = 0
+    for (const context of contexts) {
+      const refined = this.refinedDays(context)
+
+      const times: number[] = []
+      for (const part of unrefinedIn(refined, range)) {
+        for (const { timestamp, lat, lon } of this.namedNearBounds([context], clause, inRange(part), [
+          part.from,
+          part.to,
+        ])) {
+          insideRows++
+          if (inBounds([lat, lon])) {
+            times.push(timestamp)
+          }
+        }
+      }
+      const held = refinedIn(refined, range)
+      if (held) {
+        const first = Math.floor(held.from / VISIT_HOUR_MS)
+        const last = Math.floor(held.to / VISIT_HOUR_MS)
+        for (const [south, north, west, east] of cells) {
+          for (const { hour } of visited.all(context, south!, north!, west!, east!, first, last) as unknown as {
+            hour: number
+          }[]) {
+            insideRows++
+            const start = hour * VISIT_HOUR_MS
+            if (isRefined(refined, dayOf(start))) {
+              times.push(Math.max(start, held.from), Math.min(start + VISIT_HOUR_MS, held.to))
+            }
+          }
+        }
+      }
+      if (times.length === 0) {
+        continue
+      }
+      times.sort((a, b) => a - b)
+
+      const edge = (order: string) =>
+        query(`${fromPositions}${inRange(range)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`).get(
+          context,
+          range.from,
+          range.to,
+        ) as unknown as NumberedRow | undefined
+      const edges = [edge('ASC'), edge('DESC')].filter((row) => row !== undefined)
+
+      // The position next to a stretch that the read keeps, the nearest of a
+      // seek per level into the days `significant` holds, one into each part
+      // of the window it does not, and the window's ends.
+      const neighbour = (time: number, before: boolean): NumberedRow | undefined => {
+        const side: TimeRange = before
+          ? { from: range.from, to: time, inclusiveEnd: false }
+          : { from: time, to: range.to, inclusiveEnd: range.inclusiveEnd, exclusiveStart: true }
+        const order = before ? 'DESC' : 'ASC'
+        const nearer = (a: NumberedRow, b: NumberedRow | undefined) => !b || (before ? later(a, b) : later(b, a))
+        let found: NumberedRow | undefined
+        const parts = unrefinedIn(refined, side)
+        for (const part of before ? parts.reverse() : parts) {
+          found = query(`${fromPositions}${inRange(part)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`).get(
+            context,
+            part.from,
+            part.to,
+          ) as unknown as NumberedRow | undefined
+          if (found) {
+            break
+          }
+        }
+        const held = refinedIn(refined, side)
+        if (held) {
+          const seek = query(
+            `${fromSignificant} AND level = ?${inRange(held)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`,
+          )
+          for (const level of levels) {
+            const row = seek.get(context, level, held.from, held.to) as unknown as NumberedRow | undefined
+            if (row && nearer(row, found)) {
+              found = row
+            }
+          }
+        }
+        for (const row of edges) {
+          if ((before ? row.timestamp < time : row.timestamp > time) && nearer(row, found)) {
+            found = row
+          }
+        }
+        return found
+      }
+
+      // Read by level, the times inside the box are hours and the few
+      // positions that carry its shape, often hours apart. Grouped at the
+      // usual gap they make a stretch each, and three reads apiece.
+      const longGap = Math.max(this.stretchGap, LEVEL_DAY_MS)
+      const rows = new Map<number, NumberedRow>()
+      const stretches = stretchesOf(times, (last, time) =>
+        isRefined(refined, dayOf(last)) && isRefined(refined, dayOf(time)) ? longGap : this.stretchGap,
+      )
+      let last: NumberedRow | undefined
+      for (const [start, end] of stretches) {
+        const earlier = rows.size
+        // An hour can end where the window does, which may leave its end out.
+        const stretch: TimeRange = { from: start, to: end, inclusiveEnd: end < range.to || range.inclusiveEnd }
+        const held = refinedIn(refined, stretch)
+        if (held) {
+          const read = query(`${fromSignificant} AND level IN (${levels.join(', ')})${inRange(held)}`).all(
+            context,
+            held.from,
+            held.to,
+          ) as unknown as NumberedRow[]
+          for (const row of read) {
+            rows.set(row.id, row)
+          }
+        }
+        for (const part of unrefinedIn(refined, stretch)) {
+          for (const row of query(`${fromPositions}${inRange(part)}`).all(
+            context,
+            part.from,
+            part.to,
+          ) as unknown as NumberedRow[]) {
+            rows.set(row.id, row)
+          }
+        }
+        for (const row of edges) {
+          if (row.timestamp >= start && row.timestamp <= end) {
+            rows.set(row.id, row)
+          }
+        }
+        // Keyed by row: where nothing was kept between two stretches, one's
+        // neighbour is the other's first or last row.
+        const entry = neighbour(start, true)
+        const exit = neighbour(end, false)
+        for (const row of [entry, exit]) {
+          if (row) {
+            rows.set(row.id, row)
+          }
+        }
+        // A stretch read apart from the one before leaves out what the
+        // level keeps between them, as rowsNearBounds() marks it.
+        const first =
+          entry ?? [...rows.values()].slice(earlier).sort((a, b) => a.timestamp - b.timestamp || a.id - b.id)[0]
+        // Recorded at the same time as the last, it follows it: the seek
+        // past that time would step over it.
+        if (last && first && first.timestamp > last.timestamp && neighbour(last.timestamp, false)?.id !== first.id) {
+          first.breakBefore = true
+        }
+        last = exit ?? last
+      }
+      near.set(
+        context,
+        [...rows.values()].sort((a, b) => a.timestamp - b.timestamp || a.id - b.id),
+      )
+    }
+    if (this.debug.enabled) {
+      this.debug(
+        `clip covering ${clause.cells} cells at levels ${levels[0]}+ -> ${insideRows} rows and hours -> ${near.size} contexts`,
+      )
+    }
+    return near
+  }
+
+  /**
+   * Give finished days their significant positions, refining about
+   * `refineBudget` positions per call.
+   *
+   * A day is finished once it ended more than DETAIL_KEEP ago: by then
+   * `prune()` has thinned its detail, which would otherwise take positions
+   * out from under their levels. Each day is refined in pieces, split where
+   * the recording stopped for longer than CLIP_STRETCH_GAP and cut at
+   * LEVEL_PIECE_MAX, each simplified on its own, so a day's levels never
+   * depend on another day's positions and a new day never changes an old
+   * one's. A call that runs out of budget inside a day goes on from there
+   * next time. Days a change sent back come first; then each context's days
+   * after its frontier, the pass picking up where the last call stopped. Once
+   * a pass finds nothing left to do, calls cost nothing until another day
+   * finishes.
+   */
+  refineLevels(now = Date.now()): void {
+    const lastDay = dayOf(now - DETAIL_KEEP) - 1
+    let budget = this.refineBudget
+    const partial = this.refinePartial
+    if (partial) {
+      this.refinePartial = undefined
+      budget = this.refineDay(partial.context, partial.day, partial.next, budget, partial.stale)
+      if (this.refinePartial || budget <= 0) {
+        return
+      }
+    }
+    const stale = this.db.prepare('SELECT context, day FROM level_stale LIMIT 64')
+    for (
+      let batch = stale.all() as { context: string; day: number }[];
+      batch.length > 0;
+      batch = stale.all() as { context: string; day: number }[]
+    ) {
+      for (const { context, day } of batch) {
+        budget = this.refineDay(context, day, Number.NEGATIVE_INFINITY, budget, true)
+        if (this.refinePartial || budget <= 0) {
+          return
+        }
+      }
+    }
+    if (this.refinedThrough === lastDay) {
+      return
+    }
+    const nextContext = this.db.prepare('SELECT context FROM positions WHERE context > ? ORDER BY context LIMIT 1')
+    const firstAt = this.db.prepare(
+      'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
+    )
+    let context: string | undefined = this.refineResume
+    if (context === undefined) {
+      context = (nextContext.get('') as { context: string } | undefined)?.context
+    }
+    this.refineResume = undefined
+    while (context !== undefined) {
+      for (;;) {
+        const through = this.levelFrontier.get(context)
+        const row = firstAt.get(
+          context,
+          through === undefined ? Number.NEGATIVE_INFINITY : (through + 1) * LEVEL_DAY_MS,
+        ) as { timestamp: number } | undefined
+        if (!row || dayOf(row.timestamp) > lastDay) {
+          break
+        }
+        budget = this.refineDay(context, dayOf(row.timestamp), Number.NEGATIVE_INFINITY, budget, false)
+        if (this.refinePartial || budget <= 0) {
+          this.refineResume = context
+          return
+        }
+      }
+      context = (nextContext.get(context) as { context: string } | undefined)?.context
+    }
+    this.refinedThrough = lastDay
+  }
+
+  /**
+   * Refine a context's day from `from` on, piece by piece while the budget
+   * lasts, resolving to the budget left. Stopping inside the day leaves it in
+   * refinePartial; finishing it takes it off level_stale, or moves the
+   * context's frontier to it.
+   *
+   * Only what the budget can take is read, and a piece the read stops inside
+   * is left for the next call: a day at one fix a second is 86,400 rows, and
+   * reading all that is left of it on every call would cost as much as the
+   * refining.
+   */
+  private refineDay(context: Context, day: number, from: number, budget: number, stale: boolean): number {
+    budget -= REFINE_DAY_COST
+    const statements = this.refining()
+    const dayStart = day * LEVEL_DAY_MS
+    const dayEnd = dayStart + LEVEL_DAY_MS
+    if (from === Number.NEGATIVE_INFINITY) {
+      // A day a restart stopped inside, its place in it lost, starts over.
+      // The pass clears back to the frontier: a day it stopped inside may
+      // have been emptied since, and it is about to go past that day.
+      const through = this.levelFrontier.get(context)
+      const clearFrom = stale
+        ? dayStart
+        : through === undefined
+          ? Number.NEGATIVE_INFINITY
+          : (through + 1) * LEVEL_DAY_MS
+      this.deleteSignificant(context, clearFrom, dayEnd)
+    }
+    const read = (limit: number) =>
+      statements.select.all(context, Math.max(from, dayStart), dayEnd, limit) as unknown as (Omit<
+        PositionRow,
+        'context'
+      > & {
+        id: number
+      })[]
+    const limit = budget + LEVEL_PIECE_MAX
+    let rows = read(limit)
+    let cuts = this.piecesOf(rows)
+    if (rows.length === limit) {
+      // The read stopped inside its last piece, which waits for the next call.
+      cuts.pop()
+      // No piece ends inside the read, which takes a run of equal times as
+      // long as an untimed track: read the rest of the day.
+      if (cuts.length < 2) {
+        rows = read(-1)
+        cuts = this.piecesOf(rows)
+      }
+    }
+    const visits = new Set<string>()
+    let stopped = false
+    for (let p = 1; p < cuts.length; p++) {
+      const piece = rows.slice(cuts[p - 1], cuts[p])
+      const values = significance(piece.map(toTimed))
+      for (const [i, row] of piece.entries()) {
+        const level = levelOf(values[i]!)
+        if (level >= MIN_READ_LEVEL) {
+          statements.copy.run(level, row.id)
+        }
+        visits.add(`${visitCell(row.lat)} ${visitCell(row.lon)} ${Math.floor(row.timestamp / VISIT_HOUR_MS)}`)
+      }
+      budget -= piece.length
+      const next = rows[cuts[p]!]
+      if (next && (budget <= 0 || p === cuts.length - 1)) {
+        this.refinePartial = { context, day, next: next.timestamp, stale }
+        stopped = true
+        break
+      }
+    }
+    for (const key of visits) {
+      statements.visit.run(context, ...key.split(' ').map(Number))
+    }
+    if (stopped) {
+      return budget
+    }
+    if (stale) {
+      statements.unstale.run(context, day)
+    } else {
+      statements.frontier.run(context, day)
+      this.levelFrontier.set(context, day)
+    }
+    return budget
+  }
+
+  /** refineDay()'s statements, prepared once: it runs for every day of every vessel. */
+  private refining() {
+    return (this.refineStatements ??= {
+      select: this.db.prepare(
+        'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?',
+      ),
+      copy: this.db.prepare(
+        `INSERT INTO significant (position, context, timestamp, lat, lon, level)
+         SELECT rowid, context, timestamp, lat, lon, ? FROM positions WHERE rowid = ?`,
+      ),
+      visit: this.db.prepare(
+        'INSERT OR IGNORE INTO level_visits (context, lat_cell, lon_cell, hour) VALUES (?, ?, ?, ?)',
+      ),
+      unstale: this.db.prepare('DELETE FROM level_stale WHERE context = ? AND day = ?'),
+      frontier: this.db.prepare(
+        'INSERT INTO level_frontier (context, through) VALUES (?, ?) ON CONFLICT(context) DO UPDATE SET through = excluded.through',
+      ),
+      // Every level named, so each is a seek on the time index, not a walk over the context's rows.
+      deleteSignificant: this.db.prepare(
+        `DELETE FROM significant WHERE context = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
+      ),
+      deleteVisits: this.db.prepare('DELETE FROM level_visits WHERE context = ? AND hour >= ? AND hour < ?'),
+    })
+  }
+
+  /**
+   * Where rows, in time order, split into the pieces refineDay() simplifies
+   * one by one: indexes of the first row of each, and the end of the rows.
+   * Cut only where the time moves on, so going on from a time never takes in
+   * a position refined already.
+   */
+  private piecesOf(rows: { timestamp: number }[]): number[] {
+    const cuts = [0]
+    for (let i = 1; i < rows.length; i++) {
+      const gap = rows[i]!.timestamp - rows[i - 1]!.timestamp
+      if (gap > CLIP_STRETCH_GAP || (i - cuts.at(-1)! >= LEVEL_PIECE_MAX && gap > 0)) {
+        cuts.push(i)
+      }
+    }
+    if (rows.length > 0) {
+      cuts.push(rows.length)
+    }
+    return cuts
+  }
+
+  /**
+   * Send the refined days a change to positions touched back to be refined
+   * again, and take their significant positions out until then. They were
+   * measured against positions that have since gone or come: a read could
+   * otherwise draw a position that is gone, or leave out one the change made
+   * significant.
+   *
+   * Called by every write that changes the positions of a day: a fix dated
+   * into a refined day, `initialTrack` (through `clearLevels`), `recordTrack`,
+   * `binRecorded`, `restoreFromBin`, both retentions and detail thinning. A
+   * stay still going on, thinned at the spacing of the last prune, sends back
+   * only what aged since then, so its days are not refined again every hour.
+   */
+  private invalidateLevels(context: Context, from: number, to: number): void {
+    const through = this.levelFrontier.get(context)
+    // A day refined in part starts over when the change reaches it. One the
+    // pass is in does too when the change reaches any day between it and the
+    // frontier: finishing it would move the frontier past that day, which
+    // would then count as refined with nothing in `significant`.
+    const partial = this.refinePartial
+    const reached = partial?.stale ? partial.day <= dayOf(to) : dayOf(to) > (through ?? Number.NEGATIVE_INFINITY)
+    if (partial?.context === context && dayOf(from) <= partial.day && reached) {
+      this.deleteSignificant(context, partial.day * LEVEL_DAY_MS, (partial.day + 1) * LEVEL_DAY_MS)
+      this.refinePartial = undefined
+      this.refinedThrough = undefined
+    }
+    if (through === undefined || dayOf(to) > through) {
+      // The pass that last found nothing left to do may have been past these
+      // days before the change came.
+      this.refinedThrough = undefined
+    }
+    if (through === undefined) {
+      return
+    }
+    const first = dayOf(from)
+    const last = Math.min(dayOf(to), through)
+    if (first > last) {
+      return
+    }
+    const end = (last + 1) * LEVEL_DAY_MS
+    this.deleteSignificant(context, first * LEVEL_DAY_MS, end)
+    // Queued only where positions are left: a day emptied has nothing to refine.
+    const next = this.db.prepare(
+      'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp LIMIT 1',
+    )
+    const queue = this.db.prepare('INSERT OR IGNORE INTO level_stale (context, day) VALUES (?, ?)')
+    for (let day = first; day <= last;) {
+      const row = next.get(context, day * LEVEL_DAY_MS, end) as { timestamp: number } | undefined
+      if (!row) {
+        break
+      }
+      day = dayOf(row.timestamp)
+      queue.run(context, day)
+      day++
+    }
+  }
+
+  /** Take a context's significant positions, and its visits, from `from` until `to` out. */
+  private deleteSignificant(context: Context, from: number, to: number): void {
+    const statements = this.refining()
+    statements.deleteSignificant.run(context, from, to)
+    statements.deleteVisits.run(context, Math.floor(from / VISIT_HOUR_MS), Math.ceil(to / VISIT_HOUR_MS))
+  }
+
+  /** Forget a context's levels, for one whose positions are all gone or replaced. */
+  private clearLevels(context: Context): void {
+    this.db.prepare('DELETE FROM significant WHERE context = ?').run(context)
+    this.db.prepare('DELETE FROM level_visits WHERE context = ?').run(context)
+    this.db.prepare('DELETE FROM level_frontier WHERE context = ?').run(context)
+    this.db.prepare('DELETE FROM level_stale WHERE context = ?').run(context)
+    this.levelFrontier.delete(context)
+    this.refinedThrough = undefined
+    if (this.refinePartial?.context === context) {
+      this.refinePartial = undefined
+    }
+  }
+
   /**
    * Split a context's positions into segments, breaking where the recording
    * stopped for longer than `segmentGap` — an overnight stop should not draw a
@@ -1026,6 +1804,7 @@ export class SqliteTrackStore implements TrackStore {
     const trim = this.db.prepare('DELETE FROM positions WHERE context = ? AND timestamp < ?')
     for (const { context } of aged) {
       trim.run(context, cutoff)
+      this.invalidateLevels(context, Number.NEGATIVE_INFINITY, cutoff)
     }
     const dropped = aged.filter(({ newest }) => newest < cutoff)
     // A vessel that has aged out takes its name with it, or this table grows
@@ -1037,6 +1816,7 @@ export class SqliteTrackStore implements TrackStore {
       this.lastName.delete(context)
       this.db.prepare('DELETE FROM detail_spans WHERE context = ?').run(context)
       this.detail.delete(context)
+      this.clearLevels(context)
     }
     // The write-throttle map is keyed by context and nothing else clears it, so
     // without this every vessel that ever passed leaves an entry behind — an
@@ -1064,6 +1844,11 @@ export class SqliteTrackStore implements TrackStore {
         this.db.prepare('DELETE FROM positions WHERE timestamp < ?').run(oldest)
       } else {
         this.db.prepare('DELETE FROM positions WHERE timestamp < ? AND context IS ?').run(oldest, keep)
+      }
+      for (const { context, oldest: first } of spans) {
+        if (first < oldest && (keep === undefined || context === keep)) {
+          this.invalidateLevels(context, Number.NEGATIVE_INFINITY, oldest)
+        }
       }
     }
     this.thinOldDetail(now)
@@ -1108,8 +1893,11 @@ export class SqliteTrackStore implements TrackStore {
     const done = this.db.prepare('DELETE FROM detail_spans WHERE id = ?')
     for (const { id, context, start, end } of spans) {
       if (end < cutoff) {
-        thin.run(context, start, end, this.resolution)
+        if (thin.run(context, start, end, this.resolution).changes) {
+          this.invalidateLevels(context, start, end)
+        }
         done.run(id)
+        this.lastThin.delete(id)
         if (this.detail.get(context)?.id === id) {
           this.detail.delete(context)
         }
@@ -1117,7 +1905,14 @@ export class SqliteTrackStore implements TrackStore {
         // The span keeps its start, which is where the stay's spacing is
         // measured from on the next prune.
         const spacing = Math.min(this.resolution, Math.ceil((end - start) / DETAIL_STAY_POINTS / 1000) * 1000)
-        thin.run(context, start, cutoff - 1, spacing)
+        // At the spacing of the last prune, only what has aged since then
+        // can lose rows: the refined days of a long stay are left alone
+        // until the spacing next widens, about once a day.
+        const last = this.lastThin.get(id)
+        if (thin.run(context, start, cutoff - 1, spacing).changes) {
+          this.invalidateLevels(context, last?.spacing === spacing ? last.cutoff : start, cutoff - 1)
+        }
+        this.lastThin.set(id, { spacing, cutoff })
       }
     }
   }
@@ -1216,6 +2011,11 @@ export class SqliteTrackStore implements TrackStore {
     for (const points of segments) {
       for (const { position, timestamp } of points) {
         this.store(context, position, timestamp)
+      }
+      const first = points[0]
+      const last = points.at(-1)
+      if (first !== undefined && last !== undefined) {
+        this.invalidateLevels(context, first.timestamp, last.timestamp)
       }
     }
   }
@@ -1349,6 +2149,11 @@ export class SqliteTrackStore implements TrackStore {
     this.db
       .prepare('DELETE FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?')
       .run(context, lower, to)
+    // Only the days at either end keep positions to refine again; those in
+    // between are empty now, and their significant positions go with them.
+    if (moved > 0) {
+      this.invalidateLevels(context, lower, to)
+    }
     return { id, known }
   }
 
@@ -1440,12 +2245,20 @@ export class SqliteTrackStore implements TrackStore {
       return 'missing'
     }
     if (entry.import_id === null) {
+      const spans = this.db
+        .prepare(
+          'SELECT context, min(timestamp) AS first, max(timestamp) AS last FROM binned_positions WHERE bin_id = ? GROUP BY context',
+        )
+        .all(id) as unknown as { context: string; first: number; last: number }[]
       this.db
         .prepare(
           `INSERT INTO positions (context, timestamp, lat, lon, s2cell)
            SELECT context, timestamp, lat, lon, s2cell FROM binned_positions WHERE bin_id = ?`,
         )
         .run(id)
+      for (const { context, first, last } of spans) {
+        this.invalidateLevels(context, first, last)
+      }
       this.db.prepare('DELETE FROM binned_positions WHERE bin_id = ?').run(id)
     } else {
       if (entry.whole === 1) {
@@ -1648,8 +2461,23 @@ export class SqliteTrackStore implements TrackStore {
           )
         }
       }
+      // What the write did to the level state in memory went with it.
+      this.loadLevels()
       throw error
     }
+  }
+
+  /** The level state as the database holds it, with nothing in progress. */
+  private loadLevels(): void {
+    this.levelFrontier.clear()
+    for (const { context, through } of this.db
+      .prepare('SELECT context, through FROM level_frontier')
+      .all() as unknown as { context: string; through: number }[]) {
+      this.levelFrontier.set(context, through)
+    }
+    this.refinedThrough = undefined
+    this.refineResume = undefined
+    this.refinePartial = undefined
   }
 
   close(): void {

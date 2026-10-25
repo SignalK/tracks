@@ -6,6 +6,7 @@ import type { TrackApi } from './trackApi.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import { createTrackProvider, fillGaps, MIN_FILLED_GAP_MS } from './trackProvider.js'
 import type { TimedPosition } from './types.js'
+import type { TrackProviderDeps } from './trackProvider.js'
 
 /**
  * The plugin as a v2 Track API provider.
@@ -552,6 +553,67 @@ describe('getTracks', () => {
 
   // The points of every AIS target over weeks are what made the list slow:
   // read in the worker, then copied to the main thread only to be counted.
+  it('passes the store the tolerance it simplifies to, and draws the same track once levels are refined', async () => {
+    const debug = Object.assign(() => {}, { enabled: false })
+    const store = new SqliteTrackStore({ file: ':memory:' }, debug)
+    try {
+      const DAY = 24 * 60 * 60 * 1000
+      const day0 = Date.UTC(2026, 5, 1)
+      for (let i = 0; i < 3600; i++) {
+        store.newPosition(
+          SELF_CONTEXT,
+          [60 + Math.sin(i / 400) * 0.002, 24 + i * 0.000005],
+          day0 + 3_600_000 + i * 1000,
+        )
+      }
+      const deps: TrackProviderDeps = {
+        store: () => store,
+        selfContext: () => SELF_CONTEXT,
+        segmentGap: () => 0,
+        contextName: () => undefined,
+        importable: async () => false,
+        deleted: () => undefined,
+        recordedOver: async () => [],
+      }
+      const provider = createTrackProvider(deps)
+      const read = vi.spyOn(store, 'getFilteredTimedTracks')
+      const window = {
+        from: Temporal.Instant.fromEpochMilliseconds(day0),
+        to: Temporal.Instant.fromEpochMilliseconds(day0 + DAY),
+      }
+      const query = { ...window, contexts: [SELF_CONTEXT], epsilon: 20 }
+
+      const positionsRead = async () =>
+        ((await read.mock.results.at(-1)!.value) as Record<string, TimedPosition[]>)[SELF_CONTEXT]!.length
+
+      const before = await provider.getTracks(query)
+      expect(read.mock.calls.at(-1)?.[3]).toMatchObject({ tolerance: 20 })
+      const readBefore = await positionsRead()
+      store.refineLevels(day0 + 3 * DAY)
+      const after = await provider.getTracks(query)
+      expect(await positionsRead()).toBeLessThan(readBefore / 2)
+      expect(after.features[0]!.geometry).toEqual(before.features[0]!.geometry)
+
+      await provider.getTracks({ ...window, contexts: [SELF_CONTEXT] })
+      expect(read.mock.calls.at(-1)?.[3]).not.toHaveProperty('tolerance')
+
+      // Split at pauses, a track is read whole: what a level leaves out is
+      // where its pauses are measured.
+      const segmented = createTrackProvider({ ...deps, segmentGap: () => 5 * 60_000 })
+      await segmented.getTracks(query)
+      expect(read.mock.calls.at(-1)?.[3]).not.toHaveProperty('tolerance')
+
+      // A box matches a track on its points inside unless it clips.
+      const bbox: [number, number, number, number] = [23.9, 59.9, 24.1, 60.1]
+      await provider.getTracks({ ...query, bbox })
+      expect(read.mock.calls.at(-1)?.[3]).not.toHaveProperty('tolerance')
+      await provider.getTracks({ ...query, bbox, clip: true })
+      expect(read.mock.calls.at(-1)?.[3]).toMatchObject({ tolerance: 20 })
+    } finally {
+      store.close()
+    }
+  })
+
   it('lists from summaries, reading no points', async () => {
     const debug = Object.assign(() => {}, { enabled: false })
     const store = new SqliteTrackStore({ file: ':memory:' }, debug)
