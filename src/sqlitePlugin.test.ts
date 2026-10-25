@@ -287,14 +287,3 @@ describe('the own vessel at anchor', () => {
     }
   })
 })
-
-// A track recorder is only useful if it is recording. Installing it and then
-// having to find and enable it loses exactly the passage the user installed it
-// for, so the descriptor says so and this pins it.
-describe('the plugin descriptor', () => {
-  it('is enabled by default on install', () => {
-    const { app } = createApp(dir)
-
-    expect(ThePlugin(app).enabledByDefault).toBe(true)
-  })
-})

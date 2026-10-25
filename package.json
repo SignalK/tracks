@@ -19,6 +19,8 @@
     "docs",
     "public"
   ],
+  "//signalk-plugin-enabled-by-default": "Signal K enables a plugin on install only from this flag; the plugin object's own enabledByDefault just marks it enabled in the Admin UI without starting it. A track recorder that records nothing until someone finds and enables it loses exactly the passage the user wanted kept.",
+  "signalk-plugin-enabled-by-default": true,
   "signalk": {
     "displayName": "Tracks",
     "appIcon": "./app-icon.svg",

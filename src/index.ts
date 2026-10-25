@@ -180,8 +180,6 @@ interface App {
 
 interface Plugin {
   start: (c: TracksPluginConfig) => void | Promise<void>
-  /** Enable on install, without waiting for a visit to the plugin config page. */
-  enabledByDefault: boolean
   stop: () => Promise<void>
   signalKApiRoutes: (r: Router) => Router
   registerWithRouter: (r: Router) => Router
@@ -1862,9 +1860,6 @@ export default function ThePlugin(app: App): Plugin {
 
     id: PLUGIN_ID,
     name: 'Tracks',
-    // On by default: a track recorder that records nothing until someone finds
-    // and enables it loses exactly the passage the user wanted kept.
-    enabledByDefault: true,
     description: 'Record vessel tracks to SQLite and serve them through the track API',
     schema: {
       type: 'object',
