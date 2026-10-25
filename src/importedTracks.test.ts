@@ -268,6 +268,23 @@ describe('imported tracks through the Track API', () => {
     }
   })
 
+  it('matches and clips to a box that a line of the track runs through between two points', async () => {
+    const h = createHarness()
+    try {
+      const provider = providerOf(h)
+      await provider.storeTrack(passage())
+      const across = await provider.getTracks({ ...day, bbox: [24.94, 60.13, 24.96, 60.17], clip: true })
+      expect(across.features[0]!.geometry?.coordinates).toEqual([
+        [
+          [24.9, 60.1],
+          [25.0, 60.2],
+        ],
+      ])
+    } finally {
+      await h.stop()
+    }
+  })
+
   it('applies the point budget to a track without times', async () => {
     const h = createHarness()
     try {

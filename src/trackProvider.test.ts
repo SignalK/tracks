@@ -396,6 +396,25 @@ describe('getTracks', () => {
     }
   })
 
+  it('matches a track that crosses the box between two fixes outside it', async () => {
+    const h = createHarness()
+    try {
+      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [59, 23],
+          [62, 26],
+        ],
+        [t0, t0 + 60_000],
+      )
+      const res = await providerOf(h).getTracks({ bbox: [24, 60, 25, 61], contexts: [SELF_CONTEXT] })
+      expect(res.features.map((f) => f.properties.pointCount)).toEqual([2])
+    } finally {
+      await h.stop()
+    }
+  })
+
   // A budget, not a fidelity contract: the spacing widens until the count fits,
   // and the response reports what was actually applied so a client can see it.
   it('applies maxPoints and reports the resolution used', async () => {
@@ -941,11 +960,16 @@ describe('positions only a history provider holds', () => {
       // The store holds only positions outside the box, later than history's.
       h.seedTrack(SELF_CONTEXT, [[50, 10]], [t0 + 30 * MINUTE])
       const res = await providerOf(h).getTracks({ ...window, bbox, clip: true })
+      // The line on to the stored position runs back through the box.
       expect(res.features[0]!.geometry!.coordinates).toEqual([
         [
           [23, 59],
           [24.5, 60.5],
           [26, 62],
+        ],
+        [
+          [26, 62],
+          [10, 50],
         ],
       ])
     } finally {

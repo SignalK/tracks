@@ -24,7 +24,7 @@ import type {
   TimeWindow,
   TrackSummary,
 } from './types.js'
-import { clipToBounds, createInBounds, longitudeSpan, toIsoTimes } from './utils.js'
+import { clipToBounds, createReachesBounds, longitudeSpan, toIsoTimes } from './utils.js'
 
 /**
  * Serves the v2 Track API from this plugin's store.
@@ -262,7 +262,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     const fromHistory = [...(listed ?? [])].filter(
       (context) => !(context in collection) && (!wanted || wanted.includes(context)),
     )
-    const inBounds = bounds ? createInBounds(bounds) : undefined
+    const reaches = bounds ? createReachesBounds(bounds) : undefined
     const storedFor = async (context: string): Promise<TimedPosition[]> => {
       const points = await store.getTimed(context, window).catch(() => [])
       return bounds ? points : thin(points, resolution)
@@ -306,7 +306,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     for (const [context, reconciledPoints] of reconciled) {
       // History can replace the stored point that put a context in the box,
       // so the match is decided on the reconciled track for every context.
-      if (inBounds && !reconciledPoints.some(({ position }) => inBounds(position))) {
+      if (reaches && !reaches(reconciledPoints)) {
         continue
       }
       // Clipped after reconciling, because history positions come for the
@@ -377,8 +377,9 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
    *
    * The same filters as a recorded track, applied to the import's own points:
    * a context names the vessel it was imported for, a window needs times, a
-   * box needs a point inside it and clips like a recorded track. Never
-   * reconciled with history, which knows nothing of an import.
+   * box needs a point inside it or a line through it and clips like a
+   * recorded track. Never reconciled with history, which knows nothing of an
+   * import.
    */
   const matchingImports = async (
     query: TracksRequest,
@@ -391,7 +392,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     const resolution = query.resolution ? totalMilliseconds(query.resolution) : undefined
     const bounds = toGeoBounds(query.bbox)
     const clipTo = query.clip === true ? bounds : null
-    const inBounds = bounds ? createInBounds(bounds) : undefined
+    const reaches = bounds ? createReachesBounds(bounds) : undefined
     const imports = await store.findImports({
       ...(query.contexts?.length
         ? { contexts: [...new Set(query.contexts.map(resolveSelf(deps.selfContext())))] }
@@ -403,7 +404,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     for (const track of imports) {
       const timed = isTimed(track)
       // Matched on the points inside the window, as a recorded track is.
-      if (inBounds && !positionsOf(track, null, window).some(({ position }) => inBounds(position))) {
+      if (reaches && !reaches(positionsOf(track, null, window))) {
         continue
       }
       let points = positionsOf(track, clipTo, window)

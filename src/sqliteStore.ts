@@ -116,6 +116,8 @@ interface PositionRow {
 /** A row with its rowid, which tells apart two fixes sharing a timestamp. */
 interface NumberedRow extends PositionRow {
   id: number
+  /** Read apart from the row before it, with what lay between left out. */
+  breakBefore?: boolean
 }
 
 interface BinRow {
@@ -718,7 +720,12 @@ export class SqliteTrackStore implements TrackStore {
       contexts.map((context) => {
         const rows = near?.get(context)
         const read = rows
-          ? Promise.resolve(thin(rows.map(toTimed), query?.resolution))
+          ? Promise.resolve(
+              thin(
+                rows.map((row) => (row.breakBefore ? { ...toTimed(row), breakBefore: true } : toTimed(row))),
+                query?.resolution,
+              ),
+            )
           : this.getTimed(context, query?.window, query?.resolution)
         return read.then((points) => ({ context, points }))
       }),
@@ -856,8 +863,8 @@ export class SqliteTrackStore implements TrackStore {
     bounds: GeoBounds,
     window?: TimeWindow,
     contexts?: ReadonlySet<Context>,
-  ): Map<Context, PositionRow[]> {
-    const near = new Map<Context, PositionRow[]>()
+  ): Map<Context, NumberedRow[]> {
+    const near = new Map<Context, NumberedRow[]>()
     const clause = this.coveringClause(bounds)
     if (!clause) {
       return near
@@ -901,19 +908,34 @@ export class SqliteTrackStore implements TrackStore {
       `${columns} AND timestamp < ?${inWindow} ORDER BY timestamp DESC, rowid DESC LIMIT 1`,
     )
     const after = this.db.prepare(`${columns} AND timestamp > ?${inWindow} ORDER BY timestamp, rowid LIMIT 1`)
+    // The row after one in the order rows are kept: by time, then by row
+    // among those recorded at the same time.
+    const sameTime = this.db.prepare(`${columns} AND timestamp = ? AND rowid > ? ORDER BY rowid LIMIT 1`)
+    const nextAfter = (row: NumberedRow) =>
+      (sameTime.get(row.context, row.timestamp, row.id) ??
+        after.get(row.context, row.timestamp, ...timeParams)) as unknown as NumberedRow | undefined
     for (const [context, list] of times) {
       const rows = new Map<number, NumberedRow>()
+      let last: NumberedRow | undefined
       for (const [start, end] of stretchesOf(list, this.stretchGap)) {
         const read = [
           ...(before.all(context, start, ...timeParams) as unknown as NumberedRow[]),
           ...(between.all(context, start, end) as unknown as NumberedRow[]),
           ...(after.all(context, end, ...timeParams) as unknown as NumberedRow[]),
         ]
+        // A stretch read apart from the one before leaves out what was
+        // recorded between them. Marked, so the clip draws no line from one
+        // to the other: across the box, it would be one never sailed.
+        const first = read[0]
+        if (last && first && !rows.has(first.id) && nextAfter(last)?.id !== first.id) {
+          first.breakBefore = true
+        }
         // Keyed by row: where nothing was recorded between two stretches, one's
         // neighbour is the other's first or last row.
         for (const row of read) {
           rows.set(row.id, row)
         }
+        last = read.at(-1)
       }
       near.set(
         context,
