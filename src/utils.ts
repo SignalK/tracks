@@ -572,3 +572,74 @@ export const longitudeSpanOf = ({
   }
   return undefined
 }
+
+/**
+ * The shortest stretch without positions that an import kept beside a
+ * recording may fill. Filling every pause between recorded points would
+ * interleave two sources minute by minute, and any offset between them would
+ * draw as a sawtooth; whole stretches keep each part of the line from one.
+ */
+export const MIN_FILLED_GAP_MS = 5 * 60_000
+
+/**
+ * The parts of an import that fall where a recording has nothing for at least
+ * `minGap`, as runs to record, and how many points were left out.
+ *
+ * Each recorded point covers its own instant, or a history bucket's whole
+ * span, so a coarse provider read still counts as covering the time between
+ * its buckets. A run never crosses a recorded stretch or a segment boundary.
+ */
+export function fillGaps(
+  segments: TimedPosition[][],
+  recorded: readonly Pick<TimedPosition, 'timestamp' | 'span'>[],
+  minGap: number,
+): { runs: TimedPosition[][]; overlapping: number } {
+  const covered: [number, number][] = []
+  for (const { timestamp, span } of [...recorded].sort((a, b) => a.timestamp - b.timestamp)) {
+    const end = timestamp + (span ?? 0)
+    const last = covered.at(-1)
+    if (last && timestamp <= last[1]) {
+      last[1] = Math.max(last[1], end)
+    } else {
+      covered.push([timestamp, end])
+    }
+  }
+  /** Index of the first covered stretch ending at or after `time`. */
+  const nextStretch = (time: number): number => {
+    let low = 0
+    let high = covered.length
+    while (low < high) {
+      const mid = (low + high) >> 1
+      if (covered[mid]![1] < time) low = mid + 1
+      else high = mid
+    }
+    return low
+  }
+  const runs: TimedPosition[][] = []
+  let overlapping = 0
+  for (const points of segments) {
+    let run: TimedPosition[] = []
+    let runGap = -1
+    for (const point of points) {
+      const next = nextStretch(point.timestamp)
+      const after = covered[next]
+      const before = covered[next - 1]
+      const inside = after !== undefined && after[0] <= point.timestamp
+      const free = (after?.[0] ?? Infinity) - (before?.[1] ?? -Infinity)
+      if (inside || free < minGap) {
+        overlapping += 1
+        if (run.length > 0) runs.push(run)
+        run = []
+        continue
+      }
+      if (run.length > 0 && next !== runGap) {
+        runs.push(run)
+        run = []
+      }
+      run.push(point)
+      runGap = next
+    }
+    if (run.length > 0) runs.push(run)
+  }
+  return { runs, overlapping }
+}
