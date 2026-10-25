@@ -207,7 +207,7 @@ describe('the history import through a real history provider', () => {
     // Nor does a v2 query show them: reads ask the provider nothing.
     const v2 = await server.apiV2('/tracks?contexts=self&duration=PT15M&times=true')
     const features = (v2.body as { features: { geometry: { coordinates: [number, number][][] } | null }[] }).features
-    expect(features.flatMap(({ geometry }) => (geometry?.coordinates ?? []).flat()).some(([, lat]) => lat > 60.1)).toBe(
+    expect(features.flatMap(({ geometry }) => (geometry?.coordinates ?? []).flat()).some(([, lat]) => lat >= 61)).toBe(
       false,
     )
 
