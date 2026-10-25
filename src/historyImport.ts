@@ -1,5 +1,5 @@
 import { outsideSpans } from './recycleBin.js'
-import { fillGaps, MIN_FILLED_GAP_MS } from './trackProvider.js'
+import { fillGaps, MIN_FILLED_GAP_MS } from './utils.js'
 import type { DeletedSpan, HistoryImportState, TimedPosition } from './types.js'
 
 /**
