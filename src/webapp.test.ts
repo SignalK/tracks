@@ -1287,6 +1287,25 @@ describe('the history import section', () => {
     expect(fetch).toHaveBeenCalledTimes(4)
   })
 
+  // Between stop() and the next start() the route answers 404, as on a
+  // config save; the progress shown must not freeze there.
+  it('keeps following an import across a refused answer', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { status } = page()
+    const answers = [
+      answer(200, { provider: true, state: running }),
+      answer(404, { message: 'Tracks API not available because tracks plugin is not enabled' }),
+      answer(200, { provider: true, state: { ...running, running: false, finishedAt: running.startedAt } }),
+    ]
+    const fetch = vi.fn(() => Promise.resolve(answers.shift()))
+    vi.stubGlobal('fetch', fetch)
+    await startHistory()
+    await vi.advanceTimersByTimeAsync(POLL_MS)
+    await vi.advanceTimersByTimeAsync(POLL_MS)
+    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(status.textContent).toMatch(/^Imported on /)
+  })
+
   it('says why a start was refused, and allows another', async () => {
     const { status, button, click } = page()
     const answers = [

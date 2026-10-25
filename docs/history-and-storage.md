@@ -135,8 +135,8 @@ started; live recording covers the time after that.
   plugin recorded itself stays as it is, and a day it recorded whole asks the
   provider nothing.
 - **Coarse, then fine.** A provider answers every bucket of a range, empty ones
-  too, so a day at a second is 86,400 rows whether it holds a passage or
-  nothing. The stretches to fill are first read in ten-minute buckets, and
+  too, so a whole day read at a second would be 86,400 rows whether it held a
+  passage or nothing. The stretches to fill are first read in ten-minute buckets, and
   then a second at a time only where those found positions.
 - **Deleted stays deleted.** A span deleted from the recording is left out,
   including one deleted while the day was being read. A delete of the own
