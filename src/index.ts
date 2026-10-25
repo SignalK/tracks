@@ -1310,8 +1310,9 @@ export default function ThePlugin(app: App): Plugin {
         Promise.all([historyProviderAvailable(app), store.historyImport(app.selfContext)])
           .then(([provider, stored]) => {
             const run = historyImport
-            // The run's own state is the newer one while it writes a day.
-            const state = run?.running ? run.state : stored
+            // The run's own state is the newer one while it writes a day, and
+            // the only one with the error when the store could not save it.
+            const state = run ? run.state : stored
             res.json({ provider, ...(state ? { state: historyImportJson(state, run?.running === true) } : {}) })
           })
           .catch(importFailed(res))
