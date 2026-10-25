@@ -79,6 +79,18 @@ describe('the history import route', () => {
     )
   })
 
+  it('starts where history does, past a row without a usable time', async () => {
+    await withHarness(
+      async (h) => {
+        await request(h.app).post('/plugins/tracks/history-import')
+        const state = await finished(h)
+        expect(state.filled).toBe(7200)
+        expect(Date.parse(String(state.firstDay))).toBeGreaterThan(from - 30 * DAY_MS)
+      },
+      { history: { ...history, rows: [['not a time', [24, 60]], ...rows] } },
+    )
+  })
+
   it('fills nothing more when started again', async () => {
     await withHarness(
       async (h) => {

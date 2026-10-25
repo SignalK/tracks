@@ -919,12 +919,14 @@ const historyRows = (response: HistoryValuesResponse | undefined, seconds: numbe
   const parsed: TimedPosition[] = []
   for (const row of response?.data ?? []) {
     const position = historyRowPosition(row)
+    const timestamp = historyRowTimestamp(row)
     // A row with no position means the provider had none for that bucket,
-    // which is what lets the store fill it.
-    if (position) {
+    // which is what lets the store fill it. One without a usable time cannot
+    // be placed, and dated to the epoch it would start an import there.
+    if (position && timestamp > 0) {
       // A bucket, not a fix: its width keeps segment() from reading the
       // spacing between buckets as a stop in the recording.
-      parsed.push({ position, timestamp: historyRowTimestamp(row), span: seconds * 1000 })
+      parsed.push({ position, timestamp, span: seconds * 1000 })
     }
   }
   return parsed
