@@ -115,6 +115,28 @@ describe('the history import route', () => {
     )
   })
 
+  it('reports why it stopped when the store could not save that either', async () => {
+    await withHarness(
+      async (h) => {
+        const store = h.store()!
+        const save = store.saveHistoryImport!.bind(store)
+        let broken = false
+        vi.spyOn(store, 'saveHistoryImport').mockImplementation((state, runs) => {
+          broken ||= runs.some((run) => run.length > 0)
+          return broken ? Promise.reject(new Error('database or disk is full')) : save(state, runs)
+        })
+        await request(h.app).post('/plugins/tracks/history-import')
+        await vi.waitFor(
+          async () => {
+            expect((await importState(h)).state).toMatchObject({ running: false, error: 'database or disk is full' })
+          },
+          { timeout: 20_000, interval: 50 },
+        )
+      },
+      { history },
+    )
+  })
+
   it('offers nothing to import from without a history provider', async () => {
     await withHarness(
       async (h) => {
