@@ -1370,10 +1370,12 @@ describe('detail at anchor', () => {
     try {
       const now = Date.now()
       const from = now - 30 * DAY
+      // One stay: ten minutes at anchor, six without a fix, ten more.
       anchored(store, from)
+      anchored(store, from + 16 * MINUTE)
       const filled = Array.from({ length: 120 }, (_, i) => ({
         position: [61, 25 + i * 1e-6] as [number, number],
-        timestamp: from + 4 * MINUTE + i * 1000,
+        timestamp: from + 12 * MINUTE + i * 1000,
       }))
       store.saveHistoryImport({ context: self, startedAt: now, filled: 120 }, [filled])
       store.prune(Infinity, self, now)
@@ -2111,6 +2113,9 @@ describe('imported tracks', () => {
 })
 
 describe('history import', () => {
+  const MINUTE = 60_000
+  const DAY_MS = 24 * 60 * MINUTE
+
   it('keeps how far an import got, and what it filled, across a reopen', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-history-import-'))
     const file = join(dir, 'tracks.db')
@@ -2143,15 +2148,78 @@ describe('history import', () => {
 
   it('bins nothing where it fills', async () => {
     const store = newStore()
-    store.newPosition(ctx, [59, 23], 1500)
-    store.saveHistoryImport({ context: ctx, startedAt: 5000, filled: 2 }, [
+    store.newPosition(ctx, [59, 23], 10 * MINUTE)
+    store.saveHistoryImport({ context: ctx, startedAt: 20 * MINUTE, filled: 2 }, [
       [
         { position: [60, 24], timestamp: 1000 },
         { position: [60, 24.001], timestamp: 2000 },
       ],
     ])
-    expect((await store.getTimed(ctx)).map(({ timestamp }) => timestamp)).toEqual([1000, 1500, 2000])
+    expect((await store.getTimed(ctx)).map(({ timestamp }) => timestamp)).toEqual([1000, 2000, 10 * MINUTE])
     expect(store.binEntries()).toEqual([])
+    store.close()
+  })
+
+  /** History at one fix a second over `[from, to)`, in buckets a second wide. */
+  const seconds = (from: number, to: number): TimedPosition[] =>
+    Array.from({ length: (to - from) / 1000 }, (_, i) => ({
+      position: [60, 24 + i * 1e-5] as LatLngTuple,
+      timestamp: from + i * 1000,
+      span: 1000,
+    }))
+
+  it('leaves out, and does not count, what a write into the gap took while the provider was read', async () => {
+    const store = newStore()
+    const start = 10 * 60 * MINUTE
+    store.newPosition(ctx, [60, 24], start)
+    store.newPosition(ctx, [60, 24.01], start + 10 * MINUTE)
+    const run = seconds(start + 1000, start + 10 * MINUTE)
+    // A GPX import keeps a fix four and a half minutes in: the stretch before
+    // it is too short to fill now, the one after is still long enough.
+    const gpx = start + 4.5 * MINUTE
+    store.recordTrack(ctx, [[{ position: [60.001, 24.005], timestamp: gpx }]], 9000, false)
+    const state = { context: ctx, startedAt: start + DAY_MS, filled: 1000 + run.length }
+    const kept = run.filter(({ timestamp }) => timestamp > gpx)
+    expect(store.saveHistoryImport(state, [run])).toBe(1000 + kept.length)
+    expect(store.historyImport(ctx)?.filled).toBe(1000 + kept.length)
+    expect((await store.getTimed(ctx)).map(({ timestamp }) => timestamp)).toEqual([
+      start,
+      gpx,
+      ...kept.map(({ timestamp }) => timestamp),
+      start + 10 * MINUTE,
+    ])
+    store.close()
+  })
+
+  it('does not count what the import wrote before since against what it goes on filling', async () => {
+    const midnight = DAY_MS
+    for (const since of [midnight, undefined]) {
+      const store = newStore()
+      store.saveHistoryImport({ context: ctx, startedAt: 2 * DAY_MS, filled: 300 }, [
+        seconds(midnight - 5 * MINUTE, midnight),
+      ])
+      store.newPosition(ctx, [60, 24.01], midnight + 3 * MINUTE)
+      const run = seconds(midnight, midnight + 3 * MINUTE)
+      const filled = store.saveHistoryImport(
+        { context: ctx, startedAt: 2 * DAY_MS, filled: 300 + run.length },
+        [run],
+        since,
+      )
+      // Counted against it, the stretch after midnight is three minutes long.
+      expect(filled).toBe(since === undefined ? 300 : 300 + run.length)
+      store.close()
+    }
+  })
+
+  it('leaves out a bucket that reaches into a span deleted while the provider was read', async () => {
+    const store = newStore()
+    const run = seconds(0, 60_000)
+    store.binRecorded(ctx, 10_500, 20_000, 9000, true)
+    store.saveHistoryImport({ context: ctx, startedAt: DAY_MS, filled: run.length }, [run])
+    const times = (await store.getTimed(ctx)).map(({ timestamp }) => timestamp)
+    expect(times).not.toContain(10_000)
+    expect(times).toContain(9000)
+    expect(times).toContain(21_000)
     store.close()
   })
 

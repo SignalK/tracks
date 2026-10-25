@@ -78,8 +78,9 @@ function fakeStore(recorded: TimedPosition[] = [], deleted: DeletedSpan[] = []) 
       }
       saved.push(state)
       if (points.length > 0) writes.push({ nextDay: state.nextDay, count: points.length })
-      written.push(...points)
-      return Promise.resolve()
+      // As a store holds them, without the bucket's width.
+      written.push(...points.map(({ position, timestamp }) => ({ position, timestamp })))
+      return Promise.resolve(state.filled)
     },
   }
   return {
@@ -316,6 +317,23 @@ describe('runHistoryImport', () => {
     // Everything but the two instants the recording has.
     expect(times.size).toBe(held.length - 2)
     expect(times.has(midnight + MINUTE)).toBe(true)
+  })
+
+  it('hands the save each bucket with its width, and where a stretch across midnight began', async () => {
+    const midnight = day0 + DAY_MS
+    const { history } = fakeHistory(fixes(midnight - 10 * MINUTE, midnight + 10 * MINUTE))
+    const store = fakeStore()
+    const saves: { runs: TimedPosition[][]; since: number | undefined }[] = []
+    const save: HistoryImportDeps['save'] = (state, runs, since) => {
+      if (runs.length > 0) saves.push({ runs, since })
+      return store.deps.save(state, runs, since)
+    }
+    await runHistoryImport(begin(day0 + 2 * DAY_MS), { ...store.deps, save, history, stopped: () => false })
+    // The empty days the import starts with carry their stretch into the first.
+    expect(saves.map(({ since }) => since)).toEqual([day0, midnight])
+    const points = saves.flatMap(({ runs }) => runs.flat())
+    expect(points).toHaveLength(20 * 60)
+    expect(points.every(({ span }) => span === FINEST_SECONDS * 1000)).toBe(true)
   })
 
   it('fills after midnight what the stretch across it leaves, though nothing filled it before', async () => {

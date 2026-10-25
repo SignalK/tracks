@@ -133,9 +133,9 @@ describe('the history import route', () => {
         const store = h.store()!
         const save = store.saveHistoryImport!.bind(store)
         let broken = false
-        vi.spyOn(store, 'saveHistoryImport').mockImplementation((state, runs) => {
+        vi.spyOn(store, 'saveHistoryImport').mockImplementation((state, runs, since) => {
           broken ||= runs.some((run) => run.length > 0)
-          return broken ? Promise.reject(new Error('database or disk is full')) : save(state, runs)
+          return broken ? Promise.reject(new Error('database or disk is full')) : save(state, runs, since)
         })
         await request(h.app).post('/plugins/tracks/history-import')
         await vi.waitFor(

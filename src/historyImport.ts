@@ -27,8 +27,14 @@ export interface HistoryImportDeps {
   stored: (from: number, to: number) => Promise<TimedPosition[]>
   /** The spans deleted from the recording. */
   deleted: () => Promise<DeletedSpan[]>
-  /** Write a day's runs into the recording together with the state they bring it to. */
-  save: (state: HistoryImportState, runs: TimedPosition[][]) => Promise<void>
+  /**
+   * Write a day's runs into the recording together with the state they bring
+   * it to, resolving to how many positions the import has filled: fewer than
+   * the state says when the recording took a gap meanwhile. Positions before
+   * `since` are what the import wrote the day before, and do not count
+   * against the runs.
+   */
+  save: (state: HistoryImportState, runs: TimedPosition[][], since?: number) => Promise<number>
   /** Whether to stop before the next day, as the plugin does when it stops. */
   stopped: () => boolean
   /** Told of the state after each day. */
@@ -174,8 +180,11 @@ export async function importDay(
   // Asked after the provider, whose reads can take minutes: a span deleted
   // meanwhile stays deleted too.
   const visible = outsideSpans(points, await deps.deleted()).sort((a, b) => a.timestamp - b.timestamp)
+  // With each bucket's width, by which the save finds a span deleted meanwhile.
   const runs = fillGaps([visible], stored, MIN_FILLED_GAP_MS).runs.map((run) =>
-    run.map(({ position, timestamp }) => ({ position, timestamp })),
+    run.map(({ position, timestamp, span }) =>
+      span === undefined ? { position, timestamp } : { position, timestamp, span },
+    ),
   )
   return { runs, inGap: goesOn }
 }
@@ -215,9 +224,8 @@ export async function runHistoryImport(
   // tried again.
   let current: HistoryImportState = { ...state }
   delete current.error
-  const advance = async (next: HistoryImportState, runs: TimedPosition[][] = []) => {
-    await deps.save(next, runs)
-    current = next
+  const advance = async (next: HistoryImportState, runs: TimedPosition[][] = [], since?: number) => {
+    current = { ...next, filled: await deps.save(next, runs, since) }
     deps.progress?.(current)
   }
   try {
@@ -242,7 +250,7 @@ export async function runHistoryImport(
         filled: current.filled + day.runs.reduce((sum, run) => sum + run.length, 0),
       }
       delete next.inGap
-      await advance(day.inGap ? { ...next, inGap: true } : next, day.runs)
+      await advance(day.inGap ? { ...next, inGap: true } : next, day.runs, current.inGap === true ? from : undefined)
     }
     await advance({ ...current, finishedAt: now() })
     return current

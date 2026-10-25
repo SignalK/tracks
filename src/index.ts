@@ -1126,7 +1126,7 @@ export default function ThePlugin(app: App): Plugin {
           )
         )[state.context] ?? [],
       deleted: () => deletedSpansOf(state.context),
-      save: async (next, runs) => store.saveHistoryImport!(next, runs),
+      save: async (next, runs, since) => store.saveHistoryImport!(next, runs, since),
       // A restart replaces the store, and the new one goes on by itself.
       stopped: () => run.stop || tracks !== store,
       progress: (next) => {
