@@ -92,8 +92,11 @@ export function start() {
       if (!section.hidden) timer = setTimeout(load, POLL_MS)
       return
     }
-    // Refused to anyone but an administrator, who alone can start it.
+    // Refused to anyone but an administrator, who alone can start it. Shown
+    // already, the section is following an import, and a plugin restart or a
+    // storage error must not freeze its progress.
     if (!response.ok) {
+      if (!section.hidden) timer = setTimeout(load, POLL_MS)
       return
     }
     let body
