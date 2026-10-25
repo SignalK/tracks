@@ -1404,7 +1404,9 @@ export class SqliteTrackStore implements TrackStore {
         // level keeps between them, as rowsNearBounds() marks it.
         const first =
           entry ?? [...rows.values()].slice(earlier).sort((a, b) => a.timestamp - b.timestamp || a.id - b.id)[0]
-        if (last && first && later(first, last) && neighbour(last.timestamp, false)?.id !== first.id) {
+        // Recorded at the same time as the last, it follows it: the seek
+        // past that time would step over it.
+        if (last && first && first.timestamp > last.timestamp && neighbour(last.timestamp, false)?.id !== first.id) {
           first.breakBefore = true
         }
         last = exit ?? last

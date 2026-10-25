@@ -732,6 +732,32 @@ describe('significance levels', () => {
     store.close()
   })
 
+  it('takes two positions kept at the same time for the line they are, between two stretches read by level', async () => {
+    const store = newStore()
+    // Out to the east and, at the same time, to the west: the line between
+    // the two runs through the box, and nothing is kept between them.
+    const positions: LatLngTuple[] = [
+      [60.5, 24.5],
+      [60.5, 25.5],
+      [60.5, 23.5],
+      [60.5, 24.4],
+    ]
+    // A day from the hours inside, so each is the next kept beside a stretch.
+    const times = [day0, day0 + DAY, day0 + DAY, day0 + 2 * DAY]
+    positions.forEach((position, i) => store.newPosition(ctx, position, times[i]!))
+    store.refineLevels(day0 + 6 * DAY)
+    store.refineLevels(day0 + 6 * DAY)
+    const box: GeoBounds = { sw: [60, 24], ne: [61, 25] }
+    const window: TimeWindow = { from: day0, to: day0 + 5 * DAY }
+    const params = { bbox: box, radius: null, intersects: true, clip: true, contexts: [ctx] }
+    const read = (await store.getFilteredTimedTracks(params, undefined, undefined, { window, tolerance: 20 }))[ctx]!
+    const kept = await store.getTimed(ctx, window, undefined, 20)
+    expect(levels(store, day0, day0 + 3 * DAY)).not.toEqual([])
+    expect(read).toHaveLength(4)
+    expect(clipToBounds(read, box)).toEqual(clipToBounds(kept, box))
+    store.close()
+  })
+
   it('reads a box for a named vessel at a tolerance from both, where only some days are refined', async () => {
     const store = newStore()
     seedHour(store, day0 + 60 * MINUTE)
