@@ -908,6 +908,12 @@ export class SqliteTrackStore implements TrackStore {
       `${columns} AND timestamp < ?${inWindow} ORDER BY timestamp DESC, rowid DESC LIMIT 1`,
     )
     const after = this.db.prepare(`${columns} AND timestamp > ?${inWindow} ORDER BY timestamp, rowid LIMIT 1`)
+    // The row after one in the order rows are kept: by time, then by row
+    // among those recorded at the same time.
+    const sameTime = this.db.prepare(`${columns} AND timestamp = ? AND rowid > ? ORDER BY rowid LIMIT 1`)
+    const nextAfter = (row: NumberedRow) =>
+      (sameTime.get(row.context, row.timestamp, row.id) ??
+        after.get(row.context, row.timestamp, ...timeParams)) as unknown as NumberedRow | undefined
     for (const [context, list] of times) {
       const rows = new Map<number, NumberedRow>()
       let last: NumberedRow | undefined
@@ -921,11 +927,8 @@ export class SqliteTrackStore implements TrackStore {
         // recorded between them. Marked, so the clip draws no line from one
         // to the other: across the box, it would be one never sailed.
         const first = read[0]
-        if (last && first && !rows.has(first.id)) {
-          const next = after.get(context, last.timestamp, ...timeParams) as unknown as NumberedRow | undefined
-          if (next?.id !== first.id) {
-            first.breakBefore = true
-          }
+        if (last && first && !rows.has(first.id) && nextAfter(last)?.id !== first.id) {
+          first.breakBefore = true
         }
         // Keyed by row: where nothing was recorded between two stretches, one's
         // neighbour is the other's first or last row.
