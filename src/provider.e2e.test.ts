@@ -3,26 +3,21 @@ import { questdbAvailable, startServer, QUESTDB_URL } from './e2e.test-utils.js'
 import type { E2EServer } from './e2e.test-utils.js'
 
 /**
- * The History API bootstrap, against a real history provider.
+ * A real history provider, for the history import and for the reads that
+ * leave it alone.
  *
- * `source: 'history'` refills the own vessel's track at startup by calling
- * `app.getHistoryApi()` and reading `getValues()`. The unit suite stubs that
- * call, which proves the parsing but not that a real provider's responses fit
- * it — and every bootstrap bug this repo has had was a mismatch there, not in
- * the parsing.
- *
- * So this installs signalk-questdb into the server and lets the plugin
- * bootstrap through it for real. What matters is the History API contract:
- * how the provider stores anything is its own business, and this must keep
+ * The import reads the provider through `app.getHistoryApi()`; the unit suite
+ * stubs that call, which proves the parsing but not that a real provider's
+ * answers fit it. So this installs signalk-questdb into the server and lets
+ * the import run through it. What matters is the History API contract: how
+ * the provider stores anything is its own business, and this must keep
  * passing across any change to that.
  *
  * Skips when no QuestDB is listening.
  *
- * Note the first test carries the others: an empty track looks identical
- * whether the provider is missing or simply has no data for the window, so
- * without an explicit check that the registry is populated the rest would pass
- * against a server with no provider at all. Verified by removing the provider
- * and confirming that test — and only that test — fails.
+ * Note the first test carries the others: a provider with no data looks
+ * like no provider at all, so without an explicit check that the registry is
+ * populated the rest could pass against a server with none.
  */
 
 const MINUTE = 60_000
@@ -90,7 +85,7 @@ afterAll(async () => {
   await server?.stop()
 })
 
-describe('bootstrap through a real history provider', () => {
+describe('a server with a real history provider', () => {
   it('registers a history provider the plugin can resolve', async () => {
     if (!available || !server) return
     // getHistoryApi() resolves through the server's history registry, so a
@@ -120,10 +115,9 @@ describe('bootstrap through a real history provider', () => {
     expect(contexts?.length).toBeGreaterThan(0)
   })
 
-  it('serves a track for the own vessel after bootstrap', async () => {
+  it('serves a track for the own vessel', async () => {
     if (!available || !server) return
-    // Positions fed live still have to arrive; bootstrap must not leave the
-    // accumulator in a state that rejects them.
+    // Positions fed live still have to arrive with a provider installed.
     const t0 = Date.now() - 5 * MINUTE
     await server.feed(server.selfContext, [60.1, 24.9], t0)
     await server.feed(server.selfContext, [60.11, 24.91], t0 + MINUTE)
@@ -133,11 +127,10 @@ describe('bootstrap through a real history provider', () => {
     expect(track.coordinates.flat().length).toBeGreaterThan(0)
   })
 
-  it('keeps timestamps usable on a bootstrapped track', async () => {
+  it('keeps timestamps usable on the track', async () => {
     if (!available || !server) return
-    // The bootstrap dates each point from the provider's response. If those
-    // times were dropped the points would look infinitely old and a windowed
-    // query would return nothing.
+    // If the times were dropped the points would look infinitely old and a
+    // windowed query would return nothing.
     const track = (await server.api(`${SELF_PATH}?times&duration=1d`)) as TrackResponse
     expect(track.times).toBeDefined()
     for (const segment of track.times ?? []) {
@@ -147,33 +140,10 @@ describe('bootstrap through a real history provider', () => {
     }
   })
 
-  // The plugin has two entry points into the same data. Both must reconcile
-  // with the history provider, or a client moving from v1 to v2 silently loses
-  // every point the provider held and the store did not.
-  it('serves history through the v2 Track API as well as v1', async () => {
-    if (!available || !server) return
-    const t0 = Date.now() - 5 * MINUTE
-    await server.feed(server.selfContext, [60.2, 25.0], t0)
-
-    const v1 = (await server.api(`${SELF_PATH}?duration=1d`)) as TrackResponse
-    const v2 = await server.apiV2(`/tracks?contexts=self&duration=P1D`)
-
-    const v1Points = v1.coordinates.flat().length
-    const feature = (v2.body as { features: { properties: { pointCount: number } }[] }).features[0]
-
-    expect(v2.status).toBe(200)
-    expect(feature).toBeDefined()
-    // Not asserting equality: the two routes thin independently. What must hold
-    // is that v2 is not answering from the store alone — one live fix — while
-    // v1 reaches the provider for the rest.
-    expect(v1Points).toBeGreaterThan(1)
-    expect(feature!.properties.pointCount).toBeGreaterThan(1)
-  })
-
   it('starts and serves even when the provider returns nothing useful', async () => {
     if (!available || !server) return
-    // The bootstrap is best-effort: a provider with no data for the window must
-    // leave a working, empty track rather than a failed plugin.
+    // A window with nothing in it is a working, empty track, whatever the
+    // provider holds.
     const track = (await server.api(`${SELF_PATH}?from=1990-01-01T00:00:00Z&to=1990-01-02T00:00:00Z`)) as TrackResponse
     expect(track.coordinates).toEqual([])
   })
@@ -234,6 +204,12 @@ describe('the history import through a real history provider', () => {
       )
     }
     expect(await recorded()).toEqual([])
+    // Nor does a v2 query show them: reads ask the provider nothing.
+    const v2 = await server.apiV2('/tracks?contexts=self&duration=PT15M&times=true')
+    const features = (v2.body as { features: { geometry: { coordinates: [number, number][][] } | null }[] }).features
+    expect(features.flatMap(({ geometry }) => (geometry?.coordinates ?? []).flat()).some(([, lat]) => lat > 60.1)).toBe(
+      false,
+    )
 
     const started = await server.plugin('/history-import', { method: 'POST' })
     expect(started.status).toBe(202)
