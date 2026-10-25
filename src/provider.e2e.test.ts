@@ -80,9 +80,6 @@ beforeAll(async () => {
         managedContainer: false,
         recordSelf: true,
         recordOthers: false,
-        // Every fix, not one each two seconds of wall clock: the history
-        // import test feeds a fix a second and counts what comes back.
-        defaultSamplingRate: 0,
       },
     },
     timeoutSeconds: 120,
@@ -195,59 +192,67 @@ describe('the history import through a real history provider', () => {
     if (!available || !server) return
     // Moored, the plugin records nothing of the own vessel, and the provider
     // records on. It stamps a fix with the time it arrives, not the one the
-    // fix carries, so these are sent as now.
+    // fix carries, so these are sent as now, and north of everything the
+    // tests above fed.
     await server.feedState(server.selfContext, 'moored')
     const t0 = Date.now()
-    for (let i = 0; i < 20; i++) {
+    for (let i = 1; i <= 20; i++) {
       await server.feed(server.selfContext, [60.1 + i * 1e-5, 24.9], Date.now())
     }
     await server.feedState(server.selfContext, 'sailing')
 
-    // Asked again until the provider has made the fixes readable: what an
-    // import fills is the recording afterwards, so each run adds only what
-    // the runs before it could not see.
-    let filled = 0
-    let last: ImportState | undefined
-    const done = await eventually(async () => {
-      const started = await server!.plugin('/history-import', { method: 'POST' })
-      expect(started.status).toBe(202)
-      const { startedAt } = (started.body as { state: ImportState }).state
-      last = await eventually(async () => {
-        const { body } = await server!.plugin('/history-import')
-        const state = (body as { state?: ImportState }).state
-        return state?.startedAt === startedAt && state.finishedAt !== undefined ? state : undefined
-      }, 60_000)
-      filled += last?.filled ?? 0
-      return filled >= 20 ? last : undefined
-    }, 120_000)
+    // What the provider holds of them, a second at a time: it thins by its
+    // own sampling rate, and makes rows readable only once it has written them.
+    const provided = async () => {
+      const res = await fetch(
+        `${server!.url}/signalk/v2/api/history/values?paths=navigation.position&resolution=1` +
+          `&from=${new Date(t0).toISOString()}&to=${new Date().toISOString()}`,
+      )
+      const { data = [] } = (await res.json()) as { data?: [string, [number, number] | null][] }
+      return data.flatMap(([time, value]) =>
+        value && value[1] > 60.1 ? [{ time: Date.parse(time), lat: value[1] }] : [],
+      )
+    }
+    let held: { time: number; lat: number }[] = []
+    await eventually(async () => {
+      const now = await provided()
+      const settled = now.length > 0 && now.length === held.length
+      held = now
+      return settled ? true : undefined
+    }, 60_000)
+    expect(held.length).toBeGreaterThan(0)
+    // What the plugin recorded of them, which v1's collection route reads
+    // from the store alone.
+    const recorded = async () => {
+      const tracks = (await server!.api('/tracks?times&timespan=15m')) as Record<
+        string,
+        { coordinates: [number, number][][]; times: string[][] }
+      >
+      const track = tracks[server!.selfContext]
+      return (track?.coordinates.flat() ?? []).flatMap(([, lat], i) =>
+        lat > 60.1 ? [{ time: Date.parse(track!.times.flat()[i]!), lat }] : [],
+      )
+    }
+    expect(await recorded()).toEqual([])
 
-    // On a failure, what the provider says it holds since the fixes were sent.
-    const held = done
-      ? ''
-      : await fetch(
-          `${server.url}/signalk/v2/api/history/values?paths=navigation.position&resolution=1` +
-            `&from=${new Date(t0 - MINUTE).toISOString()}&to=${new Date().toISOString()}`,
-        )
-          .then((res) => res.json() as Promise<{ data?: [string, unknown][] }>)
-          .then(({ data = [] }) => {
-            const rows = data.filter(([, value]) => value !== null)
-            return `${rows.length} of ${data.length} rows hold a position: ${JSON.stringify(rows.slice(0, 25))}`
-          })
-    // And what the plugin recorded meanwhile, which v1's collection route
-    // reads from the store alone, with the state it recorded under.
-    const recorded = done
-      ? ''
-      : JSON.stringify({
-          state: await server.api('/vessels/self/navigation/state'),
-          times: ((await server.api('/tracks?times&timespan=15m')) as Record<string, { times?: string[][] }>)[
-            server.selfContext
-          ]?.times,
-        })
-    expect(done, `${JSON.stringify(last)} ${held} recorded: ${recorded}`).toBeDefined()
+    const started = await server.plugin('/history-import', { method: 'POST' })
+    expect(started.status).toBe(202)
+    const { startedAt } = (started.body as { state: ImportState }).state
+    const done = await eventually(async () => {
+      const { body } = await server!.plugin('/history-import')
+      const state = (body as { state?: ImportState }).state
+      return state?.startedAt === startedAt && state.finishedAt !== undefined ? state : undefined
+    }, 60_000)
+
+    expect(done).toBeDefined()
     expect(done!.error).toBeUndefined()
     expect(Date.parse(done!.firstDay!)).toBeLessThanOrEqual(t0)
-    // The provider also holds the fixes the tests above fed, stamped when
-    // they arrived, where the plugin recorded them at the times they carry.
-    expect(filled).toBeGreaterThanOrEqual(20)
+    // Each fix the provider holds is in the recording now, in the same
+    // second: the import reads seconds aligned to where it starts reading.
+    const stored = await recorded()
+    const missing = held.filter(
+      ({ time, lat }) => !stored.some((point) => point.lat === lat && Math.abs(point.time - time) <= 1000),
+    )
+    expect(missing, JSON.stringify({ held, stored })).toEqual([])
   }, 300_000)
 })
