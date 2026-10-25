@@ -5,6 +5,7 @@ export type StoreMethod =
   | 'recordName'
   | 'initialTrack'
   | 'prune'
+  | 'refineLevels'
   | 'get'
   | 'getTimed'
   | 'getAllTracks'

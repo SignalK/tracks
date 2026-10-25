@@ -222,6 +222,9 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     // Without a box there is nothing to clip to, whatever `clip` says.
     const clipTo = query.clip === true ? bounds : null
 
+    // Asked before the store is read, which a tolerance read depends on.
+    const listed = known ?? (await deps.historyContexts(window))
+
     // Thinning is handed to the store rather than applied to the result: it is
     // the same `thin()` either way, and asking twice is both wasted work and a
     // second place for the two to disagree about what a resolution means.
@@ -250,6 +253,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         // thinning cannot drop the point inside it, and a clipped one keeps
         // the points that carry it to the box edge.
         ...(resolution === undefined || bounds ? {} : { resolution }),
+        ...readTolerance(query, deps.segmentGap(), listed, wanted),
       },
     )
 
@@ -258,7 +262,6 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     // recorded. The store's own points, if any, still take part in the
     // reconciliation; whether such a context matches the box is decided on
     // the reconciled track, since the store could not decide it.
-    const listed = known ?? (await deps.historyContexts(window))
     const fromHistory = [...(listed ?? [])].filter(
       (context) => !(context in collection) && (!wanted || wanted.includes(context)),
     )
@@ -709,6 +712,37 @@ function shapeFeature(
       ...(query.times && timed ? { coordTimes: segments.map(toIsoTimes) } : {}),
     },
   }
+}
+
+/**
+ * The tolerance a query will be simplified to, where it is known before the
+ * read: an explicit `epsilon`, or the one `simplify` sizes to the box. Passed
+ * to the store, which may then leave out what simplifying drops. A tolerance
+ * sized to the track itself is known only once the track is read.
+ *
+ * None where what follows the read judges a track by the points it is
+ * given, since what a tolerance leaves out lies between them:
+ * - tracks split at pauses: `segment()` would read a straight leg as a stop;
+ * - a box without `clip`: a track matches on its points inside, and those a
+ *   level leaves out can be all it had there;
+ * - history listing a context the query can return, or unable to say:
+ *   reconciling fills each bucket without a stored point, and would fill
+ *   those too.
+ */
+function readTolerance(
+  query: TracksRequest,
+  gap: number,
+  listed: ReadonlySet<string> | undefined,
+  wanted: string[] | undefined,
+): { tolerance?: number } {
+  const reconciles = !listed || [...listed].some((context) => !wanted || wanted.includes(context))
+  if (gap > 0 || (query.bbox && query.clip !== true) || reconciles) {
+    return {}
+  }
+  if (query.epsilon !== undefined && query.epsilon > 0) {
+    return { tolerance: query.epsilon }
+  }
+  return query.simplify === true && query.bbox ? { tolerance: extentEpsilon(query.bbox) } : {}
 }
 
 /**

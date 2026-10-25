@@ -198,6 +198,29 @@ describe('worker-owned SQLite', () => {
     await reopened.ready
     expect(reopened.nameFor('old')).toBe('New name')
   })
+  it('skips refining while work is queued, without counting it as dropped', async () => {
+    const errors: Error[] = []
+    // Full: the worker has not started, so both positions wait in the queue.
+    const store = create((error) => errors.push(error), { maxItems: 2 })
+    store.newPosition('self', [60, 24], 100)
+    store.newPosition('self', [61, 25], 200)
+    store.refineLevels()
+    await store.close()
+    expect(errors).toEqual([])
+    expect(await create().get('self')).toEqual([
+      [60, 24],
+      [61, 25],
+    ])
+  })
+
+  it('refines behind a little queued work, rather than waiting for none', async () => {
+    const store = create(() => {}, { maxItems: 10 })
+    store.newPosition('self', [60, 24], 100)
+    store.refineLevels()
+    expect((store as unknown as { queue: unknown[] }).queue).toHaveLength(2)
+    await store.close()
+  })
+
   it('resumes below the low-water mark and reports dropped operations', async () => {
     const errors: Error[] = []
     let resume: (message: string) => void = () => {}

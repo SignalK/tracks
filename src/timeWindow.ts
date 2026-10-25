@@ -94,6 +94,12 @@ export interface TrackQuery {
   /** Minimum spacing between returned points, in milliseconds. */
   resolution?: number
   /**
+   * The tolerance in metres the caller simplifies the result to. A store that
+   * knows which positions simplifying to it drops may leave them out; the
+   * caller still simplifies what comes back.
+   */
+  tolerance?: number
+  /**
    * Serve the recording time of every point alongside the geometry.
    *
    * Opt-in rather than always-on: the response grows by roughly a third, and

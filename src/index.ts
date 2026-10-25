@@ -247,6 +247,12 @@ const DAY_MS = 24 * 60 * 60 * 1000
 
 // A vessel that has aged out is not urgent, so this need not be frequent.
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000
+/**
+ * How often the store refines levels. A call with nothing to do returns at
+ * once, and one with a backlog holds the worker about 50 ms on a Pi 5, so a
+ * million positions take about 25 minutes at half a percent of its time.
+ */
+const REFINE_INTERVAL_MS = 10 * 1000
 // Off by default. Segmenting changes the shape of every response, and measured
 // against real AIS traffic a 5-minute rule split 61 of 879 gaps that were just
 // a slow-updating target rather than a stop. Opt in, and pick a threshold that
@@ -1170,6 +1176,12 @@ export default function ThePlugin(app: App): Plugin {
       }, PRUNE_INTERVAL_MS)
       onStop.push(() => {
         clearInterval(pruneInterval)
+      })
+      const refineInterval = setInterval(() => {
+        tracks?.refineLevels?.()
+      }, REFINE_INTERVAL_MS)
+      onStop.push(() => {
+        clearInterval(refineInterval)
       })
 
       // Report on a timer rather than per delta: at 10Hz across several
