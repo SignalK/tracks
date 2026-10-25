@@ -1331,7 +1331,8 @@ export default function ThePlugin(app: App): Plugin {
         // nothing is recording.
         const recording = stateGate.status() ?? sourceWatch.warning(app.selfContext) ?? 'Recording tracks'
         const importing = historyImportStatus()
-        const status = importing === undefined ? recording : `${recording}. ${importing}`
+        // The paused and source messages end their sentence, 'Recording tracks' does not.
+        const status = importing === undefined ? recording : `${recording.replace(/\.$/, '')}. ${importing}`
         if (status !== lastStatus) {
           lastStatus = status
           app.setPluginStatus?.(storageError ?? status)

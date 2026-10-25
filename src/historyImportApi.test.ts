@@ -185,6 +185,41 @@ describe('the history import route', () => {
     )
   })
 
+  it('reports a stopped import after a paused recording, a sentence each', async () => {
+    await withHarness(
+      async (h) => {
+        await importState(h)
+        await h.store()!.saveHistoryImport!(
+          {
+            context: SELF_CONTEXT,
+            startedAt: Date.now(),
+            firstDay: startOfDay(from),
+            nextDay: startOfDay(from),
+            filled: 0,
+            error: 'provider unavailable',
+          },
+          [],
+        )
+        await h.stop()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+        h.restart()
+        await vi.waitFor(
+          async () => {
+            expect((await importState(h)).state).toBeDefined()
+          },
+          { timeout: 20_000, interval: 50 },
+        )
+        h.emit(SELF_CONTEXT, [60.1, 24.9], Date.now())
+        await vi.advanceTimersByTimeAsync(30_000)
+        expect(h.statuses.at(-1)).toBe(
+          "Not recording: navigation.state is 'moored'. 1 position(s) skipped. " +
+            'History import stopped: provider unavailable. Resume it in the Tracks webapp.',
+        )
+      },
+      { history, selfPosition: [60, 24], selfState: 'moored', config: { pauseWhenState: ['moored'] } },
+    )
+  })
+
   it('goes on after a restart with an import a stop broke off', async () => {
     await withHarness(
       async (h) => {
