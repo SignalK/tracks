@@ -80,6 +80,55 @@ export function simplify(points: TimedPosition[], epsilon: number): TimedPositio
 }
 
 /**
+ * For each point, the tolerance below which `simplify()` keeps it: for any
+ * `epsilon > 0`, a point is in `simplify(points, epsilon)` exactly when its
+ * value here is greater than `epsilon`. The endpoints are Infinity.
+ *
+ * One pass answers `simplify()` for every tolerance at once, so a store can
+ * keep the value per position and read a track at a tolerance without
+ * simplifying all of it. It works because the point a segment splits at does
+ * not depend on the tolerance, only whether the split is taken: a point
+ * survives while it and every split above it are further off than the
+ * tolerance, so its value is the smallest of those distances. The loop is
+ * `simplify()`'s, splits included, with no tolerance to stop at.
+ */
+export function significance(points: TimedPosition[]): Float64Array {
+  const values = new Float64Array(points.length)
+  if (points.length === 0) {
+    return values
+  }
+  values[0] = Infinity
+  values[points.length - 1] = Infinity
+  const stack: [number, number, number][] = [[0, points.length - 1, Infinity]]
+  while (stack.length > 0) {
+    const [first, last, above] = stack.pop()!
+    if (last <= first + 1) {
+      continue
+    }
+    let worst = 0
+    let worstAt = -1
+    for (let i = first + 1; i < last; i++) {
+      const d = perpendicularDistance(points[i]!, points[first]!, points[last]!)
+      if (d > worst) {
+        worst = d
+        worstAt = i
+      }
+    }
+    if (worst === Infinity) {
+      worstAt = (first + last) >> 1
+    }
+    // No point off the line: every one between stays at 0, which no
+    // tolerance keeps, as simplify() keeps none of them.
+    if (worstAt >= 0) {
+      const value = Math.min(worst, above)
+      values[worstAt] = value
+      stack.push([first, worstAt, value], [worstAt, last, value])
+    }
+  }
+  return values
+}
+
+/**
  * Distance in metres from `p` to the segment `a`-`b`.
  *
  * Positions are projected to a local plane with longitude scaled by
