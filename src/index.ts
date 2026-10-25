@@ -245,9 +245,9 @@ const DEFAULT_SEGMENT_GAP_MINUTES = 0
 const SOURCE_STATUS_INTERVAL_MS = 30000
 
 /**
- * How long a history provider gets to say it is there, for the history
- * import: long enough for one that has to warm up, short enough that a
- * wedged one does not hold a request open.
+ * How long a history provider gets to say it is there, for the history import
+ * and for a delete that keeps its span from it: long enough for one that has
+ * to warm up, short enough that a wedged one does not hold a request open.
  */
 const HISTORY_QUERY_TIMEOUT_MS = 5000
 
@@ -298,9 +298,6 @@ const notAvailable = (res: Response) => {
 
 const errorDetail = (err: unknown): string => (err instanceof Error && err.stack ? err.stack : String(err))
 
-/** A bound expired, rather than the provider failing on its own. */
-class HistoryTimeoutError extends Error {}
-
 /**
  * Reject once `ms` has passed.
  *
@@ -310,7 +307,7 @@ class HistoryTimeoutError extends Error {}
  */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new HistoryTimeoutError(`timed out after ${ms}ms`)), ms)
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms)
     promise.then(
       (value) => {
         clearTimeout(timer)
@@ -363,8 +360,7 @@ const historyRows = (response: HistoryValuesResponse | undefined, seconds: numbe
 /**
  * What a history provider holds for a vessel over `[from, to)`, for the
  * history import, rejecting when there is no provider or it cannot be read:
- * unlike a query, the import has nothing else to fall back on, and an outage
- * must not read as a day with nothing.
+ * an outage must not read as a day with nothing.
  */
 async function importedHistory(
   app: App,
@@ -390,7 +386,7 @@ async function importedHistory(
   return historyRows(response, seconds)
 }
 
-/** Whether a history provider is installed and answers, for the import to read. */
+/** Whether a history provider is installed and answers: one the import can read, and a delete keep its span from. */
 async function historyProviderAvailable(app: App): Promise<boolean> {
   if (!app.getHistoryApi) {
     return false
@@ -738,7 +734,11 @@ export default function ThePlugin(app: App): Plugin {
             context,
             remembering(() => tracks),
           ),
-        importable: async (context) => context === app.selfContext && (await historyProviderAvailable(app)),
+        // An import started already counts even while its provider is away,
+        // restarting say: it goes on once the provider is back.
+        importable: async (context) =>
+          context === app.selfContext &&
+          ((await tracks?.historyImport?.(context)) !== undefined || (await historyProviderAvailable(app))),
         deleted: () => {
           deletedSpans = undefined
         },

@@ -394,7 +394,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     const now = Date.now()
     const end = Math.min(to ?? now, now)
     const importable = await deps.importable(context)
-    // A span that starts after now holds nothing anyone recorded, in either source.
+    // A span that starts after now holds nothing anyone recorded yet.
     const keepEmpty = importable && (from === undefined || from <= end)
     const { known } = await writableStore().binRecorded(context, from, end, now, keepEmpty)
     deps.deleted()
@@ -793,9 +793,8 @@ export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOve
  * The parts of an import that fall where a recording has nothing for at least
  * `minGap`, as runs to record, and how many points were left out.
  *
- * Each recorded point covers its own instant, or a history bucket's whole
- * span, so a coarse provider read still counts as covering the time between
- * its buckets. A run never crosses a recorded stretch or a segment boundary.
+ * Each recorded point covers its own instant. A run never crosses a recorded
+ * stretch or a segment boundary.
  */
 export function fillGaps(
   segments: TimedPosition[][],
@@ -803,13 +802,12 @@ export function fillGaps(
   minGap: number,
 ): { runs: TimedPosition[][]; overlapping: number } {
   const covered: [number, number][] = []
-  for (const { timestamp, span } of [...recorded].sort((a, b) => a.timestamp - b.timestamp)) {
-    const end = timestamp + (span ?? 0)
+  for (const { timestamp } of [...recorded].sort((a, b) => a.timestamp - b.timestamp)) {
     const last = covered.at(-1)
     if (last && timestamp <= last[1]) {
-      last[1] = Math.max(last[1], end)
+      last[1] = Math.max(last[1], timestamp)
     } else {
-      covered.push([timestamp, end])
+      covered.push([timestamp, timestamp])
     }
   }
   /** Index of the first covered stretch ending at or after `time`. */

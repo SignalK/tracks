@@ -888,6 +888,33 @@ describe('clip in v2', () => {
       await h.stop()
     }
   })
+
+  it('matches a box on a crossing that thinning would drop', async () => {
+    const h = createHarness()
+    try {
+      // A minute's resolution keeps the first and last of these, both outside
+      // the box, and drops the one inside it; the line between those two runs
+      // south of the box.
+      h.seedTrack(
+        SELF_CONTEXT,
+        [
+          [59, 23],
+          [60.5, 24.5],
+          [59, 26],
+        ],
+        [t0, t0 + 10_000, t0 + 20_000],
+      )
+      const res = await providerOf(h).getTracks({
+        from: Temporal.Instant.fromEpochMilliseconds(t0 - 60 * MINUTE),
+        to: Temporal.Instant.fromEpochMilliseconds(t0 + 60 * MINUTE),
+        bbox,
+        resolution: Temporal.Duration.from({ minutes: 1 }),
+      })
+      expect(res.features.map((f) => f.properties.context)).toEqual([SELF_CONTEXT])
+    } finally {
+      await h.stop()
+    }
+  })
 })
 
 describe('getTrackContexts', () => {
@@ -1411,13 +1438,6 @@ describe('fillGaps', () => {
   const at = (...minutes: number[]): TimedPosition[] =>
     minutes.map((m) => ({ position: [60, 24], timestamp: m * 60_000 }))
   const minutesOf = (runs: TimedPosition[][]) => runs.map((run) => run.map(({ timestamp }) => timestamp / 60_000))
-
-  it('keeps a history bucket covering the time between its fixes', () => {
-    const buckets = at(0, 20).map((point) => ({ ...point, span: 15 * 60_000 }))
-    const { runs, overlapping } = fillGaps([at(10, 16, 30, 40)], buckets, MIN_FILLED_GAP_MS)
-    expect(minutesOf(runs)).toEqual([[16], [40]])
-    expect(overlapping).toBe(2)
-  })
 
   it('starts a new run at each recorded stretch and segment boundary', () => {
     const { runs } = fillGaps([at(1, 2, 12, 13), at(14)], at(6, 7), MIN_FILLED_GAP_MS)

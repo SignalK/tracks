@@ -184,27 +184,12 @@ export function parseTrackQuery(
 }
 
 /**
- * The time between two points that no history bucket either side can account
- * for.
- *
- * Providers disagree on whether a bucket's timestamp marks its start or its
- * end, so a bucket may cover up to its width on either side of it. Two
- * buckets, however, cover the time between their timestamps once between
- * them, so one width is taken off, the wider of the two: exact between
- * buckets under either convention, and between a fix and a bucket never more
- * than the pause could be.
- */
-export function uncoveredBetween(previous: TimedPosition, point: TimedPosition): number {
-  return point.timestamp - previous.timestamp - Math.max(previous.span ?? 0, point.span ?? 0)
-}
-
-/**
  * The pause in the recording between two consecutive points: where thinning
  * dropped the points between them, the longest pause among those it recorded,
- * and otherwise whatever of the time between them no bucket accounts for.
+ * and otherwise the time between them.
  */
 export function pauseBetween(previous: TimedPosition, point: TimedPosition): number {
-  return point.pauseBefore ?? uncoveredBetween(previous, point)
+  return point.pauseBefore ?? point.timestamp - previous.timestamp
 }
 
 /**

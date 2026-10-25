@@ -193,6 +193,17 @@ describe('deleting with a history provider installed', () => {
       { history },
     ))
 
+  it('keeps the span while the provider is away, once an import has started', () =>
+    withHarness(
+      async (h) => {
+        await h.store()!.saveHistoryImport!({ context: SELF_CONTEXT, startedAt: Date.now(), filled: 0 }, [])
+        expect(await providerOf(h).deleteTrackSpan(`recorded:${SELF_CONTEXT}`, span)).toBe(true)
+        const bin = await request(h.app).get('/plugins/tracks/recycle-bin').expect(200)
+        expect(bin.body).toMatchObject([{ trackId: `recorded:${SELF_CONTEXT}`, pointCount: 0 }])
+      },
+      { history: { noProvider: true } },
+    ))
+
   it('answers false for another vessel only the provider holds, binning nothing', () =>
     withHarness(
       async (h) => {
@@ -399,6 +410,48 @@ describe('an import of the own vessel', () => {
 })
 
 describe('an import of the own vessel with a history provider installed', () => {
+  it('fills a gap the provider holds positions in, asking it nothing', () => {
+    let asked = 0
+    return withHarness(
+      async (h) => {
+        const provider = providerOf(h)
+        const times = [5, 10, 15].map((minutes) => t0 + minutes * MINUTE)
+        await importOwn(
+          h,
+          {
+            type: 'Feature',
+            geometry: {
+              type: 'MultiLineString',
+              coordinates: [
+                [
+                  [25, 61],
+                  [25, 61.01],
+                  [25, 61.02],
+                ],
+              ],
+            },
+            properties: { coordTimes: [times.map(iso)], context: SELF_CONTEXT },
+          },
+          'keep',
+        )
+        expect(await timesOf(provider, SELF_CONTEXT)).toEqual(times.map(iso))
+        expect(asked).toBe(0)
+      },
+      {
+        history: {
+          contexts: [SELF_CONTEXT],
+          rows: [[iso(t0 + 10 * MINUTE), [24, 60]]],
+          onValues: () => {
+            asked++
+          },
+          onHistoryApi: () => {
+            asked++
+          },
+        },
+      },
+    )
+  })
+
   // A replace keeps the span it took over in the bin even where nothing was
   // recorded, as a delete does, so a history import does not draw the old
   // passage between the imported points.

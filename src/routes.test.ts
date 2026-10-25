@@ -666,6 +666,18 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(res.body.coordinates).toEqual([])
   })
 
+  // An empty export is a well-formed document carrying no tracks: `toGpx`
+  // leaves out a <trk> with no segments.
+  it('exports an empty GPX for a known vessel with nothing in the window', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+    h.seedTrack(OTHER_CONTEXT, [[60.2, 24.8]], [Date.now() - 90 * 24 * 60 * 60 * 1000])
+
+    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx?timespan=1h`).expect(200)
+
+    expect(res.text).toContain('<gpx ')
+    expect(fromGpx(res.text)).toEqual([])
+  })
+
   // A provider takes no part in a read, so its outage cannot fail one.
   it('still serves the stored track when the provider fails', async () => {
     const h = (harness = createHarness({
@@ -702,8 +714,6 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   })
 })
 
-// Thinning spaces points further apart than the gap, so a thinned track must
-// not be segmented at the gap alone (#133).
 // Reads come from the store alone: what a provider holds reaches a track
 // through the history import, once, rather than on every query.
 describe('reads with a history provider installed', () => {
@@ -749,6 +759,8 @@ describe('reads with a history provider installed', () => {
   })
 })
 
+// Thinning spaces points further apart than the gap, so a thinned track must
+// not be segmented at the gap alone (#133).
 describe('segment gaps on a thinned track', () => {
   const MINUTE = 60_000
   // One fix a minute, fifteen minutes long, gap setting two minutes: any split

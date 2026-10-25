@@ -1320,8 +1320,8 @@ export class SqliteTrackStore implements TrackStore {
    * all.
    *
    * An entry is made even when the store holds nothing there if `keepEmpty`
-   * says another source does: the span still has to hide what a history
-   * provider holds. Without one, an empty delete leaves no entry behind.
+   * says the history import could bring the span in: it still has to keep
+   * the import out. Without one, an empty delete leaves no entry behind.
    */
   binRecorded(
     context: Context,
