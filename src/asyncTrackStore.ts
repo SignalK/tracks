@@ -382,8 +382,8 @@ export class AsyncTrackStore implements TrackStore {
   historyImport(context: Context) {
     return this.enqueue('historyImport', [context])
   }
-  saveHistoryImport(state: HistoryImportState, runs: TimedPosition[][]): Promise<void> {
-    return this.enqueue('saveHistoryImport', [state, runs], 'acknowledged')
+  saveHistoryImport(state: HistoryImportState, runs: TimedPosition[][], since?: number): Promise<number> {
+    return this.enqueue('saveHistoryImport', [state, runs, since], 'acknowledged')
   }
   getImport(id: string) {
     return this.enqueue('getImport', [id])

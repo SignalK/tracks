@@ -133,9 +133,9 @@ describe('the history import route', () => {
         const store = h.store()!
         const save = store.saveHistoryImport!.bind(store)
         let broken = false
-        vi.spyOn(store, 'saveHistoryImport').mockImplementation((state, runs) => {
+        vi.spyOn(store, 'saveHistoryImport').mockImplementation((state, runs, since) => {
           broken ||= runs.some((run) => run.length > 0)
-          return broken ? Promise.reject(new Error('database or disk is full')) : save(state, runs)
+          return broken ? Promise.reject(new Error('database or disk is full')) : save(state, runs, since)
         })
         await request(h.app).post('/plugins/tracks/history-import')
         await vi.waitFor(
@@ -182,6 +182,41 @@ describe('the history import route', () => {
         expect(times.some((time) => time >= span.from && time <= span.to)).toBe(false)
       },
       { history },
+    )
+  })
+
+  it('reports a stopped import after a paused recording, a sentence each', async () => {
+    await withHarness(
+      async (h) => {
+        await importState(h)
+        await h.store()!.saveHistoryImport!(
+          {
+            context: SELF_CONTEXT,
+            startedAt: Date.now(),
+            firstDay: startOfDay(from),
+            nextDay: startOfDay(from),
+            filled: 0,
+            error: 'provider unavailable',
+          },
+          [],
+        )
+        await h.stop()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+        h.restart()
+        await vi.waitFor(
+          async () => {
+            expect((await importState(h)).state).toBeDefined()
+          },
+          { timeout: 20_000, interval: 50 },
+        )
+        h.emit(SELF_CONTEXT, [60.1, 24.9], Date.now())
+        await vi.advanceTimersByTimeAsync(30_000)
+        expect(h.statuses.at(-1)).toBe(
+          "Not recording: navigation.state is 'moored'. 1 position(s) skipped. " +
+            'History import stopped: provider unavailable. Resume it in the Tracks webapp.',
+        )
+      },
+      { history, selfPosition: [60, 24], selfState: 'moored', config: { pauseWhenState: ['moored'] } },
     )
   })
 

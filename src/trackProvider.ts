@@ -24,7 +24,7 @@ import type {
   TimeWindow,
   TrackSummary,
 } from './types.js'
-import { clipToBounds, createReachesBounds, longitudeSpan, toIsoTimes } from './utils.js'
+import { clipToBounds, createReachesBounds, fillGaps, longitudeSpan, MIN_FILLED_GAP_MS, toIsoTimes } from './utils.js'
 
 /**
  * Serves the v2 Track API from this plugin's store.
@@ -726,14 +726,6 @@ function extentEpsilon([west, south, east, north]: TrackBoundingBox): number {
  */
 export type OnOverlap = 'keep' | 'replace'
 
-/**
- * The shortest stretch without positions that an import kept beside a
- * recording may fill. Filling every pause between recorded points would
- * interleave two sources minute by minute, and any offset between them would
- * draw as a sawtooth; whole stretches keep each part of the line from one.
- */
-export const MIN_FILLED_GAP_MS = 5 * 60_000
-
 export interface KeepTrackDeps {
   store: Required<Pick<TrackStore, 'storeImport' | 'recordTrack'>>
   selfContext: string
@@ -811,64 +803,6 @@ export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOve
   }
   await deps.store.storeImport(track)
   return { id: track.id, overlapping: 0 }
-}
-
-/**
- * The parts of an import that fall where a recording has nothing for at least
- * `minGap`, as runs to record, and how many points were left out.
- *
- * Each recorded point covers its own instant. A run never crosses a recorded
- * stretch or a segment boundary.
- */
-export function fillGaps(
-  segments: TimedPosition[][],
-  recorded: readonly TimedPosition[],
-  minGap: number,
-): { runs: TimedPosition[][]; overlapping: number } {
-  const covered: [number, number][] = []
-  for (const { timestamp } of [...recorded].sort((a, b) => a.timestamp - b.timestamp)) {
-    if (covered.at(-1)?.[1] !== timestamp) {
-      covered.push([timestamp, timestamp])
-    }
-  }
-  /** Index of the first covered stretch ending at or after `time`. */
-  const nextStretch = (time: number): number => {
-    let low = 0
-    let high = covered.length
-    while (low < high) {
-      const mid = (low + high) >> 1
-      if (covered[mid]![1] < time) low = mid + 1
-      else high = mid
-    }
-    return low
-  }
-  const runs: TimedPosition[][] = []
-  let overlapping = 0
-  for (const points of segments) {
-    let run: TimedPosition[] = []
-    let runGap = -1
-    for (const point of points) {
-      const next = nextStretch(point.timestamp)
-      const after = covered[next]
-      const before = covered[next - 1]
-      const inside = after !== undefined && after[0] <= point.timestamp
-      const free = (after?.[0] ?? Infinity) - (before?.[1] ?? -Infinity)
-      if (inside || free < minGap) {
-        overlapping += 1
-        if (run.length > 0) runs.push(run)
-        run = []
-        continue
-      }
-      if (run.length > 0 && next !== runGap) {
-        runs.push(run)
-        run = []
-      }
-      run.push(point)
-      runGap = next
-    }
-    if (run.length > 0) runs.push(run)
-  }
-  return { runs, overlapping }
 }
 
 /** v2 accepts the `self` alias; the store keys on the qualified context. */

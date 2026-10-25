@@ -4,7 +4,7 @@ import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils
 import type { TestHarness } from './harness.test-utils.js'
 import type { TrackApi } from './trackApi.js'
 import { SqliteTrackStore } from './sqliteStore.js'
-import { createTrackProvider, fillGaps, MIN_FILLED_GAP_MS } from './trackProvider.js'
+import { createTrackProvider } from './trackProvider.js'
 import type { TimedPosition } from './types.js'
 import type { TrackProviderDeps } from './trackProvider.js'
 
@@ -1493,20 +1493,5 @@ describe('segment gaps on a thinned track', () => {
     } finally {
       await h.stop()
     }
-  })
-})
-
-describe('fillGaps', () => {
-  const at = (...minutes: number[]): TimedPosition[] =>
-    minutes.map((m) => ({ position: [60, 24], timestamp: m * 60_000 }))
-  const minutesOf = (runs: TimedPosition[][]) => runs.map((run) => run.map(({ timestamp }) => timestamp / 60_000))
-
-  it('starts a new run at each recorded stretch and segment boundary', () => {
-    const { runs } = fillGaps([at(1, 2, 12, 13), at(14)], at(6, 7), MIN_FILLED_GAP_MS)
-    expect(minutesOf(runs)).toEqual([[1, 2], [12, 13], [14]])
-  })
-
-  it('fills everything when nothing is recorded', () => {
-    expect(fillGaps([at(1, 2)], [], MIN_FILLED_GAP_MS)).toEqual({ runs: [at(1, 2)], overlapping: 0 })
   })
 })

@@ -6,7 +6,15 @@ import { significance } from './simplify.js'
 import { thin, Thinner } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
-import { createInBounds, createMatcher, longitudeSpan, longitudeSpanOf, splitAtAntimeridian } from './utils.js'
+import {
+  createInBounds,
+  createMatcher,
+  fillGaps,
+  longitudeSpan,
+  longitudeSpanOf,
+  MIN_FILLED_GAP_MS,
+  splitAtAntimeridian,
+} from './utils.js'
 import type { LongitudeExtremes } from './utils.js'
 import type {
   BinEntry,
@@ -2051,17 +2059,41 @@ export class SqliteTrackStore implements TrackStore {
   /**
    * Write the runs a day of history filled into the recording, together with
    * the state of the import they bring it to, so a restart never finds the
-   * one without the other. Nothing is binned: an import from history only
-   * fills where the recording has nothing. What lies in a span deleted from
-   * the recording is left out here too, in the same transaction, so a delete
-   * that lands while the day is on its way still holds.
+   * one without the other, and return how many positions the import has
+   * filled. Nothing is binned: an import from history only fills where the
+   * recording has nothing. The runs are judged again here, in the same
+   * transaction, against the recording and the deleted spans as they are
+   * now: a GPX import, a restore or a delete can land while the provider is
+   * read, and what it took is then left out, and not counted as filled.
+   * Positions before `since` do not count against the runs: the import wrote
+   * them, the day before, in the stretch it goes on filling.
    */
-  saveHistoryImport(state: HistoryImportState, runs: TimedPosition[][]): void {
+  saveHistoryImport(state: HistoryImportState, runs: TimedPosition[][], since = -Infinity): number {
     const deleted = this.deletedSpans().filter(({ context }) => context === state.context)
-    this.fill(
-      state.context,
-      runs.map((run) => outsideSpans(run, deleted)),
+    const recorded = this.db.prepare(
+      'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?',
     )
+    const kept: TimedPosition[][] = []
+    let dropped = 0
+    for (const run of runs) {
+      const visible = outsideSpans(run, deleted)
+      const first = visible[0]
+      const last = visible.at(-1)
+      if (first !== undefined && last !== undefined) {
+        const around = recorded.all(
+          state.context,
+          Math.max(since, first.timestamp - MIN_FILLED_GAP_MS),
+          last.timestamp + MIN_FILLED_GAP_MS,
+        ) as { timestamp: number }[]
+        kept.push(...fillGaps([visible], around, MIN_FILLED_GAP_MS).runs)
+      }
+      dropped += run.length
+    }
+    for (const run of kept) {
+      dropped -= run.length
+    }
+    this.fill(state.context, kept)
+    const filled = state.filled - dropped
     this.db
       .prepare(
         `INSERT INTO history_imports (context, started_at, first_day, next_day, filled, in_gap, finished_at, error)
@@ -2075,11 +2107,12 @@ export class SqliteTrackStore implements TrackStore {
         state.startedAt,
         state.firstDay ?? null,
         state.nextDay ?? null,
-        state.filled,
+        filled,
         state.inGap ? 1 : null,
         state.finishedAt ?? null,
         state.error ?? null,
       )
+    return filled
   }
 
   /**
