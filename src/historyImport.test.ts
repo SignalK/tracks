@@ -318,6 +318,25 @@ describe('runHistoryImport', () => {
     expect(times.has(midnight + MINUTE)).toBe(true)
   })
 
+  it('fills after midnight what the stretch across it leaves, though nothing filled it before', async () => {
+    // History has nothing before either midnight. The stretch across the
+    // first is thirteen minutes, the one across the second four.
+    const first = day0 + DAY_MS
+    const second = day0 + 2 * DAY_MS
+    const recorded = [first - 10 * MINUTE, first + 3 * MINUTE, second - MINUTE, second + 3 * MINUTE].map(
+      (timestamp) => ({ position: [60, 24] as LatLngTuple, timestamp }),
+    )
+    const early = fixes(day0 + HOUR, day0 + HOUR + MINUTE)
+    const afterFirst = fixes(first, first + 3 * MINUTE)
+    const { history } = fakeHistory([...early, ...afterFirst, ...fixes(second, second + 3 * MINUTE)])
+    const store = fakeStore(recorded)
+    const final = await runHistoryImport(begin(day0 + 3 * DAY_MS), { ...store.deps, history, stopped: () => false })
+    expect(final.finishedAt).toBeDefined()
+    expect(store.written.map(({ timestamp }) => timestamp).sort((a, b) => a - b)).toEqual(
+      [...early, ...afterFirst].map(({ timestamp }) => timestamp),
+    )
+  })
+
   it('reads a provider that stamps its buckets on their end', async () => {
     // A provider installed a few days ago, whose start probe bucket ends
     // after the import started, holding only a day's last eight minutes.

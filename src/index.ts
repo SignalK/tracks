@@ -779,10 +779,21 @@ export default function ThePlugin(app: App): Plugin {
           }
           const waiting = { state, running: false, stop: false }
           historyImport = waiting
-          // Not once an import started by hand meanwhile has replaced it.
-          const resume = setTimeout(() => {
-            if (tracks === starting && historyImport === waiting) startHistoryImport(state)
-          }, IMPORT_RESUME_DELAY_MS)
+          // Not once an import started by hand meanwhile has replaced it, and
+          // not while one is being started: that start read the progress
+          // already, and would save it back over what this run did.
+          let resume: ReturnType<typeof setTimeout>
+          const goOn = () => {
+            if (tracks !== starting || historyImport !== waiting) {
+              return
+            }
+            if (historyImportStarting) {
+              resume = setTimeout(goOn, IMPORT_RESUME_DELAY_MS)
+              return
+            }
+            startHistoryImport(state)
+          }
+          resume = setTimeout(goOn, IMPORT_RESUME_DELAY_MS)
           onStop.push(() => clearTimeout(resume))
         })
         .catch(() => {})
