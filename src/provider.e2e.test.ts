@@ -65,7 +65,7 @@ beforeAll(async () => {
     // A different port from plugin.e2e.test.ts so the two files never collide.
     port: 4790,
     // Moored pauses the own vessel's recording, which the history import fills.
-    config: { source: 'history', resolution: 1000, pointsToKeep: 500, pauseWhenState: ['moored'] },
+    config: { resolution: 1000, pauseWhenState: ['moored'] },
     // Named rather than left to registration order: any other history
     // provider in the server checkout would otherwise become the default and
     // answer these queries with nothing.
