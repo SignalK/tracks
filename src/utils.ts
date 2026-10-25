@@ -35,6 +35,8 @@ export function createInBounds(bounds: GeoBounds): (position: LatLngTuple | null
   }
 }
 
+const TURNS = [-360, 0, 360]
+
 /** Whether the line from (x0, y0) to (x1, y1) meets the box, its edges included (Liang-Barsky). */
 function lineMeetsBox(x0: number, y0: number, x1: number, y1: number, box: [number, number, number, number]): boolean {
   const [minX, maxX, minY, maxY] = box
@@ -74,14 +76,18 @@ export function createCrossesBounds(bounds: GeoBounds): (a: LatLngTuple, b: LatL
   const maxLat = bounds.ne[LAT]
   const minLng = bounds.sw[LNG]
   const maxLng = (bounds.sw[LNG] > bounds.ne[LNG] ? 360 : 0) + bounds.ne[LNG]
+  const box: [number, number, number, number] = [minLng, maxLng, minLat, maxLat]
   return (a, b) => {
+    // Both ends south of the box, or both north of it: most lines of a track
+    // that is not there, settled without the work below.
+    if ((a[LAT] < minLat && b[LAT] < minLat) || (a[LAT] > maxLat && b[LAT] > maxLat)) {
+      return false
+    }
     const span = b[LNG] - a[LNG]
     const end = span > 180 ? b[LNG] - 360 : span < -180 ? b[LNG] + 360 : b[LNG]
     // Taken the short way, the line can run past ±180, and a box crossing
     // the antimeridian runs up to 540: a turn either way covers both.
-    return [-360, 0, 360].some((turn) =>
-      lineMeetsBox(a[LNG] + turn, a[LAT], end + turn, b[LAT], [minLng, maxLng, minLat, maxLat]),
-    )
+    return TURNS.some((turn) => lineMeetsBox(a[LNG] + turn, a[LAT], end + turn, b[LAT], box))
   }
 }
 
