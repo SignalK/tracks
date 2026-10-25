@@ -219,6 +219,59 @@ describe('the history import route', () => {
     )
   })
 
+  it('waits to go on while an import is being started by hand', async () => {
+    await withHarness(
+      async (h) => {
+        await importState(h)
+        await h.store()!.saveHistoryImport!(
+          {
+            context: SELF_CONTEXT,
+            startedAt: Date.now(),
+            firstDay: startOfDay(from),
+            nextDay: startOfDay(from),
+            filled: 0,
+          },
+          [],
+        )
+        await h.stop()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        h.restart()
+        await vi.waitFor(
+          async () => {
+            expect((await importState(h)).state).toBeDefined()
+          },
+          { timeout: 20_000, interval: 50 },
+        )
+        // The start by hand has read the progress when the resume comes due,
+        // and goes on to save it back.
+        const store = h.store()!
+        const read = store.historyImport!.bind(store)
+        let release = () => {}
+        const held = new Promise<void>((resolve) => (release = resolve))
+        let readByHand = false
+        vi.spyOn(store, 'historyImport').mockImplementationOnce(async (context) => {
+          const state = await read(context)
+          readByHand = true
+          await held
+          return state
+        })
+        const started = request(h.app)
+          .post('/plugins/tracks/history-import')
+          .then((response) => response)
+        await vi.waitFor(() => expect(readByHand).toBe(true), { timeout: 20_000, interval: 10 })
+        await vi.advanceTimersByTimeAsync(60_000)
+        expect((await importState(h)).state).toMatchObject({ running: false, filled: 0 })
+        release()
+        expect((await started).status).toBe(202)
+        await vi.advanceTimersByTimeAsync(60_000)
+        vi.useRealTimers()
+        expect((await finished(h)).filled).toBe(7200)
+        expect(await storedTimes(h)).toHaveLength(7200)
+      },
+      { history },
+    )
+  })
+
   it('goes on no second time once started by hand while waiting to', async () => {
     let reads = 0
     await withHarness(
