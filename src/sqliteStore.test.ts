@@ -456,7 +456,8 @@ describe('significance levels', () => {
     try {
       const file = join(dir, 'tracks.db')
       const first = new SqliteTrackStore({ file, refineBudget: 6000 }, debug)
-      seedDense(first)
+      // One commit: written to a file one by one, 15,000 positions take a Windows runner most of a minute.
+      first.transaction(() => seedDense(first))
       first.refineLevels(later)
       expect(refinedCount(first)).toBeGreaterThan(0)
       first.close()
@@ -518,7 +519,8 @@ describe('significance levels', () => {
     try {
       const file = join(dir, 'tracks.db')
       const first = new SqliteTrackStore({ file, refineBudget: 6000 }, debug)
-      seedDense(first)
+      // One commit: written to a file one by one, 15,000 positions take a Windows runner most of a minute.
+      first.transaction(() => seedDense(first))
       first.refineLevels(later)
       expect(refinedCount(first)).toBeGreaterThan(0)
       first.close()
