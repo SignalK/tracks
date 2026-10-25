@@ -103,6 +103,7 @@ export function start() {
     try {
       body = await response.json()
     } catch {
+      if (!section.hidden) timer = setTimeout(load, POLL_MS)
       return
     }
     const view = historyView(body ?? {})
