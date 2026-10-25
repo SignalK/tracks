@@ -218,8 +218,7 @@ export class QueryParameterError extends Error {}
  * A well-formed query the server cannot currently answer.
  *
  * `radius` measures from the own vessel, so it needs a self position. Not
- * having one is an outage, not a client mistake -- the same distinction the
- * single-vessel route already draws for a history provider it cannot read.
+ * having one is an outage, not a client mistake.
  */
 export class SelfPositionUnavailableError extends Error {}
 

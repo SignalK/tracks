@@ -20,16 +20,16 @@ vessel, exposing the result as `Observable<LatLngTuple[]>`.
 
 ## Where a track comes from
 
-With a history provider installed — [signalk-questdb](https://www.npmjs.com/package/signalk-questdb),
-[signalk-to-influxdb2](https://www.npmjs.com/package/signalk-to-influxdb2) — a track is answered from
-both it and the plugin's own store: the provider is the finer record for as long as its retention
-reaches, and the store keeps the older track, within its own retention, and any period the provider
-missed.
+Every track is answered from the plugin's own store, a SQLite file in the plugin's data
+directory, so tracks survive a restart on their own. Base stations and aids to navigation are not
+recorded, since their position never changes.
 
-Nothing needs configuring for this, and the plugin works fully with no provider installed. Its own
-store is a SQLite file in the plugin's data directory, so tracks survive a restart on their own.
-Base stations and aids to navigation are not recorded, since their position never changes.
-See [docs/history-and-storage.md](docs/history-and-storage.md) for what that means in practice.
+A history provider — [signalk-questdb](https://www.npmjs.com/package/signalk-questdb),
+[signalk-to-influxdb2](https://www.npmjs.com/package/signalk-to-influxdb2) — is not read when a
+track is asked for. What it holds of the own vessel reaches the store once, through
+[the history import](#importing-from-a-history-provider), and the plugin works fully with no
+provider installed. See [docs/history-and-storage.md](docs/history-and-storage.md) for what that
+means in practice.
 
 The own vessel is kept indefinitely. Other vessels' positions are kept for the number of
 days set in the plugin settings, also for a vessel that never leaves receiver range — a harbour
@@ -40,18 +40,18 @@ space to the file system.
 
 ### Keeping tracks for years
 
-The own vessel's track is kept here indefinitely, at the track resolution. For a finer track
-over years, and for tracks recorded before Signal K, a history provider is the better place:
-this plugin reads whatever the server's default provider holds for the own vessel and shows it
-as part of its track. Where several providers are installed, the default is chosen under
-**Data → Preferences**.
+The own vessel's track is kept here indefinitely. For a track recorded before Signal K, or while
+this plugin was not running, a history provider can hold more:
+[the history import](#importing-from-a-history-provider) copies what the server's default
+provider holds of the own vessel into this plugin's store. Where several providers are installed,
+the default is chosen under **Data → Preferences**.
 
 [signalk-questdb](https://www.npmjs.com/package/signalk-questdb) is one such provider. From
 2.3.0 it can
 [keep the own track past its retention](https://github.com/dirkwa/signalk-questdb#retention-and-the-archive),
 and it
 [imports a chartplotter's GPX export](https://github.com/dirkwa/signalk-questdb#importing-a-gpx-track)
-of any size.
+of any size, which the history import then brings into this plugin.
 
 ## Imported tracks
 
@@ -65,8 +65,7 @@ access on a server with security turned off.
 
 An imported track is kept apart from the recording. It is listed by v2 queries like any
 other track, filtered by vessel, time window and area, but as a feature of its own even when
-it names a vessel the plugin also records. It is never merged with a history provider's data,
-never removed by the retention settings, and never returned by the v1 routes, which answer
+it names a vessel the plugin also records. It is never removed by the retention settings, and never returned by the v1 routes, which answer
 where vessels are now. Its own name and any other properties it was posted with come back as
 posted. It carries `imported`, the time it was stored, which a recorded track does not, so a
 client drawing a vessel's recording can leave the import out of it. Imports stored by a version
@@ -76,13 +75,12 @@ A timed track of the own vessel is the exception: it is the boat's own passage, 
 the plugin was installed or by another plotter, so it is written into the own vessel's
 recording instead of being kept as an import, and the answer is the recording's id,
 `tracks:recorded:<context>`. By default it only fills what the recording is missing: its
-points are used where the vessel has no position, from this plugin or a history provider, for
-at least five minutes, and left out elsewhere, so nothing recorded is overwritten and two
-sources are never interleaved minute by minute; while a history provider cannot be read, such an
-import is refused with a 503 rather than drawn over what it holds. Asked to replace instead, it takes the place of
-what was recorded over the same time: the positions this plugin stored there go to the recycle
-bin first, one entry per segment, and a history provider's data over that time is hidden while
-the entry is there. Restoring the entry brings both back. An untimed track of the own vessel
+points are used where the recording has no position for at least five minutes, and left out
+elsewhere, so nothing recorded is overwritten and two sources are never interleaved minute by
+minute. Asked to replace instead, it takes the place of what was recorded over the same time: the
+positions this plugin stored there go to the recycle bin first, one entry per segment, and with a
+history provider installed the entry is kept even where nothing was recorded, so the history
+import leaves that time out too. Restoring the entry brings the recording back. An untimed track of the own vessel
 stays an import, since it cannot be placed in time.
 
 A track with neither times (`coordTimes`) nor a vessel (`context`) is kept too. No time
@@ -148,16 +146,16 @@ access on a server with security turned off. The Tracks webapp offers both from 
 
 A recorded track has the id `tracks:recorded:<vessel context>`. Deleting it whole removes
 what was recorded up to now; the recording goes on, and what it records next is kept. With a
-history provider installed the deleted span is hidden in what the provider returns too, since
-the History API has no way to delete or hide data and the next query would otherwise fill it
-back in.
+history provider installed a deleted span of the own vessel is kept even where nothing was
+recorded, and the history import leaves it out, since the History API has no way to delete data
+and the import would otherwise fill it back in.
 
 Nothing deleted is gone at once. It goes to a recycle bin, listed in the Tracks webapp, where it
 can be restored or deleted for good, until it is purged after the number of days set in the
 plugin settings (180 by default). The retention settings above do not reach into the bin, but
 they apply again to what is restored: an AIS vessel's positions restored after they have aged
 past the retention are dropped at the next prune. Once a recorded span is purged its points are gone,
-but the span stays hidden in the provider's data for good.
+but the history import keeps leaving it out for good.
 
 ## Glitch filtering
 
@@ -172,8 +170,8 @@ vessel, and glitches usually miss it by orders of magnitude rather than by a lit
 speed rather than distance, so a track resuming after a long gap — a passage with the plugin
 stopped, or an AIS target reappearing — is not filtered. Set it to 0 to record everything.
 
-Positions a history provider supplies are not filtered here — they are that provider's record, and
-it is the one that decides what to keep.
+Positions the history import brings from a provider are not filtered here — they are that
+provider's record, and it is the one that decides what to keep.
 
 ## Pausing while not under way
 
@@ -362,7 +360,7 @@ Signal K server against it and feeds positions as deltas — so it covers plugin
 mounting and the delta path, none of which the unit suite can. It needs a server to boot: a built
 checkout, by default at `~/dev/xxx_signalk-server`, or an installed package's
 `node_modules/signalk-server`, named with `SIGNALK_SERVER_DIR`. A second tier installs a real
-history provider (signalk-questdb) into that server and exercises the reconciliation through it; it
+history provider (signalk-questdb) into that server and exercises the history import through it; it
 skips itself if no QuestDB is reachable at `QUESTDB_URL`, unless `QUESTDB_REQUIRED` is set. CI runs
 both tiers against the oldest supported signalk-server release and the latest, with QuestDB as a
 service container.

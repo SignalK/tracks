@@ -366,8 +366,7 @@ export function thinToBudget(
  * Operates on timestamped points rather than inside a store, so both the
  * in-memory and sqlite stores segment identically. A gap is a pause in the
  * recording, not in the points given: see `pauseBetween`, which lets a
- * thinned track, or one reconciled with history buckets, segment exactly as
- * the recording would.
+ * thinned track segment exactly as the recording would.
  *
  * A point marked `breakBefore` starts a new segment whatever the gap: a
  * clipped track leaves the box there.

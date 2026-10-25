@@ -113,7 +113,7 @@ export interface E2EOptions {
    * Other plugins to install and enable alongside this one, as
    * `{ 'npm-package-name': pluginConfiguration }`.
    *
-   * Used to stand up a real history provider so the reconciliation can be
+   * Used to stand up a real history provider so the history import can be
    * exercised through `getHistoryApi()` — the interface this plugin actually
    * depends on — rather than against a provider's private storage.
    */

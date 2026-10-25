@@ -1,7 +1,7 @@
 import { Temporal } from '@js-temporal/polyfill'
 import { describe, expect, it, vi } from 'vitest'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
-import type { HistoryValuesQuery, TestHarness } from './harness.test-utils.js'
+import type { TestHarness } from './harness.test-utils.js'
 import type { TrackApi } from './trackApi.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import { createTrackProvider, fillGaps, MIN_FILLED_GAP_MS } from './trackProvider.js'
@@ -509,7 +509,7 @@ describe('getTracks', () => {
   // A list of every vessel over weeks is answered from summaries, not points,
   // and has to say what the points themselves would.
   it('lists the same metadata without geometry as with it', async () => {
-    const h = createHarness({ history: { contexts: [SELF_CONTEXT], rows: [] } })
+    const h = createHarness()
     try {
       const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
       h.seedTrack(
@@ -552,56 +552,20 @@ describe('getTracks', () => {
 
   // The points of every AIS target over weeks are what made the list slow:
   // read in the worker, then copied to the main thread only to be counted.
-  it('asks history once for what it holds when listing', async () => {
-    let probes = 0
-    const h = createHarness({
-      history: {
-        get contexts() {
-          probes++
-          return [SELF_CONTEXT]
-        },
-        rows: [],
-      },
-    })
-    try {
-      const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
-      h.seedTrack(SELF_CONTEXT, [[60.1, 24.9]], [t0])
-      h.seedTrack(OTHER_CONTEXT, [[60.2, 25.0]], [t0])
-
-      const res = await providerOf(h).getTracks({
-        from: Temporal.Instant.fromEpochMilliseconds(t0 - 60_000),
-        to: Temporal.Instant.fromEpochMilliseconds(t0 + 60_000),
-        geometry: false,
-      })
-
-      expect(res.features).toHaveLength(2)
-      expect(probes).toBe(1)
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('lists from summaries, reading points only for what history holds', async () => {
+  it('lists from summaries, reading no points', async () => {
     const debug = Object.assign(() => {}, { enabled: false })
     const store = new SqliteTrackStore({ file: ':memory:' }, debug)
     try {
       const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
       store.newPosition(SELF_CONTEXT, [60.1, 24.9], t0)
       store.newPosition(OTHER_CONTEXT, [60.2, 25.0], t0)
-      const reconciled: string[] = []
       const provider = createTrackProvider({
         store: () => store,
         selfContext: () => SELF_CONTEXT,
         segmentGap: () => 0,
-        recordingResolution: () => 60_000,
         contextName: () => undefined,
-        historyContexts: async () => new Set([SELF_CONTEXT]),
-        historyKnows: async () => true,
+        importable: async () => false,
         deleted: () => undefined,
-        reconcileWithHistory: async (context, stored) => {
-          reconciled.push(context)
-          return stored
-        },
         recordedOver: async () => [],
       })
       const read = vi.spyOn(store, 'getFilteredTimedTracks')
@@ -613,8 +577,7 @@ describe('getTracks', () => {
       })
 
       expect(res.features.map((f) => f.properties.context).sort()).toEqual([OTHER_CONTEXT, SELF_CONTEXT].sort())
-      expect(read.mock.calls.map(([params]) => params.contexts)).toEqual([[SELF_CONTEXT]])
-      expect(reconciled).toEqual([SELF_CONTEXT])
+      expect(read).not.toHaveBeenCalled()
     } finally {
       store.close()
     }
@@ -922,359 +885,6 @@ describe('clip in v2', () => {
       expect(res.features[0]!.properties.pointCount).toBe(8)
       expect(res.features[0]!.properties.resolution).toBeUndefined()
     } finally {
-      await h.stop()
-    }
-  })
-})
-
-describe('positions only a history provider holds', () => {
-  const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
-  const MINUTE = 60_000
-  const window = {
-    from: Temporal.Instant.fromEpochMilliseconds(t0 - 60 * MINUTE),
-    to: Temporal.Instant.fromEpochMilliseconds(t0 + 60 * MINUTE),
-  }
-  const bbox: [number, number, number, number] = [24, 60, 25, 61]
-  /** History rows as `[time, [lon, lat]]`, one a minute from t0. */
-  const rows = (...positions: [number, number][]) =>
-    positions.map(([lat, lng], i) => [new Date(t0 + i * MINUTE).toISOString(), [lng, lat]])
-
-  it('returns a vessel the store has never recorded', async () => {
-    const h = createHarness({ history: { contexts: [OTHER_CONTEXT], rows: rows([10, 20], [10.1, 20.1]) } })
-    try {
-      const provider = providerOf(h)
-      const res = await provider.getTracks({ ...window, contexts: [OTHER_CONTEXT] })
-      expect(res.features.map((f) => f.properties.context)).toEqual([OTHER_CONTEXT])
-      expect(res.features[0]!.properties.pointCount).toBe(2)
-      expect(await provider.getTrackContexts({ ...window, contexts: [OTHER_CONTEXT] })).toEqual([OTHER_CONTEXT])
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('matches a box on a crossing only history recorded', async () => {
-    const h = createHarness({
-      history: { contexts: [SELF_CONTEXT], rows: rows([59, 23], [60.5, 24.5], [62, 26]) },
-    })
-    try {
-      // The store holds only positions outside the box, later than history's.
-      h.seedTrack(SELF_CONTEXT, [[50, 10]], [t0 + 30 * MINUTE])
-      const res = await providerOf(h).getTracks({ ...window, bbox, clip: true })
-      // The line on to the stored position runs back through the box.
-      expect(res.features[0]!.geometry!.coordinates).toEqual([
-        [
-          [23, 59],
-          [24.5, 60.5],
-          [26, 62],
-        ],
-        [
-          [26, 62],
-          [10, 50],
-        ],
-      ])
-    } finally {
-      await h.stop()
-    }
-  })
-
-  // A box over a busy anchorage would otherwise cost the provider one read per
-  // vessel in view, on every pan and zoom.
-  it('asks history only about the vessels it lists for the window', async () => {
-    const asked: HistoryValuesQuery[] = []
-    const h = createHarness({ history: { contexts: [SELF_CONTEXT], rows: [], onValues: (query) => asked.push(query) } })
-    try {
-      h.seedTrack(SELF_CONTEXT, [[60.5, 24.5]], [t0])
-      h.seedTrack(OTHER_CONTEXT, [[60.6, 24.6]], [t0])
-      const res = await providerOf(h).getTracks({ ...window, bbox, clip: true })
-      expect(res.features.map((f) => f.properties.context).sort()).toEqual([OTHER_CONTEXT, SELF_CONTEXT].sort())
-      expect(asked.map((q) => q.context)).toEqual([SELF_CONTEXT])
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it.each([
-    ['cannot list its vessels', { withoutGetContexts: true }],
-    ['fails to list them', { getContextsRejects: true }],
-  ])('asks history about every vessel when the provider %s', async (_, failure) => {
-    const asked: HistoryValuesQuery[] = []
-    const h = createHarness({ history: { rows: [], ...failure, onValues: (query) => asked.push(query) } })
-    try {
-      h.seedTrack(SELF_CONTEXT, [[60.5, 24.5]], [t0])
-      h.seedTrack(OTHER_CONTEXT, [[60.6, 24.6]], [t0])
-      await providerOf(h).getTracks({ ...window, bbox, clip: true })
-      expect(asked.map((q) => q.context).sort()).toEqual([OTHER_CONTEXT, SELF_CONTEXT].sort())
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('reads history for a window with only an end', async () => {
-    const h = createHarness({ history: { contexts: [OTHER_CONTEXT], rows: rows([10, 20], [10.1, 20.1]) } })
-    try {
-      const res = await providerOf(h).getTracks({ to: window.to, contexts: [OTHER_CONTEXT] })
-      expect(res.features.map((f) => f.properties.pointCount)).toEqual([2])
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('leaves out a stored vessel whose box crossing history replaced', async () => {
-    const h = createHarness({ history: { contexts: [SELF_CONTEXT], rows: rows([10, 20]) } })
-    try {
-      // The stored fix falls in the bucket of history's first row, which
-      // replaces it with a position far outside the box.
-      h.seedTrack(SELF_CONTEXT, [[60.5, 24.5]], [t0 + 500])
-      const res = await providerOf(h).getTracks({ ...window, bbox })
-      expect(res.features).toEqual([])
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('matches a box on a crossing that thinning would drop', async () => {
-    const h = createHarness()
-    try {
-      // A minute's resolution keeps the first and last of these, both outside
-      // the box, and drops the one inside it.
-      h.seedTrack(
-        SELF_CONTEXT,
-        [
-          [59, 23],
-          [60.5, 24.5],
-          [62, 26],
-        ],
-        [t0, t0 + 10_000, t0 + 20_000],
-      )
-      const res = await providerOf(h).getTracks({ ...window, bbox, resolution: Temporal.Duration.from({ minutes: 1 }) })
-      expect(res.features.map((f) => f.properties.context)).toEqual([SELF_CONTEXT])
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('matches a box on a history crossing shorter than the requested resolution', async () => {
-    const h = createHarness({
-      history: {
-        contexts: [OTHER_CONTEXT],
-        aggregatesFirst: true,
-        // Inside the box only for the middle of one minute.
-        rows: [
-          [new Date(t0).toISOString(), [23, 59]],
-          [new Date(t0 + 20_000).toISOString(), [24.5, 60.5]],
-          [new Date(t0 + 40_000).toISOString(), [26, 62]],
-        ],
-      },
-    })
-    try {
-      const query = { ...window, bbox, resolution: Temporal.Duration.from({ minutes: 1 }) }
-      const res = await providerOf(h).getTracks(query)
-      expect(res.features.map((f) => f.properties.context)).toEqual([OTHER_CONTEXT])
-      expect(await providerOf(h).getTrackContexts(query)).toEqual([OTHER_CONTEXT])
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('reads history for a box at a requested resolution finer than the recording', async () => {
-    const asked: (number | undefined)[] = []
-    const h = createHarness({
-      config: { resolution: MINUTE },
-      history: {
-        contexts: [OTHER_CONTEXT],
-        aggregatesFirst: true,
-        // Two minutes inside the box, a row every ten seconds.
-        rows: Array.from({ length: 13 }, (_, i) => [new Date(t0 + i * 10_000).toISOString(), [24.5 + i * 0.001, 60.5]]),
-        onValues: (query) => asked.push(query.resolution),
-      },
-    })
-    try {
-      const res = await providerOf(h).getTracks({
-        ...window,
-        bbox,
-        resolution: Temporal.Duration.from({ seconds: 10 }),
-      })
-      expect(asked).toEqual([10])
-      expect(res.features[0]!.properties.pointCount).toBe(13)
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('reads history for a box at the recording resolution when the request is coarser', async () => {
-    const asked: (number | undefined)[] = []
-    const h = createHarness({
-      config: { resolution: MINUTE },
-      history: {
-        contexts: [OTHER_CONTEXT],
-        rows: rows([60.5, 24.5], [60.6, 24.6]),
-        onValues: (query) => asked.push(query.resolution),
-      },
-    })
-    try {
-      await providerOf(h).getTracks({ ...window, bbox, resolution: Temporal.Duration.from({ minutes: 10 }) })
-      expect(asked).toEqual([60])
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('leaves out a history vessel that never entered the box', async () => {
-    const h = createHarness({ history: { contexts: [OTHER_CONTEXT], rows: rows([10, 20], [10.1, 20.1]) } })
-    try {
-      const res = await providerOf(h).getTracks({ ...window, bbox })
-      expect(res.features).toEqual([])
-    } finally {
-      await h.stop()
-    }
-  })
-})
-
-describe('bounded history reads', () => {
-  const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
-  const MINUTE = 60_000
-  const DAY = 24 * 60 * MINUTE
-  const to = Temporal.Instant.fromEpochMilliseconds(t0 + 60 * MINUTE)
-  const rowAt = (timestamp: number, [lat, lng]: [number, number]) => [new Date(timestamp).toISOString(), [lng, lat]]
-
-  it('starts a read with no start where the provider has data, not at the epoch', async () => {
-    const asked: HistoryValuesQuery[] = []
-    const h = createHarness({
-      history: {
-        contexts: [OTHER_CONTEXT],
-        aggregatesFirst: true,
-        rows: [rowAt(t0, [10, 20]), rowAt(t0 + MINUTE, [10.1, 20.1])],
-        onValues: (query) => asked.push(query),
-      },
-    })
-    try {
-      const res = await providerOf(h).getTracks({ to, contexts: [OTHER_CONTEXT] })
-      expect(res.features.map((f) => f.properties.pointCount)).toEqual([2])
-      // One coarse read to find where the data begins, then the read itself.
-      expect(asked.map(({ from }) => Date.parse(from.toString()))).toEqual([0, expect.any(Number)])
-      const from = Date.parse(asked[1]!.from.toString())
-      expect(from).toBeLessThanOrEqual(t0)
-      expect(from).toBeGreaterThan(t0 - 30 * DAY)
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('stops after the first read when a window with no start holds no history', async () => {
-    const asked: HistoryValuesQuery[] = []
-    const h = createHarness({
-      history: { contexts: [OTHER_CONTEXT], rows: [], onValues: (query) => asked.push(query) },
-    })
-    try {
-      h.seedTrack(OTHER_CONTEXT, [[10, 20]], [t0])
-      const res = await providerOf(h).getTracks({ to, contexts: [OTHER_CONTEXT] })
-      expect(res.features.map((f) => f.properties.pointCount)).toEqual([1])
-      expect(asked).toHaveLength(1)
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('widens a read past its budget, and lets it fill only what the store lacks', async () => {
-    const asked: HistoryValuesQuery[] = []
-    const h = createHarness({
-      history: {
-        contexts: [SELF_CONTEXT],
-        aggregatesFirst: true,
-        rows: [rowAt(t0 - 50 * DAY, [30, 40]), rowAt(t0 + 30_000, [11, 21])],
-        onValues: (query) => asked.push(query),
-      },
-    })
-    try {
-      // Two fixes inside one widened bucket, which the history row shares.
-      h.seedTrack(
-        SELF_CONTEXT,
-        [
-          [10, 20],
-          [10.1, 20.1],
-        ],
-        [t0 + 10_000, t0 + 40_000],
-      )
-      const from = to.subtract({ hours: 60 * 24 })
-      const res = await providerOf(h).getTracks({ from, to })
-      // Sixty days at the budget of a month of one-minute buckets.
-      expect(asked.map(({ resolution }) => resolution)).toEqual([120])
-      expect(res.features[0]!.geometry!.coordinates.flat()).toEqual([
-        [40, 30],
-        [20, 10],
-        [20.1, 10.1],
-      ])
-    } finally {
-      await h.stop()
-    }
-  })
-})
-
-describe('repeated history reads', () => {
-  const MINUTE = 60_000
-  const DAY = 24 * 60 * MINUTE
-  const rowAt = (timestamp: number, [lat, lng]: [number, number]) => [new Date(timestamp).toISOString(), [lng, lat]]
-  const from = Temporal.Instant.fromEpochMilliseconds(Date.now() - 400 * DAY)
-  const rows = [rowAt(Date.now() - 300 * DAY, [10, 20]), rowAt(Date.now() - 200 * DAY, [10.5, 20.5])]
-
-  // A viewer asks again with the same window on every zoom and pan.
-  it('asks the provider once for a window asked again with another box', async () => {
-    const asked: HistoryValuesQuery[] = []
-    const h = createHarness({
-      history: { contexts: [OTHER_CONTEXT], rows, aggregatesFirst: true, onValues: (query) => asked.push(query) },
-    })
-    try {
-      const provider = providerOf(h)
-      const wide = await provider.getTracks({ from, contexts: [OTHER_CONTEXT], bbox: [19, 9, 21, 11] })
-      const close = await provider.getTracks({ from, contexts: [OTHER_CONTEXT], bbox: [19.9, 9.9, 20.1, 10.1] })
-      expect(wide.features.map((f) => f.properties.pointCount)).toEqual([2])
-      expect(close.features.map((f) => f.properties.pointCount)).toEqual([2])
-      expect(asked).toHaveLength(1)
-    } finally {
-      await h.stop()
-    }
-  })
-
-  // The History API cannot cancel a read, so asking again would only stack a
-  // second scan beside the first.
-  it('waits for a read that outlasted its timeout instead of asking again', async () => {
-    const asked: HistoryValuesQuery[] = []
-    const h = createHarness({
-      history: {
-        contexts: [OTHER_CONTEXT],
-        rows,
-        aggregatesFirst: true,
-        // Just past the five-second timeout, so the second request finds it
-        // still running.
-        valuesDelayMs: 6500,
-        onValues: (query) => asked.push(query),
-      },
-    })
-    try {
-      const provider = providerOf(h)
-      expect((await provider.getTracks({ from, contexts: [OTHER_CONTEXT] })).features).toEqual([])
-      const second = await provider.getTracks({ from, contexts: [OTHER_CONTEXT] })
-      expect(second.features.map((f) => f.properties.pointCount)).toEqual([2])
-      expect(asked).toHaveLength(1)
-    } finally {
-      await h.stop()
-    }
-  }, 30_000)
-
-  it('asks again once the window ends well past the read', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] })
-    const asked: HistoryValuesQuery[] = []
-    const h = createHarness({
-      history: { contexts: [OTHER_CONTEXT], rows, aggregatesFirst: true, onValues: (query) => asked.push(query) },
-    })
-    try {
-      const provider = providerOf(h)
-      await provider.getTracks({ from, contexts: [OTHER_CONTEXT] })
-      vi.setSystemTime(Date.now() + 10 * MINUTE)
-      await provider.getTracks({ from, contexts: [OTHER_CONTEXT] })
-      expect(asked).toHaveLength(2)
-    } finally {
-      vi.useRealTimers()
       await h.stop()
     }
   })

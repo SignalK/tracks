@@ -171,16 +171,6 @@ describe('the GPX upload route', () => {
       expect(properties).toMatchObject({ id: `recorded:${SELF_CONTEXT}`, pointCount: 2 })
     }))
 
-  it('answers 503 when history cannot say where the gaps are', async () => {
-    const h = createHarness({ history: { contexts: [SELF_CONTEXT], getValuesRejects: true } })
-    try {
-      const res = await upload(h, gpxFile(trk('Morning', [t0, t0 + MINUTE])), '?self=true')
-      expect(res.status).toBe(503)
-    } finally {
-      await h.stop()
-    }
-  })
-
   it('refuses an unknown onOverlap', () =>
     withHarness(async (h) => {
       const res = await upload(h, gpxFile(trk('Morning', [t0])), '?self=true&onOverlap=merge')

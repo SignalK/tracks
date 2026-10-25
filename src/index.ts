@@ -18,12 +18,11 @@ import type { Request, RequestHandler, Response, Router } from 'express'
 import { join } from 'node:path'
 import { createTrackProvider } from './trackProvider.js'
 import type { TrackProvider } from './trackProvider.js'
-import { outsideSpans, recordedId } from './recycleBin.js'
+import { recordedId } from './recycleBin.js'
 import type { TrackApi } from './trackApi.js'
 import { AsyncTrackStore } from './asyncTrackStore.js'
 import type { TrackStore } from './store.js'
 import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
-import { fillFromHistory, reconcile } from './reconcile.js'
 import { importStatus, runHistoryImport } from './historyImport.js'
 import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
@@ -43,7 +42,6 @@ import type {
   Position,
   StoredImport,
   TimedPosition,
-  TimeWindow,
   TimedTrackCollection,
   TrackCollection,
   TrackParams,
@@ -117,20 +115,6 @@ interface HistoryValuesQuery {
 
 interface HistoryApi {
   getValues(query: HistoryValuesQuery): Promise<HistoryValuesResponse>
-  /**
-   * Contexts the provider holds data for, within a time range.
-   *
-   * Optional here though the upstream interface requires it: a provider
-   * registered against an older server-api may not implement it, and a missing
-   * method must degrade rather than throw.
-   */
-  getContexts?(query: HistoryContextsQuery): Promise<unknown[]>
-}
-
-/** `ContextsRequest` upstream: a time range, with Instants rather than strings. */
-interface HistoryContextsQuery {
-  from: Temporal.Instant
-  to: Temporal.Instant
 }
 
 interface HistoryValuesResponse {
@@ -261,116 +245,11 @@ const DEFAULT_SEGMENT_GAP_MINUTES = 0
 const SOURCE_STATUS_INTERVAL_MS = 30000
 
 /**
- * How long a history provider gets to answer a query before the store answers
- * alone.
- *
- * The provider is an enrichment, not a dependency: a track is still correct
- * without it, just coarser. Long enough for a database that has to warm up,
- * short enough that a wedged provider does not hold a request open.
+ * How long a history provider gets to say it is there, for the history
+ * import: long enough for one that has to warm up, short enough that a
+ * wedged one does not hold a request open.
  */
 const HISTORY_QUERY_TIMEOUT_MS = 5000
-
-/**
- * How far back a query with no window of its own reaches when the store is
- * empty.
- *
- * There is nothing else to derive a span from, and asking a provider for all
- * of time would be expensive on a large one. A day covers the usual reason for
- * a windowless request — draw the recent trail — and an explicit `from`,
- * `duration` or `timespan` reaches further.
- */
-const WINDOWLESS_HISTORY_SPAN_MS = 24 * 60 * 60 * 1000
-
-/**
- * The earliest instant the existence probe asks about.
- *
- * The probe has to name a bound: the History API's time range has no
- * unbounded form, every branch of `TimeRangeParams` carries one. A provider
- * filters its context list by the range it is given — questdb builds a SQL
- * `WHERE` from it — so any bound later than the provider's oldest row can
- * still miss a vessel and 404 it, which is the case the probe exists to catch.
- *
- * The Unix epoch is the bound rather than some span of years: it predates
- * satellite navigation, so no position fix can lie before it, and unlike a
- * fixed "wide enough" window it cannot be outlived. The cost lands only on the
- * branch that was already about to 404, and the answer is cached.
- */
-const EXISTENCE_PROBE_FROM_MS = 0
-
-/**
- * The most buckets one history read may ask a provider for.
- *
- * A provider has no spatial filter, so a box query reads every position in
- * its window, and the cost of that read grows with the window's span over the
- * resolution, not with what is drawn. Providers fabricate a row for every
- * bucket in the range — questdb fills empty ones with nulls — and refuse a
- * range past their own cap, which one-minute buckets over two years already
- * exceed. A month of one-minute buckets keeps a Pi-class server responsive;
- * a longer window is read at a wider resolution instead.
- */
-const HISTORY_BUCKET_BUDGET = 30 * 24 * 60
-
-/**
- * How many buckets the read that finds where a provider's data begins asks
- * for.
- *
- * A window with no start would otherwise reach back to the Unix epoch, and
- * spread over fifty-odd years the bucket budget leaves buckets weeks wide.
- * One coarse read first finds the earliest bucket holding a position, so the
- * real read starts there. A thousand buckets over the whole epoch are about
- * three weeks each, which only sets how much empty time the real read starts
- * with.
- */
-const START_PROBE_BUCKETS = 1000
-
-/**
- * How long a provider's context list is reused before asking again.
- *
- * The probe runs only for a vessel about to 404, which is precisely the
- * request a client can repeat without limit — the routes are open, so
- * enumerating vessel ids would otherwise drive one epoch-wide `getContexts`
- * per request, each able to block for the timeout.
- *
- * The whole list is cached rather than a per-context answer, or enumeration
- * would simply fill the cache with distinct keys and query just as often. The
- * cost is that a vessel a provider learns about becomes visible up to this
- * long after the fact, which is not a delay anyone can perceive in a track
- * that is already minutes old.
- */
-const KNOWN_CONTEXTS_TTL_MS = 30_000
-
-/**
- * How long a *failed* context query is remembered.
- *
- * Short, so a provider that recovers is noticed quickly, but not zero: with
- * the entry simply dropped, a provider that hangs is asked again by every
- * subsequent miss while the earlier calls are still pending — reinstating per
- * request exactly the cost the cache exists to prevent.
- */
-const KNOWN_CONTEXTS_FAILURE_TTL_MS = 1_000
-
-/**
- * How long a context query may stay unanswered before another is started
- * beside it. Waiting for the provider to settle is what keeps a slow one from
- * running a new epoch-wide scan every few seconds; the bound only covers a
- * provider whose promise never settles at all, which would otherwise leave
- * the list unknown until a restart.
- */
-const KNOWN_CONTEXTS_PENDING_MAX_MS = 5 * 60_000
-
-/**
- * How far a request's end may run past a history read's end and still reuse
- * that read.
- *
- * A viewer refetches on every zoom and pan with the same window, and over
- * years of history the provider's read is the slow part of each answer. What
- * a reused read misses is its last few minutes, which the store holds for
- * any vessel it records.
- */
-const HISTORY_REUSE_MS = 5 * 60_000
-
-/** The most history positions kept for reuse across all reads. */
-const HISTORY_REUSE_MAX_POINTS = 200_000
 
 /**
  * How long one read of the history import may take. Far longer than a
@@ -384,93 +263,6 @@ const IMPORT_READ_TIMEOUT_MS = 5 * 60_000
  * provider is a plugin too, and the server may start it after this one.
  */
 const IMPORT_RESUME_DELAY_MS = 60_000
-
-interface HistoryRead {
-  to: number
-  startedAt: number
-  /** Settled reads only: when they settled, and how many positions they hold. */
-  settledAt?: number
-  size?: number
-  points: Promise<TimedPosition[]>
-}
-
-/**
- * History reads by context, start and bucket width, held so a repeated read
- * joins or reuses the one before it instead of asking the provider again.
- *
- * A read outlasting the caller's timeout keeps running in the provider, since
- * the History API cannot cancel it. Kept here, it is what the next request
- * gets when it lands, rather than a second read stacked beside the first.
- */
-class HistoryReads {
-  private reads = new Map<string, HistoryRead>()
-
-  get(key: string, to: number, now: number): Promise<TimedPosition[]> | undefined {
-    const read = this.reads.get(key)
-    if (!read) {
-      return undefined
-    }
-    if (to - read.to > HISTORY_REUSE_MS || !this.fresh(read, now)) {
-      this.reads.delete(key)
-      return undefined
-    }
-    // Most recently used last, so the budget evicts the oldest first.
-    this.reads.delete(key)
-    this.reads.set(key, read)
-    return read.points
-  }
-
-  add(key: string, to: number, now: number, points: Promise<TimedPosition[]>): void {
-    // Swept here, since a window that moves with every request, such as the
-    // last hour, never asks for its own read again.
-    for (const [stale, read] of this.reads) {
-      if (!this.fresh(read, now)) this.reads.delete(stale)
-    }
-    const read: HistoryRead = { to, startedAt: now, points }
-    this.reads.set(key, read)
-    points.then(
-      (settled) => {
-        if (this.reads.get(key) !== read) {
-          return
-        }
-        read.settledAt = Date.now()
-        read.size = settled.length
-        this.evict()
-      },
-      () => {
-        if (this.reads.get(key) === read) {
-          this.reads.delete(key)
-        }
-      },
-    )
-  }
-
-  /**
-   * A settled read is reused for a while; one still running is joined until
-   * the bound that also covers a context query that never settles.
-   */
-  private fresh(read: HistoryRead, now: number): boolean {
-    return read.settledAt === undefined
-      ? now - read.startedAt < KNOWN_CONTEXTS_PENDING_MAX_MS
-      : now - read.settledAt < HISTORY_REUSE_MS
-  }
-
-  clear(): void {
-    this.reads.clear()
-  }
-
-  private evict(): void {
-    let total = 0
-    for (const { size } of this.reads.values()) total += size ?? 0
-    for (const [key, { size }] of this.reads) {
-      if (total <= HISTORY_REUSE_MAX_POINTS) break
-      if (size !== undefined) {
-        this.reads.delete(key)
-        total -= size
-      }
-    }
-  }
-}
 
 /**
  * A base station or an aid to navigation reports the same position for as
@@ -504,39 +296,10 @@ const notAvailable = (res: Response) => {
   res.json({ message: 'Tracks API not available because tracks plugin is not enabled' })
 }
 
-/**
- * The history provider could not answer, and nothing else could either.
- *
- * Distinct from a missing track: a 404 asserts that no source knows the
- * vessel, which a failed provider read cannot support. Reporting the failure
- * as an empty track would present an outage as "this vessel has no positions
- * here" — the one answer that is certainly wrong.
- */
-class HistoryUnavailableError extends Error {}
-
 const errorDetail = (err: unknown): string => (err instanceof Error && err.stack ? err.stack : String(err))
 
-/**
- * A window covering everything the store holds, up to now.
- *
- * Used when a query names no window of its own, so a history provider can
- * still be asked something concrete. Undefined when the store is empty, since
- * there is then no span to ask about.
- */
-function windowSpanning(stored: TimedPosition[], fallbackMs: number): TimeWindow {
-  const to = Date.now()
-  if (stored.length === 0) {
-    // Nothing stored says nothing about what a provider holds: a vessel
-    // recorded only by the provider — before this plugin was installed, say —
-    // would otherwise never be asked about and 404.
-    return { from: to - fallbackMs, to, inclusiveEnd: true }
-  }
-  let from = stored[0]!.timestamp
-  for (const point of stored) {
-    if (point.timestamp < from) from = point.timestamp
-  }
-  return { from, to, inclusiveEnd: true }
-}
+/** A bound expired, rather than the provider failing on its own. */
+class HistoryTimeoutError extends Error {}
 
 /**
  * Reject once `ms` has passed.
@@ -545,13 +308,6 @@ function windowSpanning(stored: TimedPosition[], fallbackMs: number): TimeWindow
  * promise wins. A race leaves it armed, holding the event loop open for the
  * remainder of the timeout on every call that succeeds.
  */
-/**
- * A bound expired. Distinct from the error a provider itself raises, because
- * "did not answer in time" and "is not installed" are different answers and
- * only one of them is an outage.
- */
-class HistoryTimeoutError extends Error {}
-
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new HistoryTimeoutError(`timed out after ${ms}ms`)), ms)
@@ -567,332 +323,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
     )
   })
 }
-
-/**
- * A cache entry holding the promise rather than its value, so callers that
- * arrive while a query is still running join it instead of starting another.
- */
-interface KnownContexts {
-  at: number
-  /** Undefined from a provider that cannot list its contexts. */
-  contexts: Promise<ReadonlySet<string> | undefined>
-  /**
-   * Until the provider answers. Its query cannot be cancelled, so one that
-   * outlasts the caller's timeout is still running in the provider, and a
-   * second started beside it would only add to the load that made it slow.
-   */
-  pending: boolean
-}
-
-/**
- * What the plugin remembers of a history provider's context lists between
- * requests.
- *
- * `windowQueries` holds the start of each windowed query still running in the
- * provider. Windowed queries are not cached, since each asks a different
- * window (one ending now never repeats), but while one has outlasted its
- * timeout nothing else asks, whatever its window: the provider is one store,
- * and one too slow to answer in time would only fall further behind.
- */
-interface HistoryContextCache {
-  current: KnownContexts | undefined
-  windowQueries?: Set<{ startedAt: number }>
-}
-
-/** A provider's context list as a set, with the `vessels.self` spelling resolved. */
-const toContextSet = (listed: unknown[] | undefined, selfContext: string): ReadonlySet<string> =>
-  new Set(
-    (listed ?? [])
-      .filter((c): c is string => typeof c === 'string')
-      .map((c) => (c === 'vessels.self' ? selfContext : c)),
-  )
-
-/**
- * Whether a history provider holds anything at all for a context.
- *
- * Asked only when a track is about to 404: `getValues` narrowed to a window
- * cannot tell "this vessel is unknown" from "this vessel has nothing *here*",
- * and 404ing on the second is wrong — the contract is that a 404 means neither
- * source knows the vessel. A vessel whose history lies wholly outside the
- * asked window is known, and deserves an empty track.
- *
- * Best-effort, like every other provider call here: a provider that lacks the
- * method, errors, or hangs leaves the 404 standing rather than holding the
- * request open.
- */
-async function historyKnowsContext(
-  app: App,
-  context: Context,
-  debug: Debug,
-  cache: HistoryContextCache,
-): Promise<boolean> {
-  try {
-    return (await knownHistoryContexts(app, cache))?.has(context) === true
-  } catch (err) {
-    debug(`History contexts unavailable for ${context}: ${errorDetail(err)}`)
-    return false
-  }
-}
-
-/**
- * Every context a history provider holds anything for, from the cache.
- *
- * Reused while fresh, and shared while in flight: a burst of misses is one
- * question to the provider, not one each. The promise is cached rather than
- * its result so concurrent callers join the same query instead of starting
- * their own, and a query is shared until the provider answers it, not only
- * until the caller's timeout: the provider keeps running a query nobody waits
- * for, so asking again on every timeout stacks scans of the whole database.
- */
-function knownHistoryContexts(app: App, cache: HistoryContextCache): Promise<ReadonlySet<string> | undefined> {
-  const getHistoryApi = app.getHistoryApi
-  if (!getHistoryApi) {
-    return Promise.resolve(new Set())
-  }
-  const now = Date.now()
-  const cached = cache.current
-  const stale =
-    cached === undefined ||
-    (cached.pending ? now - cached.at >= KNOWN_CONTEXTS_PENDING_MAX_MS : now - cached.at >= KNOWN_CONTEXTS_TTL_MS)
-  if (stale) {
-    // Resolving the provider is inside the cached promise, not before it: a
-    // slow or failing `getHistoryApi` would otherwise be paid per request, and
-    // could time out into a 404 for a vessel the cached list already knows.
-    const contexts = getHistoryApi(app.config?.settings?.historyApi?.defaultProvider)
-      .then((historyApi) =>
-        historyApi.getContexts
-          ? historyApi.getContexts({
-              from: Temporal.Instant.from(new Date(EXISTENCE_PROBE_FROM_MS).toISOString()),
-              to: Temporal.Instant.from(new Date(now).toISOString()),
-            })
-          : // A provider built against an older server-api has no such
-            // method. Nothing is known, and that is a cacheable answer.
-            undefined,
-      )
-      // Indexed once per fetch rather than scanned per request: the branch
-      // that consults this is the one an open route lets a client repeat
-      // without limit, and a provider on a busy install lists thousands of
-      // vessels. The `vessels.self` spelling at least one provider returns
-      // is resolved here, while `app.selfContext` is a single fixed value,
-      // so the lookup itself is a plain membership test.
-      .then((listed) => (listed === undefined ? undefined : toContextSet(listed, app.selfContext)))
-    const entry: KnownContexts = { at: now, contexts, pending: true }
-    // Dated from the answer, so a list that took long to arrive is still
-    // reused for the whole window. A failure is back-dated instead: the next
-    // miss after the failure window retries, while a burst inside it does not
-    // re-ask. Both handlers are attached here, so a rejection never escapes
-    // as an unhandled one.
-    contexts.then(
-      () => {
-        entry.pending = false
-        entry.at = Date.now()
-      },
-      () => {
-        entry.pending = false
-        entry.at = Date.now() - KNOWN_CONTEXTS_TTL_MS + KNOWN_CONTEXTS_FAILURE_TTL_MS
-      },
-    )
-    cache.current = entry
-  }
-  return withTimeout(cache.current!.contexts, HISTORY_QUERY_TIMEOUT_MS)
-}
-
-/**
- * Contexts a history provider holds data for within a window, or undefined
- * when it could not say.
- *
- * What lets the v2 provider return a vessel the store has never seen, or match
- * a box on positions only history recorded: the store is often far younger
- * than the provider. It also spares the provider a read for every vessel it
- * does not list. Best-effort like every other provider call: no provider
- * answers with no contexts; a provider without `getContexts`, an error or a
- * hang answer undefined, so no vessel is ruled out on a list that never came.
- *
- * A window with no start is asked from the epoch, for the same reason the
- * existence probe is; without any window the probe's cached all-time list is
- * reused rather than asking again per query.
- */
-async function historyContextsIn(
-  app: App,
-  window: TimeWindow | undefined,
-  debug: Debug,
-  cache: HistoryContextCache,
-): Promise<ReadonlySet<string> | undefined> {
-  const getHistoryApi = app.getHistoryApi
-  if (!getHistoryApi) {
-    return new Set()
-  }
-  try {
-    if (!window) {
-      return await knownHistoryContexts(app, cache)
-    }
-    const running = (cache.windowQueries ??= new Set())
-    const now = Date.now()
-    let slow = false
-    for (const entry of running) {
-      const age = now - entry.startedAt
-      // Given up on, as for the existence probe, so a query that never
-      // settles cannot switch windowed history off until a restart.
-      if (age >= KNOWN_CONTEXTS_PENDING_MAX_MS) {
-        running.delete(entry)
-      } else if (age >= HISTORY_QUERY_TIMEOUT_MS) {
-        slow = true
-      }
-    }
-    if (slow) {
-      if (debug.enabled) {
-        debug('History contexts skipped: an earlier windowed query is still running')
-      }
-      return undefined
-    }
-    const historyApi = await withTimeout(
-      getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
-      HISTORY_QUERY_TIMEOUT_MS,
-    )
-    if (!historyApi.getContexts) {
-      return undefined
-    }
-    const query = historyApi.getContexts({
-      from: Temporal.Instant.from(new Date(Math.max(window.from, EXISTENCE_PROBE_FROM_MS)).toISOString()),
-      to: Temporal.Instant.from(new Date(window.to).toISOString()),
-    })
-    const entry = { startedAt: Date.now() }
-    running.add(entry)
-    const settled = () => running.delete(entry)
-    query.then(settled, settled)
-    return toContextSet(await withTimeout(query, HISTORY_QUERY_TIMEOUT_MS), app.selfContext)
-  } catch (err) {
-    if (debug.enabled) {
-      debug(`History contexts unavailable: ${errorDetail(err)}`)
-    }
-    return undefined
-  }
-}
-
-/**
- * Positions a history provider holds for a window, or none.
- *
- * Best-effort by design: a provider that is absent, slow, or failing must not
- * fail the query, because the plugin's own store can always answer it. The
- * provider is the finer source where it reaches, not a required one.
- */
-async function historyPositions(
-  app: App,
-  context: Context,
-  window: TimeWindow,
-  resolutionMs: number,
-  debug: Debug,
-  reads: HistoryReads,
-): Promise<{ points: TimedPosition[]; resolutionMs: number; coarsened: boolean; failed: boolean }> {
-  // The API takes whole seconds, so the width the provider actually bucketed
-  // by is not necessarily the one asked for. Reconciling on the requested
-  // width would leave a stored point in a bucket history already covered, and
-  // keep both.
-  const askedSeconds = Math.max(1, Math.round(resolutionMs / 1000))
-  const none = (failed: boolean) => ({ points: [], resolutionMs: askedSeconds * 1000, coarsened: false, failed })
-  const getHistoryApi = app.getHistoryApi
-  if (!getHistoryApi) {
-    // Not a failure: no provider installed is the documented normal case, and
-    // the store answers alone. Only a provider that was asked and could not
-    // answer counts as one.
-    return none(false)
-  }
-  // Resolved in its own step, because failing to reach a provider and failing
-  // to read one are different answers. The server rejects this call outright
-  // when no provider is registered — the default install — and a service that
-  // is not installed cannot be having an outage. Only a read that fails after
-  // a provider was obtained is one.
-  let historyApi: HistoryApi
-  try {
-    // Bounded because both awaits reach third-party code. Without this a
-    // provider that never settles holds the request open, and the store
-    // fallback below is never reached — which would make the "best-effort"
-    // this function promises untrue.
-    historyApi = await withTimeout(
-      getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
-      HISTORY_QUERY_TIMEOUT_MS,
-    )
-  } catch (err) {
-    // A provider that was registered but did not answer in time is an outage;
-    // only the server's own rejection means there is nothing installed to ask.
-    const timedOut = err instanceof HistoryTimeoutError
-    if (debug.enabled) {
-      debug(`${timedOut ? 'History provider timed out' : 'No history provider'} for ${context}: ${errorDetail(err)}`)
-    }
-    return none(timedOut)
-  }
-  const read = async (from: number, seconds: number, throughEnd = false): Promise<TimedPosition[]> => {
-    const key = `${context}|${from}|${seconds}`
-    const now = Date.now()
-    let points = reads.get(key, window.to, now)
-    if (!points) {
-      points = historyApi
-        .getValues(positionQuery(context, from, window.to, seconds))
-        .then((response) => historyRows(response, seconds))
-      reads.add(key, window.to, now, points)
-    }
-    const read = await withTimeout(points, HISTORY_QUERY_TIMEOUT_MS)
-    // Clipped to the window rather than trusted: a provider that returns a
-    // wider range would otherwise widen the answer beyond what was asked, and
-    // a reused read may reach past this window's end. Matching the stores,
-    // which treat a window without `inclusiveEnd` as half-open so consecutive
-    // bands tile without repeating the point they share. Clipping inclusively
-    // here would reintroduce exactly that duplicate from the provider side.
-    const inclusive = window.inclusiveEnd || throughEnd
-    return read.filter(
-      ({ timestamp }) => timestamp >= window.from && (inclusive ? timestamp <= window.to : timestamp < window.to),
-    )
-  }
-  try {
-    // A window with only an end starts at minus infinity, which no Date can
-    // hold, so it is read from where the provider's data begins.
-    let from = Math.max(window.from, EXISTENCE_PROBE_FROM_MS)
-    if (!Number.isFinite(window.from)) {
-      const probeSeconds = Math.max(askedSeconds, Math.ceil((window.to - from) / 1000 / START_PROBE_BUCKETS))
-      // Through the end: a provider that stamps buckets on their end can put
-      // the last one exactly there, and the probe only needs to know where
-      // data begins, not to tile with a neighbouring window.
-      const probed = await read(from, probeSeconds, true)
-      if (probed.length === 0) {
-        return none(false)
-      }
-      // Back by one probe bucket, since providers disagree on whether a
-      // bucket's timestamp marks its start or its end.
-      const earliest = Math.min(...probed.map(({ timestamp }) => timestamp))
-      from = Math.max(from, earliest - probeSeconds * 1000)
-    }
-    const providerSeconds = Math.max(askedSeconds, Math.ceil((window.to - from) / 1000 / HISTORY_BUCKET_BUDGET))
-    const points = await read(from, providerSeconds)
-    if (debug.enabled) {
-      debug(`History supplied ${points.length} position(s) for ${context} at ${providerSeconds}s`)
-    }
-    return { points, resolutionMs: providerSeconds * 1000, coarsened: providerSeconds > askedSeconds, failed: false }
-  } catch (err) {
-    if (debug.enabled) {
-      debug(`History unavailable for ${context}: ${errorDetail(err)}`)
-    }
-    // Reported rather than swallowed. The store still answers where it can —
-    // a provider is an enrichment, not a dependency — but a caller with
-    // nothing else to serve has to be able to tell "no positions" from "could
-    // not ask".
-    return none(true)
-  }
-}
-
-/**
- * A track from the store and what history holds for it.
- *
- * History is the finer source where it reaches, so it wins its buckets —
- * unless the read was widened to stay within its budget, when it is the
- * coarser one and only fills what the store lacks.
- */
-const withHistory = (
-  history: { points: TimedPosition[]; resolutionMs: number; coarsened: boolean },
-  stored: TimedPosition[],
-): TimedPosition[] =>
-  history.points.length === 0
-    ? stored
-    : (history.coarsened ? fillFromHistory : reconcile)(history.points, stored, history.resolutionMs).positions
 
 /** Epoch milliseconds for a history row, or 0 when the timestamp is unusable. */
 const historyRowTimestamp = (row: unknown): number => {
@@ -1013,20 +443,12 @@ export default function ThePlugin(app: App): Plugin {
   /** Also what the plugin's own import route keeps tracks through. */
   let trackProvider: TrackProvider | undefined = undefined
   let segmentGap = 0
-  /**
-   * How often the store keeps a position, in ms.
-   *
-   * Used as the bucket width when reconciling with a history provider, so the
-   * two sources land on the same grid when a query names no resolution of its
-   * own.
-   */
   let storageError: string | undefined
-  let storeResolution = DEFAULT_RESOLUTION
   let binRetentionMs = DEFAULT_RECYCLE_BIN_DAYS * DAY_MS
   /**
    * The deleted spans of recorded tracks by context, loaded once and dropped
-   * whenever a delete, restore or purge changes them. Read for every history
-   * reconciliation, which would otherwise ask the store each time.
+   * whenever a delete, restore or purge changes them. Read for each day of a
+   * history import, which would otherwise ask the store each time.
    */
   let deletedSpans: Promise<Map<string, DeletedSpan[]>> | undefined
 
@@ -1051,40 +473,12 @@ export default function ThePlugin(app: App): Plugin {
     }
   }
 
-  /**
-   * What history holds for a context, without what was deleted from it.
-   *
-   * The plugin cannot delete from a history provider, so a deleted span is
-   * cut out of every answer it gives; the store's own rows went to the
-   * recycle bin and are not read at all.
-   */
-  async function visibleHistory(
-    context: Context,
-    window: TimeWindow,
-    resolutionMs: number,
-  ): ReturnType<typeof historyPositions> {
-    const history = await historyPositions(app, context, window, resolutionMs, app.debug, historyReads)
-    // Nothing to hide, and no reason to let a store error fail the read.
-    if (history.points.length === 0) {
-      return history
-    }
-    const spans = await deletedSpansOf(context)
-    return spans.length === 0 ? history : { ...history, points: outsideSpans(history.points, spans) }
-  }
   const sourceWatch = new SourceWatch()
   let glitchFilter = new GlitchFilter({ maxSpeedKnots: DEFAULT_MAX_SPEED_KNOTS })
   let stateGate = new StateGate(app.selfContext, DEFAULT_PAUSE_STATES)
   /** The own vessel's recording spacing per navigation.state, in ms. */
   let stateResolutions = new Map<string, number>()
   let otherVesselsResolution: number | undefined
-  /**
-   * The history provider's context list, cached between existence probes.
-   *
-   * Per plugin instance rather than module-global: two instances would
-   * otherwise answer from each other's provider.
-   */
-  const knownContexts: HistoryContextCache = { current: undefined }
-  const historyReads = new HistoryReads()
   /**
    * The history import while it runs, or as it last stopped; see
    * historyImport.ts. `stop` asks it to stop before its next day.
@@ -1164,7 +558,6 @@ export default function ThePlugin(app: App): Plugin {
       storageError = undefined
       historyImport = undefined
       const { resolution } = config
-      storeResolution = toNumber(config.resolution) ?? DEFAULT_RESOLUTION
       const segmentGapMinutes = toNumber(config.segmentGapMinutes) ?? DEFAULT_SEGMENT_GAP_MINUTES
       segmentGap = segmentGapMinutes > 0 ? segmentGapMinutes * 60 * 1000 : 0
       binRetentionMs = Math.max(1, toNumber(config.recycleBinDays) ?? DEFAULT_RECYCLE_BIN_DAYS) * DAY_MS
@@ -1340,34 +733,14 @@ export default function ThePlugin(app: App): Plugin {
         store: () => tracks,
         selfContext: () => app.selfContext,
         segmentGap: () => segmentGap,
-        recordingResolution: () => storeResolution,
         contextName: (context: string) =>
           contextName(
             context,
             remembering(() => tracks),
           ),
-        // The same reconciliation the v1 routes have done since #73. Without
-        // it the plugin answers differently depending on which route a client
-        // uses: the store alone through v2, the store enriched by a history
-        // provider through v1.
-        historyContexts: (window) => historyContextsIn(app, window, app.debug, knownContexts),
-        historyKnows: (context) => historyKnowsContext(app, context, app.debug, knownContexts),
+        importable: async (context) => context === app.selfContext && (await historyProviderAvailable(app)),
         deleted: () => {
           deletedSpans = undefined
-        },
-        reconcileWithHistory: async (context, stored, window, resolutionMs) => {
-          const effective = resolutionMs ?? storeResolution
-          // A query with no window still gets history, for the same reason
-          // the v1 route does: a context recorded only by the provider —
-          // before this plugin was installed — would otherwise never be asked
-          // about.
-          const asked = window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
-          const history = await visibleHistory(context, asked, effective)
-          // `failed` is deliberately not escalated here: the v2 contract has
-          // no per-context error and no 404, so a provider outage degrades to
-          // the store's own points rather than failing a multi-context query
-          // for every other vessel in it.
-          return withHistory(history, stored)
         },
         recordedOver: async (context, window) => {
           // Read through the filtered query, which leaves out a vessel the store
@@ -1379,14 +752,7 @@ export default function ThePlugin(app: App): Plugin {
             undefined,
             { window },
           )
-          const stored = collection?.[context] ?? []
-          const history = await visibleHistory(context, window, storeResolution)
-          if (history.failed) {
-            throw new HistoryUnavailableError(`History provider could not be read for ${context}`)
-          }
-          // Both sources whole rather than reconciled: the question is where
-          // either has a position, not which one draws there.
-          return [...stored, ...history.points]
+          return collection?.[context] ?? []
         },
       })
       app.registerTrackApiProvider?.(trackProvider)
@@ -1429,11 +795,6 @@ export default function ThePlugin(app: App): Plugin {
       sourceWatch.clear()
       glitchFilter.clear()
       stateGate.clear()
-      // A restart often follows a provider change; keeping the old list would
-      // answer from a provider that is no longer the one installed.
-      knownContexts.current = undefined
-      delete knownContexts.windowQueries
-      historyReads.clear()
       // Release the file handle a sqlite store holds, so a plugin restart does
       // not leak it and the WAL gets checkpointed.
       //
@@ -1462,56 +823,17 @@ export default function ThePlugin(app: App): Plugin {
         )
 
       /**
-       * The points of one context, reconciled with history and segmented.
+       * The points of one context, thinned and segmented.
        *
        * Shared by the JSON and GPX routes so the two cannot answer the same
-       * question differently: the history reconciliation, the windowless
-       * fallback and the 404-only-for-an-unknown-vessel rule are subtle enough
-       * that a second copy would drift.
+       * question differently.
        *
-       * Rejects with `undefined` when neither source knows the vessel at all.
+       * Resolves `undefined` for a vessel the store does not know at all; a
+       * known vessel with nothing inside the window is an empty track.
        */
       const readSegments = async (context: string, query: TrackQuery): Promise<TimedPosition[][] | undefined> => {
-        const effectiveResolution = query.resolution ?? storeResolution
-        const { points: stored, known } = await tracks!
-          // Resolving instead of rejecting for an unknown context: a vessel
-          // the store has never seen may still be in a history provider —
-          // recorded before this plugin was installed, say — and 404ing
-          // before asking would hide data that exists.
-          .getTimed(context, query.window)
-          .then((points) => ({ points, known: true }))
-          .catch(() => ({ points: [] as TimedPosition[], known: false }))
-        // A history provider is the finer source for as long as its retention
-        // reaches; the store keeps the older track, within its own retention,
-        // and any period the provider missed. A query with no window still gets
-        // history: `/self/track` with no parameters is the common case, and
-        // skipping the provider there would quietly serve store-only data.
-        const window = query.window ?? windowSpanning(stored, WINDOWLESS_HISTORY_SPAN_MS)
-        const history = await visibleHistory(context, window, effectiveResolution)
-        const points = withHistory(history, stored)
-        // 404 only for a vessel neither source knows at all. A known vessel
-        // with nothing inside the window is an empty track, not a missing one.
-        //
-        // The provider is asked a second time here, and only here: `getValues`
-        // narrowed to a window cannot distinguish an unknown vessel from one
-        // whose history lies outside it. That second question is deliberately
-        // not scoped to the window, for the same reason.
-        if (points.length === 0) {
-          // Either source knowing the vessel is enough: the store may hold it
-          // with nothing inside the asked window, which is an empty track
-          // rather than a missing one.
-          const vesselKnown = known || (await historyKnowsContext(app, context, app.debug, knownContexts))
-          if (!vesselKnown) {
-            return undefined
-          }
-          // Known, but there is nothing to serve and the one source that might
-          // have had something could not be read. Answering 200 here would
-          // report an outage as an empty history.
-          if (history.failed) {
-            throw new HistoryUnavailableError(`History provider could not be read for ${context}`)
-          }
-        }
-        return segment(thin(points, query.resolution), segmentGap)
+        const points = await tracks!.getTimed(context, query.window).catch(() => undefined)
+        return points && segment(thin(points, query.resolution), segmentGap)
       }
 
       const singleTrackHandler =
@@ -1546,16 +868,7 @@ export default function ThePlugin(app: App): Plugin {
                 name: nameOf(context),
               })
             })
-            .catch((err: unknown) => {
-              // A provider outage is not a missing vessel. Reporting it as 404
-              // told clients the track does not exist, which is the one thing
-              // a failed read cannot establish.
-              if (err instanceof HistoryUnavailableError) {
-                app.error(`${err.message}`)
-                res.status(503)
-                res.json({ message: `Track history is temporarily unavailable for ${context}` })
-                return
-              }
+            .catch(() => {
               res.status(404)
               res.json({ message: `No track available for ${context}` })
             })
@@ -1614,14 +927,6 @@ export default function ThePlugin(app: App): Plugin {
               // failing -- serialisation, a header, a write. Reporting that as
               // "no track available" is what disguised an ERR_INVALID_CHAR
               // from a non-Latin-1 filename as a missing track.
-              if (err instanceof HistoryUnavailableError) {
-                app.error(`${err.message}`)
-                if (!res.headersSent) {
-                  res.status(503)
-                  res.json({ message: `Track history is temporarily unavailable for ${context}` })
-                }
-                return
-              }
               app.error(`Could not export GPX for ${context}: ${errorDetail(err)}`)
               if (!res.headersSent) {
                 res.status(500)
@@ -1880,13 +1185,6 @@ export default function ThePlugin(app: App): Plugin {
               kept.push(await provider.importTrack(track, onOverlap))
             }
           } catch (err) {
-            // Filling only the gaps needs to know where history has positions.
-            if (err instanceof HistoryUnavailableError) {
-              res.status(503).json({
-                message: 'The history provider could not be read, so the gaps to fill are unknown; try again later',
-              })
-              return
-            }
             app.error(`GPX import: ${errorDetail(err)}`)
             res.status(500).json({ message: 'Track storage failed' })
             return

@@ -1,8 +1,7 @@
-import { Temporal } from '@js-temporal/polyfill'
 import request from 'supertest'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { fromGpx } from './gpx.js'
-import { createHarness, deferred, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
+import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { TestHarness } from './harness.test-utils.js'
 
 const API = '/signalk/v1/api'
@@ -48,41 +47,6 @@ describe('GET /vessels/:vesselId/track', () => {
     const res = await request(h.app).get(`${API}/vessels/urn:mrn:imo:mmsi:000000000/track`).expect(404)
 
     expect(res.body.message).toMatch(/No track available/)
-  })
-
-  // The same merge the v2 provider makes: a history read widened past its
-  // budget fills only what the store lacks.
-  it('lets a widened history read fill only what the store lacks', async () => {
-    const t0 = Date.UTC(2026, 7, 14, 9, 0, 0)
-    const to = t0 + 60 * 60 * 1000
-    const row = (timestamp: number, [lat, lng]: [number, number]) => [new Date(timestamp).toISOString(), [lng, lat]]
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: {
-        contexts: [SELF_CONTEXT],
-        aggregatesFirst: true,
-        rows: [row(t0 - 50 * 24 * 60 * 60 * 1000, [30, 40]), row(t0 + 30_000, [11, 21])],
-      },
-    }))
-    h.seedTrack(
-      SELF_CONTEXT,
-      [
-        [10, 20],
-        [10.1, 20.1],
-      ],
-      [t0 + 10_000, t0 + 40_000],
-    )
-    const from = new Date(to - 60 * 24 * 60 * 60 * 1000).toISOString()
-
-    const res = await request(h.app)
-      .get(`${API}/vessels/${SELF_ID}/track?from=${from}&to=${new Date(to).toISOString()}`)
-      .expect(200)
-
-    expect(res.body.coordinates.flat()).toEqual([
-      [40, 30],
-      [20, 10],
-      [20.1, 10.1],
-    ])
   })
 })
 
@@ -687,223 +651,8 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(extended).not.toMatch(/[!'()*]/)
   })
 
-  // A 404 means neither source knows the vessel. `getValues` narrowed to a
-  // window cannot tell an unknown vessel from one whose history lies outside
-  // it, so a vessel the provider lists is a known vessel with an empty track.
-  it('serves an empty track for a vessel history knows but has no rows for', async () => {
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { contexts: [OTHER_CONTEXT], rows: [] },
-    }))
-
-    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
-
-    expect(res.body.coordinates).toEqual([])
-  })
-
-  it('exports an empty GPX for that vessel rather than 404ing', async () => {
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { contexts: [OTHER_CONTEXT], rows: [] },
-    }))
-
-    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(200)
-
-    // Parsed rather than pattern-matched: a 200 carrying malformed GPX would
-    // otherwise pass. `toGpx` omits a <trk> that has no segments -- a track
-    // with a name and no points loses nothing by being left out -- so an empty
-    // export is a well-formed document carrying no tracks at all.
-    expect(res.text).toContain('<gpx ')
-    expect(fromGpx(res.text)).toEqual([])
-  })
-
-  it('still 404s when the provider lists no such context', async () => {
-    const h = (harness = createHarness({ selfPosition: [60, 24], history: { contexts: [], rows: [] } }))
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
-  })
-
-  // The upstream interface requires getContexts, but a provider built against
-  // an older server-api may not have it. A missing method must degrade to the
-  // old behaviour rather than throw.
-  it('still 404s against a provider with no getContexts', async () => {
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { rows: [], withoutGetContexts: true },
-    }))
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
-  })
-
-  // The reason the existence question is not scoped to the requested window.
-  // A provider filters its context list by the range it is asked for, and a
-  // bare /track with an empty store falls back to a window of the last day --
-  // so a vessel last seen before that is exactly the one a window-scoped probe
-  // would fail to rescue.
-  it('serves an empty track for a vessel whose history predates the fallback window', async () => {
-    const TWO_DAYS_AGO = Date.now() - 2 * 24 * 60 * 60 * 1000
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { contexts: [OTHER_CONTEXT], contextsSince: TWO_DAYS_AGO, rows: [] },
-    }))
-
-    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
-
-    expect(res.body.coordinates).toEqual([])
-  })
-
-  // The probe runs only for a vessel about to 404 -- which is exactly the
-  // request a client can repeat without limit, since the routes are open. One
-  // question to the provider must serve a burst of them, or enumerating vessel
-  // ids would drive an epoch-wide query each time.
-  it('asks the provider once for a burst of misses, not once per request', async () => {
-    let probes = 0
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: {
-        rows: [],
-        get contexts() {
-          probes += 1
-          return []
-        },
-      },
-    }))
-
-    for (let i = 0; i < 5; i += 1) {
-      await request(h.app).get(`${API}/vessels/vessels.urn:mrn:imo:mmsi:90000000${i}/track`).expect(404)
-    }
-
-    expect(probes).toBe(1)
-  })
-
-  // Two things make this test the real thing rather than a restatement of the
-  // cache. The provider's answer is held open, so the first caller cannot fill
-  // the cache before the others arrive. And every request is dispatched before
-  // any is awaited -- supertest does not send on construction, so building an
-  // array of requests and awaiting them later would run them one at a time and
-  // the cache alone would satisfy the assertion.
-  it('shares one in-flight query across concurrent misses', async () => {
-    let calls = 0
-    const gate = deferred()
-    const allArrived = deferred()
-    const probeStarted = deferred()
-    let arrived = 0
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: {
-        // Once per request on its way to the history read, and once more for
-        // the probe: the ninth call means all eight are past the store.
-        onHistoryApi: () => {
-          arrived += 1
-          if (arrived === 9) {
-            allArrived.release()
-          }
-        },
-        rows: [],
-        contexts: [],
-        deferContexts: {
-          release: gate.release,
-          get wait() {
-            calls += 1
-            probeStarted.release()
-            return gate.wait
-          },
-        },
-      },
-    }))
-    const arrivals = allArrived.wait
-
-    const inFlight = Array.from({ length: 8 }, () =>
-      request(h.app)
-        .get(`${API}/vessels/${OTHER_CONTEXT}/track`)
-        .then((r) => r),
-    )
-    // Waited on rather than slept through: the gate opens when the last of the
-    // eight has reached the store, so "all in flight" is observed, not timed.
-    await arrivals
-    // The worker read can still be pending after history arrivals; observe the probe itself.
-    await probeStarted.wait
-    expect(calls).toBe(1)
-
-    gate.release()
-    const responses = await Promise.all(inFlight)
-
-    expect(responses.map((r) => r.status)).toEqual(Array(8).fill(404))
-    expect(calls).toBe(1)
-  })
-
-  // The bound is the epoch, not a span of years, so a provider that still
-  // holds a context from long ago is not mistaken for one that never knew it.
-  it('finds a vessel whose history is older than any fixed span', async () => {
-    // Dated at the epoch itself, so any lower bound later than the epoch --
-    // fifteen years, twenty, any fixed span -- excludes the context and fails
-    // this test. A merely old fixture would survive a regression to a wider
-    // fixed window.
-    const UNIX_EPOCH = 0
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { contexts: [OTHER_CONTEXT], contextsSince: UNIX_EPOCH, rows: [] },
-    }))
-
-    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
-
-    expect(res.body.coordinates).toEqual([])
-  })
-
-  // A provider outage is not a missing vessel. With nothing in the store and
-  // no way to read the provider, there is no track to serve and no basis for
-  // claiming there is none -- so neither 200-with-nothing nor 404 is honest.
-  it('reports a provider outage as unavailable rather than as an empty track', async () => {
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { contexts: [OTHER_CONTEXT], rows: [], getValuesRejects: true },
-    }))
-
-    const res = await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(503)
-
-    expect(res.body.message).toMatch(/unavailable/i)
-  })
-
-  it('reports the same outage on the GPX route', async () => {
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { contexts: [OTHER_CONTEXT], rows: [], getValuesRejects: true },
-    }))
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(503)
-  })
-
-  // `known` alone is not a reason to answer 200. The store can hold a vessel
-  // and still have nothing inside the asked window, and if the provider that
-  // might have covered it cannot be read, there is still nothing to serve.
-  it('reports an outage even when the store knows the vessel', async () => {
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { contexts: [], rows: [], getValuesRejects: true },
-    }))
-    // Stored, but long before the window the request asks for.
-    h.seedTrack(OTHER_CONTEXT, [[60.2, 24.8]], [Date.now() - 90 * 24 * 60 * 60 * 1000])
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track?timespan=1h`).expect(503)
-  })
-
-  // A registered provider that wedges is an outage, not an absent one. The
-  // distinction matters because the bound expiring and the server saying "no
-  // provider configured" both surface as a rejected `getHistoryApi`.
-  it('reports an outage when a registered provider never resolves', async () => {
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { providerHangs: true },
-    }))
-    h.seedTrack(OTHER_CONTEXT, [[60.2, 24.8]], [Date.now() - 90 * 24 * 60 * 60 * 1000])
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track?timespan=1h`).expect(503)
-  }, 20_000)
-
-  // The server rejects `getHistoryApi` outright when no provider is
-  // registered, which is the default install. A service that is not installed
-  // cannot be having an outage, so this must stay an ordinary empty track --
-  // the plugin has to work with no history provider at all.
+  // A known vessel with nothing inside the window is an empty track, not a
+  // missing one, on a server with no history provider too.
   it('serves an empty track when no history provider is registered', async () => {
     const h = (harness = createHarness({
       selfPosition: [60, 24],
@@ -917,8 +666,7 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(res.body.coordinates).toEqual([])
   })
 
-  // The store remains the fallback: a provider is an enrichment, not a
-  // dependency, so an outage must not fail a query the store can answer.
+  // A provider takes no part in a read, so its outage cannot fail one.
   it('still serves the stored track when the provider fails', async () => {
     const h = (harness = createHarness({
       selfPosition: [60, 24],
@@ -931,293 +679,14 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(res.body.coordinates.flat()).not.toHaveLength(0)
   })
 
-  // An outage does not turn an unknown vessel into an available one: if the
-  // provider can still say it never knew the vessel, 404 remains correct.
-  it('still 404s when the provider fails but reports no such vessel', async () => {
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { contexts: [], rows: [], getValuesRejects: true },
-    }))
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
-  })
-
-  // The cache has to expire, or a vessel a provider has newly learned about
-  // would stay invisible for the rest of the process.
-  it('asks again once the cached list has expired', async () => {
-    let probes = 0
-    let known: string[] = []
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: {
-        rows: [],
-        get contexts() {
-          probes += 1
-          return known
-        },
-      },
-    }))
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
-    expect(probes).toBe(1)
-
-    // The provider learns about the vessel, and the clock passes the window.
-    known = [OTHER_CONTEXT]
-    // Only the clock, not the timer set: the request passes through
-    // `withTimeout`, which arms a real `setTimeout` to bound the provider
-    // call. Faking that too would leave a hung call with nothing to reject it.
-    vi.useFakeTimers({ toFake: ['Date'] })
-    try {
-      vi.setSystemTime(Date.now() + 31_000)
-      await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
-    } finally {
-      vi.useRealTimers()
-    }
-    expect(probes).toBe(2)
-  })
-
-  // A restart usually follows a provider change, so the list a stopped plugin
-  // had must not answer for the provider that replaces it.
-  it('forgets the cached context list across a restart', async () => {
-    let known: string[] = []
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: {
-        rows: [],
-        get contexts() {
-          return known
-        },
-      },
-    }))
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
-
-    // The provider now knows the vessel. Without the restart the cached list
-    // would keep answering 404 for the rest of the window.
-    known = [OTHER_CONTEXT]
-    await h.stop()
-    h.restart()
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
-  })
-
-  // The cache exists because an open route lets a client repeat a miss without
-  // limit. Dropping the entry the moment a probe fails would hand exactly that
-  // cost back for the one provider least able to bear it: each later miss
-  // starting another query while the earlier ones are still pending.
-  it('does not re-ask a failing provider once per request', async () => {
-    let probes = 0
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: {
-        rows: [],
-        contexts: [OTHER_CONTEXT],
-        get getContextsRejects() {
-          probes += 1
-          return true
-        },
-      },
-    }))
-
-    // Frozen rather than left to wall time: the window is a second, and five
-    // sequential requests that each reach sqlite can outrun it on a loaded
-    // runner -- which would fail the test for being slow rather than wrong.
-    // Only the clock is faked; `withTimeout` needs a real timer set.
-    vi.useFakeTimers({ toFake: ['Date'] })
-    try {
-      for (let i = 0; i < 5; i += 1) {
-        await request(h.app).get(`${API}/vessels/vessels.urn:mrn:imo:mmsi:90000000${i}/track`).expect(404)
-      }
-    } finally {
-      vi.useRealTimers()
-    }
-
-    expect(probes).toBe(1)
-  })
-
-  // A failed probe must not be remembered: the next miss has to ask again
-  // rather than inherit the rejection for the rest of the window.
-  it('retries after a failed existence query rather than caching the failure', async () => {
-    let probes = 0
-    let failing = true
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: {
-        rows: [],
-        contexts: [OTHER_CONTEXT],
-        get getContextsRejects() {
-          probes += 1
-          return failing
-        },
-      },
-    }))
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
-    failing = false
-
-    // Past the failure window, not instantly: a failed probe is remembered
-    // briefly so a wedged provider is not re-asked by every request, and the
-    // behaviour being pinned is that it is not remembered *indefinitely*.
-    // Only the clock is faked -- `withTimeout` needs a real timer set.
-    vi.useFakeTimers({ toFake: ['Date'] })
-    try {
-      vi.setSystemTime(Date.now() + 2_000)
-      await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
-    } finally {
-      vi.useRealTimers()
-    }
-    expect(probes).toBeGreaterThan(1)
-  })
-
-  it('still 404s when the existence query itself fails', async () => {
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { contexts: [OTHER_CONTEXT], rows: [], getContextsRejects: true },
-    }))
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
-  })
-
-  // A provider that never answers must not hold the request open indefinitely:
-  // the bounded call gives up and the 404 stands.
-  it('still 404s when the existence query never settles', async () => {
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { contexts: [OTHER_CONTEXT], rows: [], getContextsHangs: true },
-    }))
-
-    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
-  }, 15_000)
-
-  // The provider cannot be told to stop a query nobody waits for any more, so
-  // a probe that outlasts the timeout is still scanning; another started
-  // beside it would scan the whole database again.
-  it('waits for a slow existence query to finish before asking again', async () => {
-    let probes = 0
-    const gate = deferred()
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: {
-        rows: [],
-        get contexts() {
-          probes += 1
-          return [OTHER_CONTEXT]
-        },
-        deferContexts: gate,
-      },
-    }))
-
-    // Only the clock is faked -- `withTimeout` needs a real timer set.
-    vi.useFakeTimers({ toFake: ['Date'] })
-    try {
-      await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
-      // Past the failure window: a timeout is not a failure to retry.
-      vi.setSystemTime(Date.now() + 2_000)
-      await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
-      expect(probes).toBe(1)
-
-      gate.release()
-      await gate.wait
-      vi.setSystemTime(Date.now() + 2_000)
-      // The late answer fills the cache, so the vessel is known without asking.
-      await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(200)
-    } finally {
-      vi.useRealTimers()
-    }
-    expect(probes).toBe(1)
-  }, 30_000)
-
-  it('does not ask for a window while a slow windowed query is still running', async () => {
-    let queries = 0
-    const gate = deferred()
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: {
-        rows: [],
-        get contexts() {
-          queries += 1
-          return [OTHER_CONTEXT]
-        },
-        deferContexts: gate,
-      },
-    }))
-    const window = () => ({
-      from: Temporal.Instant.fromEpochMilliseconds(Date.now() - 3_600_000),
-      to: Temporal.Instant.fromEpochMilliseconds(Date.now()),
-    })
-
-    await h.trackProvider()!.getTracks(window())
-    await h.trackProvider()!.getTracks(window())
-    expect(queries).toBe(1)
-
-    gate.release()
-    await gate.wait
-    // Once it has settled, the next window is asked again.
-    await new Promise((resolve) => setImmediate(resolve))
-    await h.trackProvider()!.getTracks(window())
-    expect(queries).toBe(2)
-  }, 30_000)
-
-  // Each running query holds the others back on its own, so the one that
-  // settles first cannot reopen the provider while another still runs.
-  it('keeps waiting while any of several slow windowed queries is still running', async () => {
-    let queries = 0
-    const gates = [deferred(), deferred(), deferred()]
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: {
-        rows: [],
-        contexts: [OTHER_CONTEXT],
-        get deferContexts() {
-          queries += 1
-          return gates[queries - 1]!
-        },
-      },
-    }))
-    const window = () => ({
-      from: Temporal.Instant.fromEpochMilliseconds(Date.now() - 3_600_000),
-      to: Temporal.Instant.fromEpochMilliseconds(Date.now()),
-    })
-
-    await Promise.all([h.trackProvider()!.getTracks(window()), h.trackProvider()!.getTracks(window())])
-    expect(queries).toBe(2)
-
-    gates[1]!.release()
-    await gates[1]!.wait
-    await new Promise((resolve) => setImmediate(resolve))
-    await h.trackProvider()!.getTracks(window())
-    expect(queries).toBe(2)
-
-    gates[0]!.release()
-    await gates[0]!.wait
-    await new Promise((resolve) => setImmediate(resolve))
-    await h.trackProvider()!.getTracks(window())
-    expect(queries).toBe(3)
-    gates[2]!.release()
-  }, 30_000)
-
-  // At least one provider maps its stored `self` back to the spec's spelling,
-  // so the own vessel has to be recognised under either one.
-  it('accepts vessels.self as naming the own vessel', async () => {
-    const h = (harness = createHarness({
-      selfPosition: [60, 24],
-      history: { contexts: ['vessels.self'], rows: [] },
-    }))
-
-    const res = await request(h.app).get(`${API}/vessels/${SELF_ID}/track`).expect(200)
-
-    expect(res.body.coordinates).toEqual([])
-  })
-
-  it('404s for a vessel neither the store nor history knows', async () => {
+  it('404s for a vessel the store does not know', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
 
     await request(h.app).get(`${API}/vessels/urn:mrn:imo:mmsi:999999999/track.gpx`).expect(404)
   })
 
   // The GPX and JSON routes share one read pipeline, so a query answered by
-  // one must be answered the same way by the other -- the history
-  // reconciliation and windowless fallback are too subtle to duplicate.
+  // one must be answered the same way by the other.
   it('returns the same points as the JSON route', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]], [SELF_CONTEXT, [60.2, 25.0]])
 
@@ -1235,6 +704,51 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
 
 // Thinning spaces points further apart than the gap, so a thinned track must
 // not be segmented at the gap alone (#133).
+// Reads come from the store alone: what a provider holds reaches a track
+// through the history import, once, rather than on every query.
+describe('reads with a history provider installed', () => {
+  it('ask the provider nothing', async () => {
+    let asked = 0
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: {
+        get contexts() {
+          asked++
+          return [SELF_CONTEXT, OTHER_CONTEXT]
+        },
+        rows: [[new Date(Date.now() - 60_000).toISOString(), [25, 61]]],
+        onValues: () => {
+          asked++
+        },
+        onHistoryApi: () => {
+          asked++
+        },
+      },
+    }))
+    h.seedTrack(SELF_CONTEXT, [[60.1, 24.9]], [Date.now() - 120_000])
+
+    const track = await request(h.app).get(`${API}/vessels/${SELF_ID}/track`).expect(200)
+    await request(h.app).get(`${API}/self/track.gpx`).expect(200)
+    const all = await request(h.app).get(`${API}/tracks?times`).expect(200)
+    const v2 = await h.trackProvider()!.getTracks({ contexts: [SELF_CONTEXT, OTHER_CONTEXT] })
+
+    expect(track.body.coordinates).toEqual([[[24.9, 60.1]]])
+    expect(Object.keys(all.body)).toEqual([SELF_CONTEXT])
+    expect(v2.features.map(({ properties }) => properties.context)).toEqual([SELF_CONTEXT])
+    expect(asked).toBe(0)
+  })
+
+  it('404 a vessel only the provider holds', async () => {
+    const h = (harness = createHarness({
+      selfPosition: [60, 24],
+      history: { contexts: [OTHER_CONTEXT], rows: [[new Date(Date.now() - 60_000).toISOString(), [25, 61]]] },
+    }))
+
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track.gpx`).expect(404)
+  })
+})
+
 describe('segment gaps on a thinned track', () => {
   const MINUTE = 60_000
   // One fix a minute, fifteen minutes long, gap setting two minutes: any split

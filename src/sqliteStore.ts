@@ -329,7 +329,7 @@ export class SqliteTrackStore implements TrackStore {
       ) WITHOUT ROWID;
       -- The recycle bin. A delete moves rows here rather than removing them,
       -- so the tables every read uses stay as they are and a restore moves
-      -- them back. A purged recorded span keeps its row: a history provider
+      -- them back. A purged recorded span keeps its row: the history import
       -- would otherwise fill the deleted window back in.
       CREATE TABLE IF NOT EXISTS recycle_bin (
         id          INTEGER PRIMARY KEY,
@@ -508,7 +508,7 @@ export class SqliteTrackStore implements TrackStore {
     // installing a known track is authoritative for the window it covers.
     this.db.prepare('DELETE FROM positions WHERE context = ?').run(context)
     // Bypasses the throttle: these points are already at whatever resolution
-    // the history provider returned, and they are back-dated, so throttling
+    // the caller recorded them at, and they are back-dated, so throttling
     // against the newest-seen timestamp would drop most of them.
     for (const [i, position] of track.entries()) {
       this.store(context, position, timestamps?.[i] ?? 0)
