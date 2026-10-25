@@ -453,20 +453,23 @@ describe('significance levels', () => {
     store.close()
   })
 
-  it('refines a day again once a history import fills part of it', () => {
+  it('refines a day again once a history import fills part of it', async () => {
     const store = newStore()
     seedHour(store, day0)
     store.refineLevels(later)
-    expect(levels(store, day0, day0 + DAY)).not.toEqual([])
     const filled = Array.from({ length: 60 }, (_, i) => ({
       position: [60.01, 24.01 + i * 1e-5] as LatLngTuple,
       timestamp: day0 + 120 * MINUTE + i * 1000,
     }))
     store.saveHistoryImport({ context: ctx, startedAt: later, filled: 60 }, [filled])
-    // Taken out until refined again, so a read at a tolerance reads positions.
-    expect(levels(store, day0, day0 + DAY)).toEqual([])
+    const window: TimeWindow = { from: day0, to: day0 + DAY }
+    const all = await store.getTimed(ctx, window)
+    expect(all.filter(({ timestamp }) => timestamp >= filled[0]!.timestamp)).toEqual(filled)
+    // Until refined again, a read at a tolerance reads every position, the filled ones too.
+    expect(await store.getTimed(ctx, window, undefined, 20)).toEqual(all)
     store.refineLevels(later)
-    expect(levels(store, day0, day0 + DAY)).not.toEqual([])
+    expect((await store.getTimed(ctx, window, undefined, 20)).length).toBeLessThan(all.length / 2)
+    await readsAsSimplified(store, window)
     store.close()
   })
 
