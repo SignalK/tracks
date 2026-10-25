@@ -194,11 +194,12 @@ describe('the history import through a real history provider', () => {
   it('fills what the recording paused for from what the provider recorded', async () => {
     if (!available || !server) return
     // Moored, the plugin records nothing of the own vessel, and the provider
-    // records on. An hour back, away from the fixes the tests above fed.
-    const t0 = Date.now() - 60 * MINUTE
+    // records on. It stamps a fix with the time it arrives, not the one the
+    // fix carries, so these are sent as now.
     await server.feedState(server.selfContext, 'moored')
+    const t0 = Date.now()
     for (let i = 0; i < 20; i++) {
-      await server.feed(server.selfContext, [60.1 + i * 1e-5, 24.9], t0 + i * 1000)
+      await server.feed(server.selfContext, [60.1 + i * 1e-5, 24.9], Date.now())
     }
     await server.feedState(server.selfContext, 'sailing')
 
@@ -220,9 +221,18 @@ describe('the history import through a real history provider', () => {
       return filled >= 20 ? last : undefined
     }, 120_000)
 
-    expect(done, JSON.stringify(last)).toBeDefined()
+    // On a failure, what the provider says it holds for those fixes.
+    const held = done
+      ? ''
+      : await fetch(
+          `${server.url}/signalk/v2/api/history/values?paths=navigation.position&resolution=1` +
+            `&from=${new Date(t0 - MINUTE).toISOString()}&to=${new Date().toISOString()}`,
+        ).then((res) => res.text())
+    expect(done, `${JSON.stringify(last)} ${held.slice(0, 1500)}`).toBeDefined()
     expect(done!.error).toBeUndefined()
     expect(Date.parse(done!.firstDay!)).toBeLessThanOrEqual(t0)
-    expect(filled).toBe(20)
+    // The provider also holds the fixes the tests above fed, stamped when
+    // they arrived, where the plugin recorded them at the times they carry.
+    expect(filled).toBeGreaterThanOrEqual(20)
   }, 300_000)
 })
