@@ -172,11 +172,18 @@ export interface SqliteStoreConfig {
   binRetention?: number
   /** Cells per bounding box covering. */
   maxCells?: number
+  /**
+   * The most rows a clipped read counts, in the box and in the window, to
+   * choose between reading a named vessel by cell and by time.
+   */
+  readProbeLimit?: number
   /** A gap longer than this ms starts a new track segment. */
   segmentGap?: number
 }
 
 const DEFAULT_MAX_CELLS = 8
+/** See SqliteStoreConfig.readProbeLimit: counting this many index entries takes about 10 ms on a Pi 5. */
+const DEFAULT_READ_PROBE_LIMIT = 50_000
 /**
  * The span of positions one read in `getTimed` holds at a time: a day, at
  * most 86,400 rows at one per second.
@@ -225,6 +232,7 @@ export class SqliteTrackStore implements TrackStore {
   private readonly selectName: StatementSync
   private readonly selectImportedPoints: StatementSync
   private readonly maxCells: number
+  private readonly readProbeLimit: number
   private readonly segmentGap: number
   private readonly retention: number
   private readonly binRetention: number
@@ -245,6 +253,7 @@ export class SqliteTrackStore implements TrackStore {
 
   constructor(config: SqliteStoreConfig, debug: Debug) {
     this.maxCells = config.maxCells ?? DEFAULT_MAX_CELLS
+    this.readProbeLimit = config.readProbeLimit ?? DEFAULT_READ_PROBE_LIMIT
     this.segmentGap = config.segmentGap ?? DEFAULT_SEGMENT_GAP
     this.retention = config.retention ?? 0
     this.binRetention = config.binRetention ?? 0
@@ -377,13 +386,18 @@ export class SqliteTrackStore implements TrackStore {
     // and in the same transaction, so the new one reuses its pages rather
     // than growing the file by both, and a build that fails leaves it as it
     // was.
-    const building = !this.db
-      .prepare("SELECT 1 AS found FROM sqlite_master WHERE name = 'idx_context_time_position'")
-      .get()
+    //
+    // (context, s2cell) reads a box for one vessel without its whole window:
+    // the cell index alone mixes every vessel near the box, and the index
+    // above finds the vessel but orders its rows by time.
+    const building = ['idx_context_time_position', 'idx_context_s2cell'].some(
+      (name) => !this.db.prepare('SELECT 1 AS found FROM sqlite_master WHERE name = ?').get(name),
+    )
     this.transaction(() =>
       this.db.exec(`
         DROP INDEX IF EXISTS idx_context_timestamp;
         CREATE INDEX IF NOT EXISTS idx_context_time_position ON positions(context, timestamp, lat, lon);
+        CREATE INDEX IF NOT EXISTS idx_context_s2cell ON positions(context, s2cell);
       `),
     )
     if (building) {
@@ -394,7 +408,7 @@ export class SqliteTrackStore implements TrackStore {
       // it.
       const { busy } = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number }
       if (busy) {
-        this.debug('position index built; another connection kept the write-ahead log from being truncated')
+        this.debug('position indexes built; another connection kept the write-ahead log from being truncated')
       }
     }
     // Imports kept before their time was: dated to the first start that knew to.
@@ -760,6 +774,66 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   /**
+   * The positions of named contexts within a cell covering, each read by
+   * time or by cell, whichever reads fewer rows.
+   *
+   * Asked for the context and every range at once, SQLite chose the (context,
+   * timestamp) index and walked each vessel's whole window, testing every row
+   * against the covering: a view over a harbour visited once read years of
+   * the own track. Read by cell, each range is one seek over the vessel's
+   * rows inside it, at any time: the cost is the rows the box holds, the cost
+   * by time the rows the window holds. So both are counted from an index
+   * alone, the window only up to the box's count, and the window is read by
+   * time only where it holds fewer: a short window over a box the vessel has
+   * long been in. Each count stops at `readProbeLimit`; where both reach it,
+   * both are counted once more to eight times that, so a day at one fix a
+   * second, 86,400 rows, is told from a box of months.
+   */
+  private *namedNearBounds(
+    contexts: Context[],
+    clause: { where: string; params: bigint[] },
+    inWindow: string,
+    timeParams: number[],
+  ): Generator<PositionRow> {
+    const boxCount = this.db.prepare(
+      'SELECT count(*) AS n FROM (SELECT 1 FROM positions INDEXED BY idx_context_s2cell WHERE context = ? AND s2cell BETWEEN ? AND ? LIMIT ?)',
+    )
+    const windowCount = this.db.prepare(
+      `SELECT count(*) AS n FROM (SELECT 1 FROM positions INDEXED BY idx_context_time_position WHERE context = ?${inWindow} LIMIT ?)`,
+    )
+    let byTime: StatementSync | undefined
+    let byCell: StatementSync | undefined
+    for (const context of contexts) {
+      let boxRows = 0
+      let windowRows = 0
+      for (const limit of [this.readProbeLimit, 8 * this.readProbeLimit]) {
+        boxRows = 0
+        for (let i = 0; i < clause.params.length && boxRows < limit; i += 2) {
+          const left = limit - boxRows
+          boxRows += (boxCount.get(context, clause.params[i]!, clause.params[i + 1]!, left) as { n: number }).n
+        }
+        windowRows = boxRows > 0 ? (windowCount.get(context, ...timeParams, boxRows) as { n: number }).n : 0
+        if (boxRows < limit || windowRows < boxRows) {
+          break
+        }
+      }
+      if (windowRows < boxRows) {
+        byTime ??= this.db.prepare(
+          `SELECT context, timestamp, lat, lon FROM positions INDEXED BY idx_context_time_position WHERE context = ? AND (${clause.where})${inWindow}`,
+        )
+        yield* byTime.all(context, ...clause.params, ...timeParams) as unknown as PositionRow[]
+        continue
+      }
+      byCell ??= this.db.prepare(
+        `SELECT context, timestamp, lat, lon FROM positions INDEXED BY idx_context_s2cell WHERE context = ? AND s2cell BETWEEN ? AND ?${inWindow}`,
+      )
+      for (let i = 0; i < clause.params.length; i += 2) {
+        yield* byCell.all(context, clause.params[i]!, clause.params[i + 1]!, ...timeParams) as unknown as PositionRow[]
+      }
+    }
+  }
+
+  /**
    * Per context, the positions a track clipped to `bounds` is made of, and
    * only those: every position inside the box within the window, plus the one
    * either side of each stretch inside, which carries the line to the edge.
@@ -792,16 +866,19 @@ export class SqliteTrackStore implements TrackStore {
     const timeParams = window ? [window.from, window.to] : []
     const inWindow = timeClauses.map((c) => ` AND ${c}`).join('')
     const named = contexts ? [...contexts] : []
-    const inContexts = contexts ? ` AND context IN (${named.map(() => '?').join(', ')})` : ''
 
-    const inside = this.db
-      .prepare(
-        `SELECT context, timestamp, lat, lon FROM positions WHERE (${clause.where})${inContexts}${inWindow} ORDER BY context, timestamp`,
-      )
-      .all(...clause.params, ...named, ...timeParams) as unknown as PositionRow[]
+    const inside: Iterable<PositionRow> = contexts
+      ? this.namedNearBounds(named, clause, inWindow, timeParams)
+      : (this.db
+          .prepare(
+            `SELECT context, timestamp, lat, lon FROM positions WHERE (${clause.where})${inWindow} ORDER BY context, timestamp`,
+          )
+          .all(...clause.params, ...timeParams) as unknown as PositionRow[])
     const inBounds = createInBounds(bounds)
     const times = new Map<Context, number[]>()
+    let insideRows = 0
     for (const { context, timestamp, lat, lon } of inside) {
+      insideRows++
       if (inBounds([lat, lon])) {
         const list = times.get(context)
         if (list) {
@@ -809,6 +886,12 @@ export class SqliteTrackStore implements TrackStore {
         } else {
           times.set(context, [timestamp])
         }
+      }
+    }
+    // Read range by range, the named contexts' times can come in cell order.
+    if (contexts) {
+      for (const list of times.values()) {
+        list.sort((a, b) => a - b)
       }
     }
 
@@ -838,7 +921,7 @@ export class SqliteTrackStore implements TrackStore {
       )
     }
     if (this.debug.enabled) {
-      this.debug(`clip covering ${clause.cells} cells -> ${inside.length} rows -> ${near.size} contexts`)
+      this.debug(`clip covering ${clause.cells} cells -> ${insideRows} rows -> ${near.size} contexts`)
     }
     return near
   }

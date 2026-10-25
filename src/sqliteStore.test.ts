@@ -331,8 +331,7 @@ describe('clip reads', () => {
   const outside: LatLngTuple = [59, 20]
 
   /** A day outside, an hour inside, a day outside, an hour inside, an hour outside; one fix a minute. */
-  const seeded = (): { store: SqliteTrackStore; all: TimedPosition[] } => {
-    const store = newStore()
+  const seeded = (store = newStore()): { store: SqliteTrackStore; all: TimedPosition[] } => {
     const legs: [LatLngTuple, number][] = [
       [outside, 24 * 60],
       [inside, 60],
@@ -390,6 +389,81 @@ describe('clip reads', () => {
     expect([...near.mock.results[1]!.value.keys()].sort()).toEqual([ctx, other].sort())
     store.close()
   })
+
+  // A named vessel is read one cell range at a time, so its times arrive in
+  // cell order. The middle visit lies in another corner of the box than the
+  // first and the last, so cell order and time order differ.
+  it('reads the visits of a named vessel in time order whatever cells they lie in', async () => {
+    // Counting one row of box and window: never fewer in the window, so read by cell.
+    const store = new SqliteTrackStore({ file: ':memory:', readProbeLimit: 1 }, debug)
+    const legs: [LatLngTuple, number][] = [
+      [outside, 60],
+      [[60.9, 24.9], 30],
+      [outside, 60],
+      [[60.1, 24.1], 30],
+      [outside, 60],
+      [[60.9, 24.9], 30],
+      [outside, 60],
+    ]
+    const all: TimedPosition[] = []
+    for (const [position, minutes] of legs) {
+      for (let i = 0; i < minutes; i++) {
+        all.push({ position, timestamp: all.length * MINUTE })
+      }
+    }
+    store.initialTrack(
+      ctx,
+      all.map(({ position }) => position),
+      all.map(({ timestamp }) => timestamp),
+    )
+
+    const clipped = { bbox: box, radius: null, intersects: true, clip: true }
+    const named = await store.getFilteredTimedTracks({ ...clipped, contexts: [ctx] })
+    const unnamed = await store.getFilteredTimedTracks(clipped)
+    expect(named[ctx]).toEqual(unnamed[ctx])
+    expect(clipToBounds(named[ctx]!, box)).toEqual(clipToBounds(all, box))
+    store.close()
+  })
+
+  // The box holds two hours of the vessel's three days. A window of forty
+  // minutes holds fewer rows than the box, the whole track more, and either
+  // read must give what the read without named vessels gives. With a limit
+  // of 10 both first counts reach it, and the second, to 80, tells them apart.
+  it.each([1000, 10])(
+    'reads a named vessel by time for a short window and by cell for a long one, counting to %i',
+    async (readProbeLimit) => {
+      const { store } = seeded(new SqliteTrackStore({ file: ':memory:', readProbeLimit }, debug))
+      const db = store['db']
+      const prepare = db.prepare.bind(db)
+      const prepared: string[] = []
+      vi.spyOn(db, 'prepare').mockImplementation((sql: string) => {
+        prepared.push(sql)
+        return prepare(sql)
+      })
+      const clipped = { bbox: box, radius: null, intersects: true, clip: true }
+      const enter = 24 * 60 * MINUTE
+      // The statements that read positions, as opposed to the counts before them.
+      const reads = [
+        [
+          { from: enter - 10 * MINUTE, to: enter + 30 * MINUTE },
+          'lon FROM positions INDEXED BY idx_context_time_position',
+        ],
+        [{ from: 0, to: 3 * 24 * 60 * MINUTE }, 'lon FROM positions INDEXED BY idx_context_s2cell'],
+      ] as const
+      for (const [window, read] of reads) {
+        prepared.length = 0
+        const named = await store.getFilteredTimedTracks({ ...clipped, contexts: [ctx] }, undefined, undefined, {
+          window,
+        })
+        for (const [, other] of reads) {
+          expect(prepared.some((sql) => sql.includes(other))).toBe(other === read)
+        }
+        const unnamed = await store.getFilteredTimedTracks(clipped, undefined, undefined, { window })
+        expect(named[ctx]).toEqual(unnamed[ctx])
+      }
+      store.close()
+    },
+  )
 
   it('keeps the edge points inside the time window', async () => {
     const { store } = seeded()
@@ -1021,7 +1095,7 @@ describe('the position index', () => {
   it.each([
     ['the narrower index', 'CREATE INDEX idx_context_timestamp ON positions(context, timestamp);'],
     ['no index by vessel and time', ''],
-  ])('builds the index on a database an older version wrote with %s', async (_, index) => {
+  ])('builds the indexes on a database an older version wrote with %s', async (_, index) => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
     try {
       const file = join(dir, 'tracks.db')
@@ -1044,7 +1118,7 @@ describe('the position index', () => {
       const indexes = store['db']
         .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'positions' ORDER BY name")
         .all() as { name: string }[]
-      expect(indexes.map(({ name }) => name)).toEqual(['idx_context_time_position', 'idx_s2cell'])
+      expect(indexes.map(({ name }) => name)).toEqual(['idx_context_s2cell', 'idx_context_time_position', 'idx_s2cell'])
       // Built over the old index's pages, so none of them are left over, and
       // the write-ahead log the build went through is emptied.
       expect(store['db'].prepare('PRAGMA freelist_count').get()).toEqual({ freelist_count: 0 })
