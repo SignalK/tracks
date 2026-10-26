@@ -2009,12 +2009,13 @@ export class SqliteTrackStore implements TrackStore {
    * is binned. The runs are judged again here, in the same transaction,
    * against the recording as it is now: another upload or a restore can
    * write into a gap while history is read for it, and what it wrote stays.
+   * Each run is written before the next is judged, so two runs that overlap
+   * are not both written.
    */
   fillTrack(context: Context, runs: TimedPosition[][]): number {
     const recorded = this.db.prepare(
       'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?',
     )
-    const kept: TimedPosition[][] = []
     let overlapping = 0
     for (const run of runs) {
       const first = run[0]
@@ -2024,10 +2025,9 @@ export class SqliteTrackStore implements TrackStore {
         timestamp: number
       }[]
       const judged = fillGaps([run], around, MIN_FILLED_GAP_MS)
-      kept.push(...judged.runs)
+      this.fill(context, judged.runs)
       overlapping += judged.overlapping
     }
-    this.fill(context, kept)
     return overlapping
   }
 

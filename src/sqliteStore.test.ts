@@ -2137,6 +2137,22 @@ describe('an import filling the gaps in a recording', () => {
     }
   })
 
+  it('judges each run against the ones written before it in the same call', async () => {
+    const store = newStore()
+    try {
+      const first = run(61, t0, 121, 10_000)
+      const second = run(62, t0 + 5 * MINUTE, 121, 10_000)
+      expect(store.fillTrack(ctx, [first, second])).toBe(91)
+      const points = await store.getTimed(ctx)
+      expect(points.filter(({ position }) => position[0] === 61)).toHaveLength(121)
+      expect(points.filter(({ position }) => position[0] === 62).map(({ timestamp }) => timestamp)).toEqual(
+        second.slice(91).map(({ timestamp }) => timestamp),
+      )
+    } finally {
+      store.close()
+    }
+  })
+
   it('leaves out a run that writes since, just outside it, left too short a gap for', async () => {
     const store = newStore()
     try {
