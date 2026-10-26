@@ -24,7 +24,7 @@ import type {
   TimeWindow,
   TrackSummary,
 } from './types.js'
-import { clipToBounds, createReachesBounds, fillGaps, longitudeSpan, MIN_FILLED_GAP_MS, toIsoTimes } from './utils.js'
+import { clipToBounds, createReachesBounds, longitudeSpan, toIsoTimes } from './utils.js'
 
 /**
  * Serves the v2 Track API from this plugin's store.
@@ -63,8 +63,6 @@ export interface TrackProviderDeps {
   importable: (context: string) => Promise<boolean>
   /** Called after a delete, so whatever caches the deleted spans reloads them. */
   deleted: () => void
-  /** What the store holds for a context over a window: where an import of the own vessel may not fill. */
-  recordedOver: (context: string, window: TimeWindow) => Promise<TimedPosition[]>
 }
 
 /** v2 sends `[west, south, east, north]`; a bounds here is `[lat, lng]` corners. */
@@ -344,13 +342,20 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
   }
 
   type WritableStore = Required<
-    Pick<TrackStore, 'storeImport' | 'recordTrack' | 'getImport' | 'binImport' | 'binRecorded'>
+    Pick<TrackStore, 'storeImport' | 'recordTrack' | 'fillTrack' | 'getImport' | 'binImport' | 'binRecorded'>
   >
 
   /** The store, when it can keep and delete tracks; an ordinary failure otherwise. */
   const writableStore = (): WritableStore => {
     const store = deps.store()
-    if (!store?.storeImport || !store.recordTrack || !store.getImport || !store.binImport || !store.binRecorded) {
+    if (
+      !store?.storeImport ||
+      !store.recordTrack ||
+      !store.fillTrack ||
+      !store.getImport ||
+      !store.binImport ||
+      !store.binRecorded
+    ) {
       throw new Error('Track storage is not available')
     }
     return store as WritableStore
@@ -363,7 +368,6 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         store: writableStore(),
         selfContext: deps.selfContext(),
         importable: deps.importable,
-        recorded: (context, from, to) => deps.recordedOver(context, { from, to }),
         deleted: deps.deleted,
       },
       onOverlap,
@@ -727,12 +731,10 @@ function extentEpsilon([west, south, east, north]: TrackBoundingBox): number {
 export type OnOverlap = 'keep' | 'replace'
 
 export interface KeepTrackDeps {
-  store: Required<Pick<TrackStore, 'storeImport' | 'recordTrack'>>
+  store: Required<Pick<TrackStore, 'storeImport' | 'recordTrack' | 'fillTrack'>>
   selfContext: string
   /** Whether the history import could bring the vessel's track back; see TrackProviderDeps. */
   importable: (context: string) => Promise<boolean>
-  /** The vessel's recorded positions over a window. */
-  recorded: (context: string, from: number, to: number) => Promise<TimedPosition[]>
   deleted: () => void
 }
 
@@ -748,10 +750,9 @@ export interface KeptTrack {
  * A timed track of the own vessel is the vessel's own passage, from before
  * the plugin recorded it or from another plotter, so it is written into the
  * recording and answers as `recorded:<context>`: with `keep`, only where the
- * recording has nothing (see {@link fillGaps}); with `replace`, in place of
- * what was recorded over the same time. Everything else is kept as an import:
- * another vessel's track is not this boat's recording, and an untimed one
- * cannot be placed in it.
+ * recording has nothing (see `fillGaps`), judged as the store writes
+ * it; with `replace`, in place of what was recorded over the same time. Everything else is kept as an import: another vessel's track is not
+ * this boat's recording, and an untimed one cannot be placed in it.
  */
 export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOverlap: OnOverlap): Promise<KeptTrack> {
   const context = track.context === undefined ? undefined : resolveSelf(deps.selfContext)(track.context)
@@ -760,39 +761,10 @@ export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOve
       points.map(({ position, timestamp }): TimedPosition => ({ position, timestamp: timestamp! })),
     )
     if (onOverlap === 'keep') {
-      // Read per segment: one window spanning segments days apart would read
-      // the days between as well. One at a time, so a file of many segments
-      // cannot fill the store's read queue,
-      // and each segment also yields to what earlier ones of the same file
-      // filled, so overlapping segments are not both written.
-      const runs: TimedPosition[][] = []
-      const filled: TimedPosition[] = []
-      let overlapping = 0
-      for (const points of segments) {
-        if (points.length === 0) {
-          continue
-        }
-        let from = Infinity
-        let to = -Infinity
-        for (const { timestamp } of points) {
-          from = Math.min(from, timestamp)
-          to = Math.max(to, timestamp)
-        }
-        from -= MIN_FILLED_GAP_MS
-        to += MIN_FILLED_GAP_MS
-        const recorded = await deps.recorded(context, from, to)
-        for (const point of filled) {
-          if (point.timestamp >= from && point.timestamp <= to) {
-            recorded.push(point)
-          }
-        }
-        const kept = fillGaps([points], recorded, MIN_FILLED_GAP_MS)
-        runs.push(...kept.runs)
-        filled.push(...kept.runs.flat())
-        overlapping += kept.overlapping
-      }
-      // Nothing is there to replace, so nothing goes to the recycle bin.
-      await deps.store.recordTrack(context, runs, Date.now(), false)
+      // Judged inside the write, with nothing read first: another upload or a
+      // restore could write into a gap between a read and the write. Not
+      // recordTrack, which bins what lies in each span.
+      const overlapping = await deps.store.fillTrack(context, segments)
       return { id: recordedId(context), overlapping }
     }
     // As a delete does: the binned span stays where the store held nothing,

@@ -188,6 +188,11 @@ export interface TrackStore {
     deletedAt: number,
     keepEmpty: boolean,
   ): number[] | Promise<number[]>
+  /**
+   * Write a track imported for a vessel into its recording where it has
+   * nothing, binning nothing; resolves to how many points were left out.
+   */
+  fillTrack?(context: Context, runs: TimedPosition[][]): number | Promise<number>
   binImport?(
     importId: string,
     span: { from?: number; to?: number } | undefined,

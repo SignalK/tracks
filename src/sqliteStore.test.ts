@@ -7,7 +7,15 @@ import { s2 } from 's2js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
 import { simplify } from './simplify.js'
 import { thin } from './timeWindow.js'
-import { clipToBounds, createInBounds, createReachesBounds, longitudeSpan, splitAtAntimeridian } from './utils.js'
+import {
+  clipToBounds,
+  createInBounds,
+  createReachesBounds,
+  fillGaps,
+  longitudeSpan,
+  MIN_FILLED_GAP_MS,
+  splitAtAntimeridian,
+} from './utils.js'
 import type { Context, GeoBounds, ImportedTrack, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
 
 const debug = Object.assign(() => {}, { enabled: false })
@@ -2108,6 +2116,82 @@ describe('imported tracks', () => {
       store.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('an import filling the gaps in a recording', () => {
+  const t0 = Date.parse('2026-06-01T00:00:00Z')
+  const MINUTE = 60_000
+  const run = (lat: number, from: number, count: number, step: number): TimedPosition[] =>
+    Array.from({ length: count }, (_, i) => ({ position: [lat, 24], timestamp: from + i * step }))
+
+  it('leaves out what was written into the gap since it was judged, and bins nothing', async () => {
+    const store = newStore()
+    try {
+      // Another upload, written after this one read the store.
+      const earlier = run(61, t0, 121, 10_000)
+      expect(store.fillTrack(ctx, [earlier])).toBe(0)
+      const late = run(62, t0, 31, MINUTE)
+      expect(store.fillTrack(ctx, [late])).toBe(21)
+      const points = await store.getTimed(ctx)
+      expect(points.filter(({ position }) => position[0] === 61)).toHaveLength(121)
+      expect(points.filter(({ position }) => position[0] === 62).map(({ timestamp }) => timestamp)).toEqual(
+        late.slice(21).map(({ timestamp }) => timestamp),
+      )
+      expect(store.binEntries()).toEqual([])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('judges each run against the ones written before it in the same call', async () => {
+    const store = newStore()
+    try {
+      const first = run(61, t0, 121, 10_000)
+      const second = run(62, t0 + 5 * MINUTE, 121, 10_000)
+      expect(store.fillTrack(ctx, [first, second])).toBe(91)
+      const points = await store.getTimed(ctx)
+      expect(points.filter(({ position }) => position[0] === 61)).toHaveLength(121)
+      expect(points.filter(({ position }) => position[0] === 62).map(({ timestamp }) => timestamp)).toEqual(
+        second.slice(91).map(({ timestamp }) => timestamp),
+      )
+    } finally {
+      store.close()
+    }
+  })
+
+  it('judges a run longer than a day, and points far apart, as one read of the whole recording would', async () => {
+    const store = newStore()
+    try {
+      const DAY = 24 * 60 * MINUTE
+      // Four minutes past where the day cuts the run, and two minutes either
+      // side of a point far from the rest.
+      store.fillTrack(ctx, [
+        run(61, t0 + DAY + 4 * MINUTE, 1, 0),
+        run(61, t0 + 3 * DAY - 2 * MINUTE, 1, 0),
+        run(61, t0 + 3 * DAY + 2 * MINUTE, 1, 0),
+      ])
+      const recorded = await store.getTimed(ctx)
+      const long = [...run(62, t0, 25 * 60 + 1, MINUTE), ...run(62, t0 + 3 * DAY, 1, 0), ...run(62, t0 + 4 * DAY, 1, 0)]
+      const expected = fillGaps([long], recorded, MIN_FILLED_GAP_MS)
+      expect(expected.overlapping).toBe(2)
+      expect(store.fillTrack(ctx, [long])).toBe(expected.overlapping)
+      const written = (await store.getTimed(ctx)).filter(({ position }) => position[0] === 62)
+      expect(written.map(({ timestamp }) => timestamp)).toEqual(expected.runs.flat().map(({ timestamp }) => timestamp))
+    } finally {
+      store.close()
+    }
+  })
+
+  it('leaves out a run that writes since, just outside it, left too short a gap for', async () => {
+    const store = newStore()
+    try {
+      store.fillTrack(ctx, [run(61, t0 + 9.5 * MINUTE, 1, 0), run(61, t0 + 14.4 * MINUTE, 1, 0)])
+      expect(store.fillTrack(ctx, [run(62, t0 + 10 * MINUTE, 5, MINUTE)])).toBe(5)
+      expect((await store.getTimed(ctx)).filter(({ position }) => position[0] === 62)).toEqual([])
+    } finally {
+      store.close()
     }
   })
 })

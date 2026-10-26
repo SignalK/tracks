@@ -347,6 +347,36 @@ const DEFAULT_SEGMENT_GAP = 5 * 60 * 1000
 const CLIP_STRETCH_GAP = 10 * 60 * 1000
 
 /**
+ * The longest piece of an import `fillTrack` judges on one read: a day
+ * recorded at one fix a second is some 86,000 timestamps.
+ */
+const FILL_PIECE_MS = 24 * 60 * 60 * 1000
+
+/**
+ * A run sorted by time, cut into the pieces `fillTrack` reads one at a time:
+ * none longer than `FILL_PIECE_MS`, and a new one wherever two points lie
+ * further apart than the windows around them reach, so the time between is
+ * not read at all.
+ */
+function* fillPieces(run: TimedPosition[]): Generator<TimedPosition[]> {
+  let piece: TimedPosition[] = []
+  for (const point of run) {
+    const first = piece[0]
+    const last = piece.at(-1)
+    if (
+      first !== undefined &&
+      last !== undefined &&
+      (point.timestamp - first.timestamp > FILL_PIECE_MS || point.timestamp - last.timestamp > 2 * MIN_FILLED_GAP_MS)
+    ) {
+      yield piece
+      piece = []
+    }
+    piece.push(point)
+  }
+  if (piece.length > 0) yield piece
+}
+
+/**
  * A position store backed by SQLite, so tracks survive a restart.
  *
  * Uses node:sqlite rather than better-sqlite3: it is built into Node >= 22, so
@@ -1680,9 +1710,10 @@ export class SqliteTrackStore implements TrackStore {
    *
    * Called by every write that changes the positions of a day: a fix dated
    * into a refined day, `initialTrack` (through `clearLevels`), `recordTrack`,
-   * `binRecorded`, `restoreFromBin`, both retentions and detail thinning. A
-   * stay still going on, thinned at the spacing of the last prune, sends back
-   * only what aged since then, so its days are not refined again every hour.
+   * `fillTrack`, `saveHistoryImport`, `binRecorded`, `restoreFromBin`, both
+   * retentions and detail thinning. A stay still going on, thinned at the
+   * spacing of the last prune, sends back only what aged since then, so its
+   * days are not refined again every hour.
    */
   private invalidateLevels(context: Context, from: number, to: number): void {
     const through = this.levelFrontier.get(context)
@@ -2000,6 +2031,46 @@ export class SqliteTrackStore implements TrackStore {
     }
     this.fill(context, segments)
     return binned
+  }
+
+  /**
+   * Write a track imported for a vessel into its recording where it has
+   * nothing (`fillGaps`), and return how many points were left out. Nothing
+   * is binned. The runs are judged here, inside the write, so what another
+   * upload or a restore wrote stays. Each run is sorted by time, as an
+   * import's segments are, and is written before the next is judged, so two
+   * runs that overlap are not both written.
+   *
+   * A run is read a piece at a time (`fillPieces`): an import spread thinly
+   * over weeks recorded at one fix a second would otherwise read the weeks at
+   * once, more than the worker's heap holds. Whether a point fills depends
+   * only on what was recorded within `MIN_FILLED_GAP_MS` of it, so judging
+   * each piece on its own window decides every point as one read would.
+   */
+  fillTrack(context: Context, runs: TimedPosition[][]): number {
+    const recorded = this.db.prepare(
+      'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?',
+    )
+    let overlapping = 0
+    for (const run of runs) {
+      // Written once the whole run is judged, so it never counts against itself.
+      const kept: TimedPosition[][] = []
+      for (const piece of fillPieces(run)) {
+        const first = piece[0]
+        const last = piece.at(-1)
+        if (first === undefined || last === undefined) continue
+        const around = recorded.all(
+          context,
+          first.timestamp - MIN_FILLED_GAP_MS,
+          last.timestamp + MIN_FILLED_GAP_MS,
+        ) as { timestamp: number }[]
+        const judged = fillGaps([piece], around, MIN_FILLED_GAP_MS)
+        kept.push(...judged.runs)
+        overlapping += judged.overlapping
+      }
+      this.fill(context, kept)
+    }
+    return overlapping
   }
 
   /**
