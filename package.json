@@ -28,8 +28,7 @@
       "./docs/screenshots/tracks_1.png"
     ],
     "recommends": [
-      "@meri-imperiumi/signalk-autostate",
-      "signalk-questdb"
+      "@meri-imperiumi/signalk-autostate"
     ]
   },
   "keywords": [
