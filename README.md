@@ -96,7 +96,8 @@ application/gpx+xml`. Each track in the file becomes an imported track as above.
 timed one into the recording; otherwise a track names a vessel only if the file says which, as
 the plugin's own GPX export does. Ticking **Replace what my vessel recorded over the same time**
 as well (`onOverlap=replace`; the default is `keep`) replaces the recording rather than filling
-it.
+it. What is written into the recording is simplified with it once a day old (see
+[Simplifying stored tracks](#simplifying-stored-tracks)), so keep the file if you want every point.
 
 The file can be at most 25 MiB. A larger export, such as years of a chartplotter's tracks, is
 better imported into a history provider; see [Keeping tracks for years](#keeping-tracks-for-years).
