@@ -1680,10 +1680,10 @@ export class SqliteTrackStore implements TrackStore {
    *
    * Called by every write that changes the positions of a day: a fix dated
    * into a refined day, `initialTrack` (through `clearLevels`), `recordTrack`,
-   * `fillTrack`, `binRecorded`, `restoreFromBin`, both retentions and detail
-   * thinning. A stay still going on, thinned at the spacing of the last
-   * prune, sends back only what aged since then, so its days are not refined
-   * again every hour.
+   * `fillTrack`, `saveHistoryImport`, `binRecorded`, `restoreFromBin`, both
+   * retentions and detail thinning. A stay still going on, thinned at the
+   * spacing of the last prune, sends back only what aged since then, so its
+   * days are not refined again every hour.
    */
   private invalidateLevels(context: Context, from: number, to: number): void {
     const through = this.levelFrontier.get(context)
