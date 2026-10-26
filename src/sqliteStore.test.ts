@@ -7,7 +7,15 @@ import { s2 } from 's2js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
 import { simplify } from './simplify.js'
 import { thin } from './timeWindow.js'
-import { clipToBounds, createInBounds, createReachesBounds, longitudeSpan, splitAtAntimeridian } from './utils.js'
+import {
+  clipToBounds,
+  createInBounds,
+  createReachesBounds,
+  fillGaps,
+  longitudeSpan,
+  MIN_FILLED_GAP_MS,
+  splitAtAntimeridian,
+} from './utils.js'
 import type { Context, GeoBounds, ImportedTrack, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
 
 const debug = Object.assign(() => {}, { enabled: false })
@@ -2148,6 +2156,29 @@ describe('an import filling the gaps in a recording', () => {
       expect(points.filter(({ position }) => position[0] === 62).map(({ timestamp }) => timestamp)).toEqual(
         second.slice(91).map(({ timestamp }) => timestamp),
       )
+    } finally {
+      store.close()
+    }
+  })
+
+  it('judges a run longer than a day, and points far apart, as one read of the whole recording would', async () => {
+    const store = newStore()
+    try {
+      const DAY = 24 * 60 * MINUTE
+      // Four minutes past where the day cuts the run, and two minutes either
+      // side of a point far from the rest.
+      store.fillTrack(ctx, [
+        run(61, t0 + DAY + 4 * MINUTE, 1, 0),
+        run(61, t0 + 3 * DAY - 2 * MINUTE, 1, 0),
+        run(61, t0 + 3 * DAY + 2 * MINUTE, 1, 0),
+      ])
+      const recorded = await store.getTimed(ctx)
+      const long = [...run(62, t0, 25 * 60 + 1, MINUTE), ...run(62, t0 + 3 * DAY, 1, 0), ...run(62, t0 + 4 * DAY, 1, 0)]
+      const expected = fillGaps([long], recorded, MIN_FILLED_GAP_MS)
+      expect(expected.overlapping).toBe(2)
+      expect(store.fillTrack(ctx, [long])).toBe(expected.overlapping)
+      const written = (await store.getTimed(ctx)).filter(({ position }) => position[0] === 62)
+      expect(written.map(({ timestamp }) => timestamp)).toEqual(expected.runs.flat().map(({ timestamp }) => timestamp))
     } finally {
       store.close()
     }
