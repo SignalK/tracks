@@ -400,7 +400,10 @@ describe('storage simplification', () => {
     const plugin = ThePlugin(app)
     try {
       await plugin.start(config)
-      const from = Date.now() - 3 * 24 * 60 * 60 * 1000
+      // Noon three days back, so the five minutes lie within one UTC day:
+      // across a midnight each day would keep its own ends.
+      const day = 24 * 60 * 60 * 1000
+      const from = (Math.floor(Date.now() / day) - 3) * day + day / 2
       for (let i = 0; i < 300; i++) {
         emit(SELF_CONTEXT, [60 + i * 1e-5, 24], from + i * 1000)
       }
