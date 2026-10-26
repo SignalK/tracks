@@ -204,7 +204,7 @@ spacing reaches the track resolution, after 10 days at the default ten seconds; 
 part is kept at the track resolution, never coarser. A day after the stay ends, it is thinned back
 to the track resolution.
 
-Other vessels have a resolution of their own, a fix a minute unless set. Their
+Other vessels have a resolution of their own, the track resolution unless set. Their
 `navigation.state` is not used: it is whatever their transponder was last set to, and often stale.
 Detail recorded for them finer than the track resolution is thinned the same way.
 

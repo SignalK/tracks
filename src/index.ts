@@ -216,11 +216,6 @@ interface TracksPluginConfig {
 const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
 
 const DEFAULT_RESOLUTION = 10000
-// Other vessels keep a fix a minute unless set. A moving Class A transponder
-// reports every 2 to 10 s, a Class B one every 30 s, and one at anchor every
-// 3 minutes; Freeboard draws an AIS track at 120 points over two hours, so a
-// finer spacing would mostly add rows.
-const DEFAULT_OTHER_VESSELS_RESOLUTION = 60000
 // At anchor every second: fine enough to draw the swing around the anchor,
 // which the normal resolution misses. The store thins detail finer than the
 // normal resolution back to it once it is a day old.
@@ -492,7 +487,7 @@ export default function ThePlugin(app: App): Plugin {
   let stateGate = new StateGate(app.selfContext, DEFAULT_PAUSE_STATES)
   /** The own vessel's recording spacing per navigation.state, in ms. */
   let stateResolutions = new Map<string, number>()
-  let otherVesselsResolution = DEFAULT_OTHER_VESSELS_RESOLUTION
+  let otherVesselsResolution: number | undefined
   /**
    * The history import while it runs, or as it last stopped; see
    * historyImport.ts. `stop` asks it to stop before its next day.
@@ -592,7 +587,7 @@ export default function ThePlugin(app: App): Plugin {
           stateResolutions.set(entry.state, spacing)
         }
       }
-      otherVesselsResolution = toNumber(config.otherVesselsResolution) ?? DEFAULT_OTHER_VESSELS_RESOLUTION
+      otherVesselsResolution = toNumber(config.otherVesselsResolution)
       stateGate = new StateGate(
         app.selfContext,
         Array.isArray(config.pauseWhenState) ? config.pauseWhenState : DEFAULT_PAUSE_STATES,
@@ -1469,8 +1464,7 @@ export default function ThePlugin(app: App): Plugin {
           minimum: 0,
           title: 'Resolution for other vessels (milliseconds)',
           description:
-            'Spacing of recorded fixes for AIS and other vessels, a minute by default. Their navigation.state is not used: it is what the transponder was last set to, and often stale.',
-          default: DEFAULT_OTHER_VESSELS_RESOLUTION,
+            'Spacing of recorded fixes for AIS and other vessels. Leave empty to use the track resolution. Their navigation.state is not used: it is what the transponder was last set to, and often stale.',
         },
       },
     },

@@ -257,7 +257,9 @@ describe('the own vessel at anchor', () => {
     }
   })
 
-  it('records the own vessel every ten seconds by default, and other vessels every minute', async () => {
+  // Every ten seconds for other vessels too: a ferry followed through a
+  // channel needs its turns, which a fix a minute cuts off.
+  it('records the own vessel and other vessels every ten seconds by default', async () => {
     const { app, emit } = createApp(dir)
     app.getSelfPath = (path?: string): unknown => (path === 'navigation.state' ? { value: 'motoring' } : undefined)
     const plugin = ThePlugin(app)
@@ -271,7 +273,7 @@ describe('the own vessel at anchor', () => {
       }
 
       await expect(plugin.getTracks()?.get(SELF_CONTEXT as never)).resolves.toHaveLength(7)
-      await expect(plugin.getTracks()?.get(other as never)).resolves.toHaveLength(2)
+      await expect(plugin.getTracks()?.get(other as never)).resolves.toHaveLength(7)
     } finally {
       await plugin.stop()
     }
