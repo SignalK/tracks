@@ -211,6 +211,8 @@ interface TracksPluginConfig {
   stateResolutions?: { state?: unknown; resolution?: unknown }[]
   /** Milliseconds between recorded fixes of other vessels; `resolution` when unset. */
   otherVesselsResolution?: number
+  /** Metres a stored position older than a day may lie off its track and be deleted. 0 deletes none. */
+  storageTolerance?: number
 }
 
 const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
@@ -227,6 +229,10 @@ const DEFAULT_STATE_RESOLUTIONS = [{ state: 'anchored', resolution: 1000 }]
 const DEFAULT_AIS_RETENTION_DAYS = 30
 // Long enough to notice a track deleted by mistake after a season ashore.
 const DEFAULT_RECYCLE_BIN_DAYS = 180
+// Below a GPS's own noise, so what simplifying to it deletes is where the
+// receiver put the boat rather than where it went. On a boat's store it left
+// 3 to 5% of a day recorded every second.
+const DEFAULT_STORAGE_TOLERANCE = 0.5
 const DAY_MS = 24 * 60 * 60 * 1000
 
 // A vessel that has aged out is not urgent, so this need not be frequent.
@@ -620,6 +626,7 @@ export default function ThePlugin(app: App): Plugin {
             // megabytes. Other vessels are pruned by aisRetentionDays.
             retention: 0,
             binRetention: binRetentionMs,
+            storageTolerance: Math.max(0, toNumber(config.storageTolerance) ?? DEFAULT_STORAGE_TOLERANCE),
             segmentGap,
           },
           app.debug,
@@ -1423,6 +1430,14 @@ export default function ThePlugin(app: App): Plugin {
           description:
             'A deleted track, or part of one, can be restored from the recycle bin in the Tracks webapp until it is purged after this many days.',
           default: DEFAULT_RECYCLE_BIN_DAYS,
+        },
+        storageTolerance: {
+          type: 'number',
+          minimum: 0,
+          title: 'Simplify stored tracks older than a day to this many metres',
+          description:
+            "Keeps reads fast on a small board. Once a day is a day old, a position that lies within this distance of the line its neighbours draw is deleted, as simplifying the track to it would leave it out, keeping at least one a minute. 0.5 m is below a GPS's own noise. What is deleted cannot be brought back: to keep every position, archive a copy elsewhere, a GPX export of the track or a history provider such as signalk-questdb. 0 turns it off, and detail recorded finer than the track resolution is thinned back to it after a day instead.",
+          default: DEFAULT_STORAGE_TOLERANCE,
         },
         maxSpeedKnots: {
           type: 'integer',
