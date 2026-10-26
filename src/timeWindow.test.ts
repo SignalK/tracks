@@ -301,11 +301,7 @@ describe('thinToBudget', () => {
 })
 
 describe('segmenting a thinned track', () => {
-  const at = (timestamp: number, span?: number): TimedPosition => ({
-    position: [60, 24],
-    timestamp,
-    ...(span === undefined ? {} : { span }),
-  })
+  const at = (timestamp: number): TimedPosition => ({ position: [60, 24], timestamp })
 
   it('keeps a stretch recorded without a break whole when thinned wider than the gap', () => {
     const recorded = Array.from({ length: 15 }, (_, i) => at(i * MINUTE))
@@ -360,24 +356,5 @@ describe('segmenting a thinned track', () => {
         }
       }
     }
-  })
-
-  it('reads adjacent history buckets as continuous, even wider apart than the gap', () => {
-    const buckets = [0, 5, 10, 15].map((m) => at(m * MINUTE, 5 * MINUTE))
-
-    expect(segment(buckets, 2 * MINUTE)).toHaveLength(1)
-  })
-
-  it('splits history buckets where a single one is missing', () => {
-    // Minutes 10 to 15 have no bucket, and two minutes is the gap.
-    const buckets = [0, 5, 15, 20].map((m) => at(m * MINUTE, 5 * MINUTE))
-
-    expect(segment(buckets, 2 * MINUTE)).toHaveLength(2)
-  })
-
-  it('splits history buckets where several in a row are missing', () => {
-    const buckets = [0, 5, 30, 35].map((m) => at(m * MINUTE, 5 * MINUTE))
-
-    expect(segment(buckets, 2 * MINUTE)).toHaveLength(2)
   })
 })

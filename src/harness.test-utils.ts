@@ -68,7 +68,7 @@ export interface TestHarness {
   trackProvider: () => TrackApi | undefined
   /** How many times the plugin registered a provider. */
   registrations: () => number
-  /** The plugin's store, read directly: its routes reconcile with history, which a test may need to see past. */
+  /** The plugin's store, read directly rather than through its routes. */
   store: () => TrackStore | undefined
 }
 
@@ -91,37 +91,16 @@ export interface HarnessOptions {
    */
   withoutTrackApi?: boolean
   /**
-   * A history provider for the plugin to reconcile against.
-   *
-   * `contexts` is what `getContexts` lists, and `rows` what `getValues`
-   * returns — separately, because the difference between them is the whole
-   * point of the existence probe: a provider can know a vessel and still have
-   * no rows inside the asked window.
-   *
-   * `contextsSince` back-dates those contexts: a real provider filters its
-   * context list by the asked range (questdb builds a `WHERE` from it), so a
-   * stub that answers regardless of range cannot show what the probe misses.
-   * `getContextsRejects` and `getContextsHangs` cover the other two ways a
-   * provider can fail to answer.
+   * A history provider for the history import to read, and for reads to
+   * leave alone. `rows` is what `getValues` returns.
    */
   history?: {
-    /** Read on every `getContexts` call, so a getter can count the probes. */
-    contexts?: string[]
-    contextsSince?: number
-    rows?: unknown[]
-    withoutGetContexts?: boolean
-    getContextsRejects?: boolean
-    getContextsHangs?: boolean
     /**
-     * Hold every `getContexts` call open until the returned release is run.
-     *
-     * A provider that answers immediately cannot distinguish sharing an
-     * in-flight query from reusing a cached result: the first caller would
-     * have filled the cache before the rest arrived. Deferring the answer
-     * parks every caller inside the probe at once, so only sharing can
-     * collapse them.
+     * What `getContexts` lists. The plugin no longer asks, and a provider
+     * offers it all the same, so a getter here can show nothing does.
      */
-    deferContexts?: { release: () => void; wait: Promise<void> }
+    contexts?: string[]
+    rows?: unknown[]
     /** Fail the windowed read, leaving the provider unable to answer at all. */
     getValuesRejects?: boolean
     /**
@@ -140,25 +119,9 @@ export interface HarnessOptions {
      * registered — the default install, and not an outage.
      */
     noProvider?: boolean
-    /** Called on every `getHistoryApi`, which each request makes on its way to history. */
+    /** Called on every `getHistoryApi`. */
     onHistoryApi?: () => void
-    /** Never resolve `getHistoryApi`: a registered provider that wedges. */
-    providerHangs?: boolean
   }
-}
-
-/**
- * A promise held open until a test releases it.
- *
- * Lets a test observe that every request has reached the provider before any
- * answer exists, which a timed wait can only assume.
- */
-export function deferred(): { release: () => void; wait: Promise<void> } {
-  let release = () => undefined as void
-  const wait = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  return { release, wait }
 }
 
 export interface HistoryValuesQuery {
@@ -216,58 +179,34 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
       : {
           getHistoryApi: () => {
             options.history?.onHistoryApi?.()
-            return options.history?.providerHangs === true
-              ? new Promise<never>(() => undefined)
-              : options.history?.noProvider === true
-                ? Promise.reject(new Error('No history api provider configured'))
-                : Promise.resolve({
-                    getValues: (query: HistoryValuesQuery) => {
-                      options.history?.onValues?.(query)
-                      const delay = options.history?.valuesDelayMs ?? 0
-                      const later = <T>(value: T): Promise<T> =>
-                        delay > 0
-                          ? new Promise((resolve) => setTimeout(() => resolve(value), delay))
-                          : Promise.resolve(value)
-                      return options.history?.getValuesRejects === true
-                        ? Promise.reject(new Error('history provider unavailable'))
-                        : later({
-                            context: selfContext,
-                            range: { from: '', to: '' },
-                            values: [],
-                            data:
-                              options.history?.aggregatesFirst === true
-                                ? firstPerBucket(
-                                    options.history.rows ?? [],
-                                    (query.resolution ?? 1) * 1000,
-                                    options.history.stampsAtEnd === true,
-                                  )
-                                : (options.history?.rows ?? []),
-                          })
-                    },
-                    ...(options.history?.withoutGetContexts === true
-                      ? {}
-                      : {
-                          getContexts: (query: {
-                            from: { toString: () => string }
-                            to: { toString: () => string }
-                          }) => {
-                            if (options.history?.getContextsRejects === true) {
-                              return Promise.reject(new Error('provider unavailable'))
-                            }
-                            if (options.history?.getContextsHangs === true) {
-                              return new Promise<string[]>(() => undefined)
-                            }
-                            const contexts = options.history?.contexts ?? []
-                            const since = options.history?.contextsSince
-                            // Mirror a range-filtering provider: a context whose data
-                            // predates the asked window is simply not listed.
-                            const answer =
-                              since !== undefined && since < Date.parse(query.from.toString()) ? [] : contexts
-                            const deferred = options.history?.deferContexts
-                            return deferred ? deferred.wait.then(() => answer) : Promise.resolve(answer)
-                          },
-                        }),
-                  })
+            return options.history?.noProvider === true
+              ? Promise.reject(new Error('No history api provider configured'))
+              : Promise.resolve({
+                  getValues: (query: HistoryValuesQuery) => {
+                    options.history?.onValues?.(query)
+                    const delay = options.history?.valuesDelayMs ?? 0
+                    const later = <T>(value: T): Promise<T> =>
+                      delay > 0
+                        ? new Promise((resolve) => setTimeout(() => resolve(value), delay))
+                        : Promise.resolve(value)
+                    return options.history?.getValuesRejects === true
+                      ? Promise.reject(new Error('history provider unavailable'))
+                      : later({
+                          context: selfContext,
+                          range: { from: '', to: '' },
+                          values: [],
+                          data:
+                            options.history?.aggregatesFirst === true
+                              ? firstPerBucket(
+                                  options.history.rows ?? [],
+                                  (query.resolution ?? 1) * 1000,
+                                  options.history.stampsAtEnd === true,
+                                )
+                              : (options.history?.rows ?? []),
+                        })
+                  },
+                  getContexts: () => Promise.resolve(options.history?.contexts ?? []),
+                })
           },
         }),
     ...(options.withoutTrackApi

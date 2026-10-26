@@ -1,15 +1,12 @@
 # Where a track comes from
 
-The plugin can answer a query from two places: its own store, and a history
-provider such as [signalk-questdb](https://www.npmjs.com/package/signalk-questdb)
-or [signalk-to-influxdb2](https://www.npmjs.com/package/signalk-to-influxdb2).
-Neither is simply better than the other, which is why both are used.
-
-|                              | The plugin's store                 | A history provider                               |
-| ---------------------------- | ---------------------------------- | ------------------------------------------------ |
-| How often a position is kept | coarse, at a configurable interval | fine, at whatever interval it was configured for |
-| How long it is kept          | see below                          | until its retention drops it                     |
-| Size                         | small                              | far larger, which is why retention exists        |
+Every query is answered from the plugin's own store. A history provider such
+as [signalk-questdb](https://www.npmjs.com/package/signalk-questdb) or
+[signalk-to-influxdb2](https://www.npmjs.com/package/signalk-to-influxdb2)
+keeps a record of its own, often finer, and often reaching back to before the
+plugin was installed. The plugin does not read it when a track is asked for,
+but copies the own vessel's part of it into the store once, with the
+[history import](#importing-what-the-provider-holds).
 
 The plugin writes its positions to a SQLite file in its data directory, so they
 survive a restart. A power cut can still lose the most recent ones, because
@@ -20,12 +17,8 @@ another vessel's positions are dropped after the number of days set in the
 plugin settings, whether it is still in range or not. Setting that to 0 keeps
 every position.
 
-So the provider is the finer record of the recent past, and the plugin's store
-keeps the older track, within its own retention. A provider can also keep part
-of its record past its retention, such as the own vessel's positions; it is then
-the finer record of the own track for as long as it holds one. The interval and the retention are both
-settings on the plugin's configuration page, which is where their current
-defaults are shown.
+The interval and the retention are both settings on the plugin's configuration
+page, which is where their current defaults are shown.
 
 ## Storage responsiveness and shutdown
 
@@ -70,18 +63,16 @@ above, so a large import neither pauses recording nor is dropped. Once recording
 writes have failed, imports are refused too. Retention never removes an imported
 track: it stays until it is deleted. A timed track imported for the own vessel is
 the exception: it is written into the recording, by default only where the
-recording and the history provider have nothing for at least five minutes (an
-import that cannot read the provider is refused, since an outage would look like
-one long gap), or, when asked, in place of what was recorded over the same time, which goes to the
-recycle bin first. From then on it is part of the recording like any position.
+recording has nothing for at least five minutes, or, when asked, in place of
+what was recorded over the same time, which goes to the recycle bin first. From then on it is part of the recording like any position.
 
 Deleting a track, or part of one, moves its points into recycle bin tables in the
 same database, and restoring moves them back; both are written as imports are.
 The retention settings never reach into the bin. Its own retention, 180 days by
 default, purges an entry during the regular prune. A recorded span keeps its
-entry after its points are purged, because it is also what hides that span in a
-history provider's answer: the History API has no delete, so a provider still
-holds the positions, and the plugin filters them out of every v1 and v2 query.
+entry after its points are purged, because it is also what keeps the history
+import out of that span: the History API has no delete, so a provider still
+holds the positions.
 
 Stopping unsubscribes input immediately, then returns a Promise that resolves
 only after accepted work drains, SQLite closes and the worker exits. Plugin
@@ -113,70 +104,23 @@ query window
 
 ## What you get with one
 
-The provider answers for the period it covers, and the plugin's store fills
-everything else.
+The store still answers every query alone, and a query never waits for the
+provider. What the provider holds of the own vessel joins the track once it is
+imported, where the plugin had recorded nothing:
 
 ```
-query window: last two years
-├───────────────────────────────────────┬──────────┤
-│ plugin store, coarse                  │ provider │
-│                                       │ finer    │
-                                        └ retention begins
+query window
+├──────────────────────────┬───────────────────────┤
+│ imported from history,   │ plugin store, as      │
+│ before the plugin ran    │ recorded              │
 ```
 
-A track can therefore change granularity partway along: coarse where it came
-from the store, fine where the provider reached. That is expected. Passing
-`resolution` on a query thins the result to a spacing you choose, which is the
-way to get an evenly spaced track regardless of where each part came from.
-
-## When the provider has holes
-
-Retention is only one way a provider's coverage can be incomplete. All of these
-happen, and all are handled the same way:
-
-- it was installed after the boat had already been recording
-- it was disabled for a while, or its database was down
-- its retention has dropped the older data
-
-In each case the provider simply returns nothing for that period, and the
-plugin's store supplies it instead:
-
-```
-├─────────┬──────────────┬─────────┬──────────────┤
-│ store   │ provider     │ store   │ provider     │
-│         │              │ ↑ provider was down    │
-```
-
-Nothing has to be configured for this. The plugin does not read the provider's
-retention setting, or ask how long it has been running — it asks for the window
-and uses what comes back, so coverage that changes underneath needs no
-attention.
-
-## How much is asked of the provider
-
-A provider has no spatial filter, so a query with a box still reads every
-position in its time window, and providers produce one row per bucket of that
-window whether or not anything was recorded in it. So each read is held to a
-fixed number of buckets: a longer window is read at a wider resolution, so the
-read stays the same size however far back it reaches.
-
-A history read widened like that is coarser than the plugin's store, so for it
-the rule below flips: the store keeps every bucket it has a position in, and
-the provider only fills the buckets the store has nothing for.
-
-A window with only an end, such as "everything older than a day", would
-otherwise start at the Unix epoch. Instead the plugin first finds where the
-provider's positions begin and reads from there, within the same budget; when
-the provider has none in the window, it contributes nothing.
-
-A chart viewer asks again with the same window on every zoom and pan, and only
-its box changes, which the provider never sees. So a read is kept and reused
-for the same vessel, start and bucket width while the asked window ends no more
-than five minutes after it; the store covers those last minutes for any vessel
-it records. A read that is still running when a query gives up on it after five
-seconds is kept too: the History API cannot cancel it, so the next query waits
-for that read instead of starting a second one beside it, and gets its answer
-once it lands.
+A track can therefore change granularity partway along: as fine as the
+provider kept it where it was imported, at the configured interval where the
+plugin recorded it. That is expected. Passing `resolution` on a query thins the
+result to a spacing you choose, which is the way to get an evenly spaced track
+regardless of where each part came from. Another vessel's track comes from the
+store alone.
 
 ## Importing what the provider holds
 
@@ -194,9 +138,10 @@ started; live recording covers the time after that.
   too, so a whole day read at a second would be 86,400 rows whether it held a
   passage or nothing. The stretches to fill are first read in ten-minute buckets, and
   then a second at a time only where those found positions.
-- **Deleted stays deleted.** A span deleted from the recording is left out, as
-  it is from what the provider returns to a query, including one deleted
-  while the day was being read.
+- **Deleted stays deleted.** A span deleted from the recording is left out,
+  including one deleted while the day was being read. A delete of the own
+  vessel with a provider installed keeps its span even where the store held
+  nothing, and after its points are purged, for this.
 - **Across midnight.** A stretch the recording left empty over midnight is
   filled on both days, however little of it lies after midnight.
 - **One day, one commit.** Each day is written together with the import's
@@ -209,21 +154,11 @@ A read or a write that fails stops the import, keeping the day it was on, and
 the plugin's status says so. It goes on from that day when started again, or a minute after
 the plugin next starts.
 
-## Why the two never double up
+## Where the store has nothing
 
-A provider aggregates into buckets and stamps each one on its boundary:
-`19:00:00.000`, `19:01:00.000`. The plugin's store keeps the time a fix
-actually arrived: `19:00:01.212`. The same physical position therefore has two
-different timestamps in the two sources, and simply merging them would keep
-both.
-
-Instead, each bucket of time is filled from exactly one source: the provider
-where it has a position, the store everywhere else. Individual points are never
-compared, so there is nothing to get wrong.
-
-## If a vessel was not moving
-
-Neither source has anything, and the track is correctly empty for that period
-rather than filled in. A gap in a track means the vessel was not being
-recorded — which, with the **Pause recording while navigation.state is one of**
-setting, may be deliberate.
+A track is empty for a period the store holds no positions for, rather than
+filled in. That says the vessel was not being recorded, not that it stood
+still: the plugin was not running, or recording was paused, deliberately with
+the **Pause recording while navigation.state is one of** setting. A history
+import fills such a gap of the own vessel from what a provider recorded
+meanwhile.

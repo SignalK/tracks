@@ -72,8 +72,8 @@ describe('recycle bin: recorded tracks', () => {
     store.close()
   })
 
-  // A span with nothing stored in it may still hide what a history provider
-  // holds, so only the caller can say whether it is worth an entry.
+  // A span with nothing stored in it may still keep a history import out, so
+  // only the caller can say whether it is worth an entry.
   it('keeps an empty delete only when asked to', () => {
     const store = newStore()
     record(store, self, [t0])
@@ -85,7 +85,7 @@ describe('recycle bin: recorded tracks', () => {
     store.close()
   })
 
-  it('purges after the retention but keeps the span, so history stays hidden', async () => {
+  it('purges after the retention but keeps the span, so a history import stays out of it', async () => {
     const store = newStore(180 * DAY)
     record(store, self, [t0, t0 + 1000])
     const id = store.binRecorded(self, undefined, t0, t0 + DAY, false).id!
@@ -141,7 +141,7 @@ describe('recycle bin: imported tracks', () => {
     ])
     expect(store.restoreFromBin(id)).toBe('restored')
     expect(store.getImport('imported:a')).toEqual({ ...passage(), importedAt })
-    // An import is not a recording, so history has nothing to hide for it.
+    // An import is not a recording, so a history import has nothing to keep out of it.
     expect(store.deletedSpans()).toEqual([])
     store.close()
   })
@@ -213,7 +213,7 @@ describe('recycle bin: imported tracks', () => {
   })
 })
 
-describe('hiding deleted spans from history', () => {
+describe('leaving deleted spans out of what history returns', () => {
   const MIN = 60_000
   const at = (timestamp: number, span?: number) => ({
     position: [60, 24] as [number, number],
