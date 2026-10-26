@@ -96,7 +96,7 @@ application/gpx+xml`. Each track in the file becomes an imported track as above.
 timed one into the recording; otherwise a track names a vessel only if the file says which, as
 the plugin's own GPX export does. Ticking **Replace what my vessel recorded over the same time**
 as well (`onOverlap=replace`; the default is `keep`) replaces the recording rather than filling
-it. What is written into the recording is simplified with it once a day old (see
+it. What is written into the recording is simplified with the rest of it once it is a day old (see
 [Simplifying stored tracks](#simplifying-stored-tracks)), so keep the file if you want every point.
 
 The file can be at most 25 MiB. A larger export, such as years of a chartplotter's tracks, is
@@ -212,17 +212,17 @@ Detail recorded for them finer than the track resolution is thinned the same way
 
 ## Simplifying stored tracks
 
-To keep reads fast on a small board, the plugin simplifies what it stores once a day is more than
-a day old. A position that lies within half a metre of the line its neighbours draw is deleted, as
-simplifying the track to half a metre would leave it out. One position a minute is kept wherever
-the recording had one, so a straight leg never looks like a pause. Half a metre is below a GPS's
-own noise. A day recorded every second keeps 3 to 5 % of its positions.
+To keep reads fast on a small board, the plugin simplifies what it stores once a day is more than a
+day old. By default, a position that lies within half a metre of the line its neighbours draw is
+deleted, as simplifying the track to half a metre would leave it out. One position a minute is kept
+wherever the recording had one, so a straight leg never looks like a pause. Half a metre is below a
+GPS's own noise. At that tolerance, a day recorded every second keeps 3 to 5 % of its positions.
 
 It applies to every vessel, and to what an import writes into the recording: the history import,
 and a GPX upload of the own vessel. Imported tracks kept on their own are left as they are.
 
-A track drawn at a tolerance of half a metre or more, which is what a chart asks for, comes out the
-same as it would from every position. A track read without one has fewer points.
+A track drawn at the storage tolerance or more, which is what a chart asks for, comes out the same
+as it would from every position. A track read without one has fewer points.
 
 > **Deleted positions cannot be brought back.** To keep every position, keep a copy of your own
 > somewhere else and archive it: a GPX export of the track, a backup of the plugin's `tracks.db`
