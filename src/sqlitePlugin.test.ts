@@ -257,6 +257,26 @@ describe('the own vessel at anchor', () => {
     }
   })
 
+  it('records the own vessel every ten seconds by default, and other vessels every minute', async () => {
+    const { app, emit } = createApp(dir)
+    app.getSelfPath = (path?: string): unknown => (path === 'navigation.state' ? { value: 'motoring' } : undefined)
+    const plugin = ThePlugin(app)
+    try {
+      await plugin.start({})
+      const other = 'vessels.urn:mrn:imo:mmsi:987654321'
+      const t0 = Date.now() - 2 * 60_000
+      for (let i = 0; i <= 12; i++) {
+        emit(SELF_CONTEXT, [60 + i * 1e-5, 24], t0 + i * 5000)
+        emit(other, [61 + i * 1e-5, 25], t0 + i * 5000)
+      }
+
+      await expect(plugin.getTracks()?.get(SELF_CONTEXT as never)).resolves.toHaveLength(7)
+      await expect(plugin.getTracks()?.get(other as never)).resolves.toHaveLength(2)
+    } finally {
+      await plugin.stop()
+    }
+  })
+
   it('follows the resolutions set per state, and one set for other vessels', async () => {
     const { app, emit } = createApp(dir)
     let state = 'moored'
