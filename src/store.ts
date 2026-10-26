@@ -204,7 +204,9 @@ export interface TrackStore {
    * The import of a vessel's track from a history provider: how far it got,
    * and the write of each day it fills with the state that day brings it to,
    * resolving once committed to how many positions it has filled. Optional
-   * like the import methods.
+   * like the import methods. Positions before `since` do not count against
+   * the runs: the import wrote them, the day before, in the stretch it goes
+   * on filling.
    */
   historyImport?(context: Context): HistoryImportState | undefined | Promise<HistoryImportState | undefined>
   saveHistoryImport?(state: HistoryImportState, runs: TimedPosition[][], since?: number): number | Promise<number>
