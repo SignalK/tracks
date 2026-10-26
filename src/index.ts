@@ -219,8 +219,9 @@ const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
 
 const DEFAULT_RESOLUTION = 10000
 // At anchor every second: fine enough to draw the swing around the anchor,
-// which the normal resolution misses. The store thins detail finer than the
-// normal resolution back to it once it is a day old.
+// which the normal resolution misses. Once a day old it is simplified with the
+// rest of the track to storageTolerance, or, with that at 0, thinned back to the
+// normal resolution.
 const DEFAULT_STATE_RESOLUTIONS = [{ state: 'anchored', resolution: 1000 }]
 // How long the positions of a vessel other than the own one are kept. The own
 // vessel is never dropped — see TrackStore.prune. A week keeps a ferry's
@@ -1463,7 +1464,7 @@ export default function ThePlugin(app: App): Plugin {
           type: 'array',
           title: 'Own vessel resolution by navigation.state',
           description:
-            'Records the own vessel at a different spacing while navigation.state has the given value, finer or coarser than the track resolution. The default records every second at anchor, so an anchor alarm or a look back at the night sees the swing around the anchor. Anything finer than the track resolution is kept for a day and then thinned back to it. Needs navigation.state to be set, by signalk-autostate or by hand.',
+            'Records the own vessel at a different spacing while navigation.state has the given value, finer or coarser than the track resolution. The default records every second at anchor, so an anchor alarm or a look back at the night sees the swing around the anchor. After a day it is simplified with the rest of the track, which keeps the swing, or, with that turned off, thinned back to the track resolution. Needs navigation.state to be set, by signalk-autostate or by hand.',
           items: {
             type: 'object',
             required: ['state', 'resolution'],
