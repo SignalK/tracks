@@ -2004,13 +2004,12 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   /**
-   * Write the runs a track imported for a vessel fills into its recording,
-   * where it has nothing, and return how many points were left out. Nothing
-   * is binned. The runs are judged again here, in the same transaction,
-   * against the recording as it is now: another upload or a restore can
-   * write into a gap after it was read, and what it wrote stays.
-   * Each run is written before the next is judged, so two runs that overlap
-   * are not both written.
+   * Write a track imported for a vessel into its recording where it has
+   * nothing (`fillGaps`), and return how many points were left out. Nothing
+   * is binned. The runs are judged here, inside the write, so what another
+   * upload or a restore wrote stays. Each run is sorted by time, as an
+   * import's segments are, and is written before the next is judged, so two
+   * runs that overlap are not both written.
    */
   fillTrack(context: Context, runs: TimedPosition[][]): number {
     const recorded = this.db.prepare(

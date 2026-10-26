@@ -573,7 +573,6 @@ describe('getTracks', () => {
         contextName: () => undefined,
         importable: async () => false,
         deleted: () => undefined,
-        recordedOver: async () => [],
       }
       const provider = createTrackProvider(deps)
       const read = vi.spyOn(store, 'getFilteredTimedTracks')
@@ -628,7 +627,6 @@ describe('getTracks', () => {
         contextName: () => undefined,
         importable: async () => false,
         deleted: () => undefined,
-        recordedOver: async () => [],
       })
       const read = vi.spyOn(store, 'getFilteredTimedTracks')
 

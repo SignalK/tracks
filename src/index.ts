@@ -503,8 +503,8 @@ export default function ThePlugin(app: App): Plugin {
     void runHistoryImport(state, {
       history: (from, to, seconds) => importedHistory(app, state.context, from, to, seconds),
       stored: async (from, to) =>
-        // Through the filtered read, as recordedOver does: a vessel the store
-        // has never recorded is left out rather than rejected.
+        // Through the filtered read: a vessel the store has never recorded is
+        // left out rather than rejected.
         (
           await store.getFilteredTimedTracks(
             { bbox: null, radius: null, intersects: true, contexts: [state.context] },
@@ -754,18 +754,6 @@ export default function ThePlugin(app: App): Plugin {
           ((await tracks?.historyImport?.(context)) !== undefined || (await historyProviderAvailable(app))),
         deleted: () => {
           deletedSpans = undefined
-        },
-        recordedOver: async (context, window) => {
-          // Read through the filtered query, which leaves out a vessel the store
-          // has never recorded instead of rejecting: any other failure must fail
-          // the import, or it would read as nothing recorded.
-          const collection = await tracks?.getFilteredTimedTracks(
-            { bbox: null, radius: null, intersects: true, contexts: [context] },
-            undefined,
-            undefined,
-            { window },
-          )
-          return collection?.[context] ?? []
         },
       })
       app.registerTrackApiProvider?.(trackProvider)
