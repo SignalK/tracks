@@ -1701,7 +1701,7 @@ export default function ThePlugin(app: App): Plugin {
       const writable = (router as AccessRouter).access?.('readwrite') ?? router
       writable.post('/imports', (req: Request, res: Response) => {
         const provider = trackProvider
-        if (!provider || !tracks?.storeImport || !tracks.recordTrack) {
+        if (!provider || !tracks?.storeImport || !tracks.recordTrack || !tracks.fillTrack) {
           notAvailable(res)
           return
         }

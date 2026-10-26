@@ -51,6 +51,7 @@ const ACKNOWLEDGED = new Set<Operation['method']>([
   'storeImport',
   'binRecorded',
   'recordTrack',
+  'fillTrack',
   'binImport',
   'restoreFromBin',
   'purgeFromBin',
@@ -63,6 +64,8 @@ function acknowledge(operation: Operation, target: SqliteTrackStore): unknown {
       return target.binRecorded(...operation.args)
     case 'recordTrack':
       return target.recordTrack(...operation.args)
+    case 'fillTrack':
+      return target.fillTrack(...operation.args)
     case 'binImport':
       return target.binImport(...operation.args)
     case 'restoreFromBin':

@@ -443,13 +443,20 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
   }
 
   type WritableStore = Required<
-    Pick<TrackStore, 'storeImport' | 'recordTrack' | 'getImport' | 'binImport' | 'binRecorded'>
+    Pick<TrackStore, 'storeImport' | 'recordTrack' | 'fillTrack' | 'getImport' | 'binImport' | 'binRecorded'>
   >
 
   /** The store, when it can keep and delete tracks; an ordinary failure otherwise. */
   const writableStore = (): WritableStore => {
     const store = deps.store()
-    if (!store?.storeImport || !store.recordTrack || !store.getImport || !store.binImport || !store.binRecorded) {
+    if (
+      !store?.storeImport ||
+      !store.recordTrack ||
+      !store.fillTrack ||
+      !store.getImport ||
+      !store.binImport ||
+      !store.binRecorded
+    ) {
       throw new Error('Track storage is not available')
     }
     return store as WritableStore
@@ -838,7 +845,7 @@ function extentEpsilon([west, south, east, north]: TrackBoundingBox): number {
 export type OnOverlap = 'keep' | 'replace'
 
 export interface KeepTrackDeps {
-  store: Required<Pick<TrackStore, 'storeImport' | 'recordTrack'>>
+  store: Required<Pick<TrackStore, 'storeImport' | 'recordTrack' | 'fillTrack'>>
   selfContext: string
   historyKnows: (context: string) => Promise<boolean>
   /** The vessel's positions over a window, from the store and history alike. */
@@ -858,10 +865,10 @@ export interface KeptTrack {
  * A timed track of the own vessel is the vessel's own passage, from before
  * the plugin recorded it or from another plotter, so it is written into the
  * recording and answers as `recorded:<context>`: with `keep`, only where the
- * recording has nothing (see {@link fillGaps}); with `replace`, in place of
- * what was recorded over the same time. Everything else is kept as an import:
- * another vessel's track is not this boat's recording, and an untimed one
- * cannot be placed in it.
+ * recording has nothing (see {@link fillGaps}), judged again as the store
+ * writes it; with `replace`, in place of what was recorded over the same
+ * time. Everything else is kept as an import: another vessel's track is not
+ * this boat's recording, and an untimed one cannot be placed in it.
  */
 export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOverlap: OnOverlap): Promise<KeptTrack> {
   const context = track.context === undefined ? undefined : resolveSelf(deps.selfContext)(track.context)
@@ -901,8 +908,9 @@ export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOve
         filled.push(...kept.runs.flat())
         overlapping += kept.overlapping
       }
-      // Nothing is there to replace, so nothing goes to the recycle bin.
-      await deps.store.recordTrack(context, runs, Date.now(), false)
+      // Not recordTrack: what another upload or a restore wrote into a gap
+      // while history was read would go to the recycle bin in its place.
+      overlapping += await deps.store.fillTrack(context, runs)
       return { id: recordedId(context), overlapping }
     }
     // As a delete does: the binned span has to hide what a history provider

@@ -363,6 +363,9 @@ export class AsyncTrackStore implements TrackStore {
   recordTrack(context: Context, segments: TimedPosition[][], deletedAt: number, keepEmpty: boolean) {
     return this.enqueue('recordTrack', [context, segments, deletedAt, keepEmpty], 'acknowledged')
   }
+  fillTrack(context: Context, runs: TimedPosition[][]) {
+    return this.enqueue('fillTrack', [context, runs], 'acknowledged')
+  }
   binImport(importId: string, span: { from?: number; to?: number } | undefined, deletedAt: number) {
     return this.enqueue('binImport', [importId, span, deletedAt], 'acknowledged')
   }

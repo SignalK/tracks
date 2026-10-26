@@ -171,6 +171,24 @@ describe('the GPX upload route', () => {
       expect(properties).toMatchObject({ id: `recorded:${SELF_CONTEXT}`, pointCount: 2 })
     }))
 
+  // Each reads the gap before either writes, as a second client or a restore
+  // can while a slow provider is read.
+  it('keeps one of two uploads of the same passage sent at once, and bins neither', async () => {
+    const h = createHarness({ history: { contexts: [SELF_CONTEXT], valuesDelayMs: 200 } })
+    try {
+      const file = gpxFile(trk('Morning', [t0, t0 + MINUTE, t0 + 2 * MINUTE]))
+      const answers = await Promise.all([upload(h, file, '?self=true'), upload(h, file, '?self=true')])
+      expect(answers.map(({ status }) => status)).toEqual([201, 201])
+      const overlapping = answers.map(({ body }) => (body as { overlappingPoints: number }).overlappingPoints)
+      expect(overlapping.sort()).toEqual([0, 3])
+      const [properties] = await listed(h)
+      expect(properties).toMatchObject({ id: `recorded:${SELF_CONTEXT}`, pointCount: 3 })
+      expect((await request(h.app).get('/plugins/tracks/recycle-bin')).body).toEqual([])
+    } finally {
+      await h.stop()
+    }
+  })
+
   it('answers 503 when history cannot say where the gaps are', async () => {
     const h = createHarness({ history: { contexts: [SELF_CONTEXT], getValuesRejects: true } })
     try {

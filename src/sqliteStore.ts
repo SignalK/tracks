@@ -5,7 +5,15 @@ import { significance } from './simplify.js'
 import { thin, Thinner } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
-import { createInBounds, createMatcher, longitudeSpan, longitudeSpanOf, splitAtAntimeridian } from './utils.js'
+import {
+  createInBounds,
+  createMatcher,
+  fillGaps,
+  longitudeSpan,
+  longitudeSpanOf,
+  MIN_FILLED_GAP_MS,
+  splitAtAntimeridian,
+} from './utils.js'
 import type { LongitudeExtremes } from './utils.js'
 import type {
   BinEntry,
@@ -1658,9 +1666,10 @@ export class SqliteTrackStore implements TrackStore {
    *
    * Called by every write that changes the positions of a day: a fix dated
    * into a refined day, `initialTrack` (through `clearLevels`), `recordTrack`,
-   * `binRecorded`, `restoreFromBin`, both retentions and detail thinning. A
-   * stay still going on, thinned at the spacing of the last prune, sends back
-   * only what aged since then, so its days are not refined again every hour.
+   * `fillTrack`, `binRecorded`, `restoreFromBin`, both retentions and detail
+   * thinning. A stay still going on, thinned at the spacing of the last
+   * prune, sends back only what aged since then, so its days are not refined
+   * again every hour.
    */
   private invalidateLevels(context: Context, from: number, to: number): void {
     const through = this.levelFrontier.get(context)
@@ -1975,6 +1984,48 @@ export class SqliteTrackStore implements TrackStore {
       if (first === undefined || last === undefined) continue
       const { id } = this.binRecorded(context, first.timestamp, last.timestamp, deletedAt, keepEmpty)
       if (id !== undefined) binned.push(id)
+    }
+    this.fill(context, segments)
+    return binned
+  }
+
+  /**
+   * Write the runs a track imported for a vessel fills into its recording,
+   * where it has nothing, and return how many points were left out. Nothing
+   * is binned. The runs are judged again here, in the same transaction,
+   * against the recording as it is now: another upload or a restore can
+   * write into a gap while history is read for it, and what it wrote stays.
+   */
+  fillTrack(context: Context, runs: TimedPosition[][]): number {
+    const recorded = this.db.prepare(
+      'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?',
+    )
+    const kept: TimedPosition[][] = []
+    let overlapping = 0
+    for (const run of runs) {
+      const first = run[0]
+      const last = run.at(-1)
+      if (first === undefined || last === undefined) continue
+      const around = recorded.all(context, first.timestamp - MIN_FILLED_GAP_MS, last.timestamp + MIN_FILLED_GAP_MS) as {
+        timestamp: number
+      }[]
+      const judged = fillGaps([run], around, MIN_FILLED_GAP_MS)
+      kept.push(...judged.runs)
+      overlapping += judged.overlapping
+    }
+    this.fill(context, kept)
+    return overlapping
+  }
+
+  /**
+   * Write positions into a vessel's recording as they come, past the
+   * throttle, and keep them as imported rather than thin them as detail.
+   */
+  private fill(context: Context, segments: TimedPosition[][]): void {
+    for (const points of segments) {
+      const first = points[0]
+      const last = points.at(-1)
+      if (first === undefined || last === undefined) continue
       this.excludeFromDetail(context, first.timestamp, last.timestamp)
     }
     // The next live fix would otherwise open a detail span from the last one
@@ -1990,7 +2041,6 @@ export class SqliteTrackStore implements TrackStore {
         this.invalidateLevels(context, first.timestamp, last.timestamp)
       }
     }
-    return binned
   }
 
   /**
