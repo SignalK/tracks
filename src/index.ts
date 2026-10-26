@@ -221,10 +221,10 @@ const DEFAULT_RESOLUTION = 10000
 // normal resolution back to it once it is a day old.
 const DEFAULT_STATE_RESOLUTIONS = [{ state: 'anchored', resolution: 1000 }]
 // How long the positions of a vessel other than the own one are kept. The own
-// vessel is never dropped — see TrackStore.prune. A month is long enough that a
-// passage last week is still there to compare against, and short enough that a
-// season in a busy harbour does not accumulate every target that ever passed.
-const DEFAULT_AIS_RETENTION_DAYS = 30
+// vessel is never dropped — see TrackStore.prune. A week keeps a ferry's
+// passages to follow and more than any chart draws of other vessels, while 30
+// days of a boat's AIS took 1.25 M rows, about 280 MB.
+const DEFAULT_AIS_RETENTION_DAYS = 7
 // Long enough to notice a track deleted by mistake after a season ashore.
 const DEFAULT_RECYCLE_BIN_DAYS = 180
 const DAY_MS = 24 * 60 * 60 * 1000

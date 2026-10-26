@@ -202,6 +202,30 @@ describe('own vessel retention', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('keeps other vessels a week by default', async () => {
+    vi.useFakeTimers()
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-week-'))
+    const { app, emit } = createApp(dir)
+    const plugin = ThePlugin(app)
+    try {
+      await plugin.start({ resolution: 0 })
+      const day = 24 * 60 * 60 * 1000
+      const lastWeek = 'vessels.urn:mrn:imo:mmsi:987654321' as ContextPosition['context']
+      const thisWeek = 'vessels.urn:mrn:imo:mmsi:987654322' as ContextPosition['context']
+      emit(lastWeek, [61, 25], Date.now() - 8 * day)
+      emit(thisWeek, [62, 26], Date.now() - 6 * day)
+
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+
+      await expect(plugin.getTracks()?.get(lastWeek)).rejects.toThrow()
+      await expect(plugin.getTracks()?.get(thisWeek)).resolves.toHaveLength(1)
+    } finally {
+      await plugin.stop()
+      vi.useRealTimers()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 // A base station or an aid to navigation never moves, so a track of it is a
