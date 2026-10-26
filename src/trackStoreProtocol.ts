@@ -23,6 +23,8 @@ export type StoreMethod =
   | 'purgeFromBin'
   | 'binEntries'
   | 'deletedSpans'
+  | 'historyImport'
+  | 'saveHistoryImport'
   | 'close'
 export type Operation = {
   [K in StoreMethod]: { id: number; method: K; args: Parameters<SqliteTrackStore[K]> }

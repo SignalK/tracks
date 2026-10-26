@@ -178,6 +178,37 @@ seconds is kept too: the History API cannot cancel it, so the next query waits
 for that read instead of starting a second one beside it, and gets its answer
 once it lands.
 
+## Importing what the provider holds
+
+Asked to, from **Import from history** in the Tracks webapp, the plugin copies the
+own vessel's track from the provider into its own store once. It reads a day at
+a time, from the first day the provider holds up to the moment the import was
+started; live recording covers the time after that.
+
+- **The store first.** A day is read from the store before the provider is
+  asked anything, and only stretches of at least five minutes without a stored
+  position are filled, as a GPX import of the own vessel fills them. What the
+  plugin recorded itself stays as it is, and a day it recorded whole asks the
+  provider nothing.
+- **Coarse, then fine.** A provider answers every bucket of a range, empty ones
+  too, so a whole day read at a second would be 86,400 rows whether it held a
+  passage or nothing. The stretches to fill are first read in ten-minute buckets, and
+  then a second at a time only where those found positions.
+- **Deleted stays deleted.** A span deleted from the recording is left out, as
+  it is from what the provider returns to a query, including one deleted
+  while the day was being read.
+- **Across midnight.** A stretch the recording left empty over midnight is
+  filled on both days, however little of it lies after midnight.
+- **One day, one commit.** Each day is written together with the import's
+  progress, in a table of the plugin's file, so a stop or a restart goes on
+  with the next day. Writing a day twice writes nothing the second time, since
+  what the first wrote is then the recording; that is also why an import
+  started again after it finished only fills what is still missing.
+
+A read or a write that fails stops the import, keeping the day it was on, and
+the plugin's status says so. It goes on from that day when started again, or a minute after
+the plugin next starts.
+
 ## Why the two never double up
 
 A provider aggregates into buckets and stamps each one on its boundary:

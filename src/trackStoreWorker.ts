@@ -55,6 +55,7 @@ const ACKNOWLEDGED = new Set<Operation['method']>([
   'binImport',
   'restoreFromBin',
   'purgeFromBin',
+  'saveHistoryImport',
 ])
 function acknowledge(operation: Operation, target: SqliteTrackStore): unknown {
   switch (operation.method) {
@@ -72,6 +73,8 @@ function acknowledge(operation: Operation, target: SqliteTrackStore): unknown {
       return target.restoreFromBin(...operation.args)
     case 'purgeFromBin':
       return target.purgeFromBin(...operation.args)
+    case 'saveHistoryImport':
+      return target.saveHistoryImport(...operation.args)
     default:
       throw new Error('Unknown track operation')
   }
@@ -204,6 +207,9 @@ if (store) {
                 break
               case 'deletedSpans':
                 value = target.deletedSpans()
+                break
+              case 'historyImport':
+                value = target.historyImport(...operation.args)
                 break
               default:
                 throw new Error('Unknown track operation')

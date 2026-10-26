@@ -64,7 +64,8 @@ beforeAll(async () => {
   server = await startServer({
     // A different port from plugin.e2e.test.ts so the two files never collide.
     port: 4790,
-    config: { source: 'history', resolution: 1000, pointsToKeep: 500 },
+    // Moored pauses the own vessel's recording, which the history import fills.
+    config: { resolution: 1000, pauseWhenState: ['moored'] },
     // Named rather than left to registration order: any other history
     // provider in the server checkout would otherwise become the default and
     // answer these queries with nothing.
@@ -176,4 +177,82 @@ describe('bootstrap through a real history provider', () => {
     const track = (await server.api(`${SELF_PATH}?from=1990-01-01T00:00:00Z&to=1990-01-02T00:00:00Z`)) as TrackResponse
     expect(track.coordinates).toEqual([])
   })
+})
+
+describe('the history import through a real history provider', () => {
+  interface ImportState {
+    startedAt: string
+    firstDay?: string
+    filled: number
+    finishedAt?: string
+    error?: string
+  }
+
+  it('fills what the recording paused for from what the provider recorded', async () => {
+    if (!available || !server) return
+    // Moored, the plugin records nothing of the own vessel, and the provider
+    // records on. It stamps a fix with the time it arrives, not the one the
+    // fix carries, so these are sent as now, and a degree north of everything
+    // the tests above fed.
+    await server.feedState(server.selfContext, 'moored')
+    const t0 = Date.now()
+    for (let i = 1; i <= 20; i++) {
+      await server.feed(server.selfContext, [61 + i * 1e-5, 24.9], Date.now())
+    }
+    await server.feedState(server.selfContext, 'sailing')
+
+    // What the provider holds of them, a second at a time: it thins by its
+    // own sampling rate, and makes rows readable only once it has written them.
+    const provided = async () => {
+      const res = await fetch(
+        `${server!.url}/signalk/v2/api/history/values?paths=navigation.position&resolution=1` +
+          `&from=${new Date(t0).toISOString()}&to=${new Date().toISOString()}`,
+      )
+      const { data = [] } = (await res.json()) as { data?: [string, [number, number] | null][] }
+      return data.flatMap(([time, value]) =>
+        value && value[1] >= 61 ? [{ time: Date.parse(time), lat: value[1] }] : [],
+      )
+    }
+    let held: { time: number; lat: number }[] = []
+    await eventually(async () => {
+      const now = await provided()
+      const settled = now.length > 0 && now.length === held.length
+      held = now
+      return settled ? true : undefined
+    }, 60_000)
+    expect(held.length).toBeGreaterThan(0)
+    // What the plugin recorded of them, which v1's collection route reads
+    // from the store alone.
+    const recorded = async () => {
+      const tracks = (await server!.api('/tracks?times&timespan=15m')) as Record<
+        string,
+        { coordinates: [number, number][][]; times: string[][] }
+      >
+      const track = tracks[server!.selfContext]
+      return (track?.coordinates.flat() ?? []).flatMap(([, lat], i) =>
+        lat >= 61 ? [{ time: Date.parse(track!.times.flat()[i]!), lat }] : [],
+      )
+    }
+    expect(await recorded()).toEqual([])
+
+    const started = await server.plugin('/history-import', { method: 'POST' })
+    expect(started.status).toBe(202)
+    const { startedAt } = (started.body as { state: ImportState }).state
+    const done = await eventually(async () => {
+      const { body } = await server!.plugin('/history-import')
+      const state = (body as { state?: ImportState }).state
+      return state?.startedAt === startedAt && state.finishedAt !== undefined ? state : undefined
+    }, 60_000)
+
+    expect(done).toBeDefined()
+    expect(done!.error).toBeUndefined()
+    expect(Date.parse(done!.firstDay!)).toBeLessThanOrEqual(t0)
+    // Each fix the provider holds is in the recording now, in the same
+    // second: the import reads seconds aligned to where it starts reading.
+    const stored = await recorded()
+    const missing = held.filter(
+      ({ time, lat }) => !stored.some((point) => point.lat === lat && Math.abs(point.time - time) <= 1000),
+    )
+    expect(missing, JSON.stringify({ held, stored })).toEqual([])
+  }, 300_000)
 })
