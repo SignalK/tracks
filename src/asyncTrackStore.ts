@@ -319,13 +319,19 @@ export class AsyncTrackStore implements TrackStore {
     void this.enqueue('initialTrack', [context, track, timestamps], 'write')
     if (this.sequence !== sequence) this.admitted.delete(context)
   }
-  refineLevels(): void {
+  refineLevels(): Promise<boolean> {
     // Housekeeping: skipped from half capacity, where recording resumes
     // after a gap, and while nothing is accepted, so a tick never fills the
     // queue or counts as a dropped write.
     const busy = this.queue.length + this.active.length >= this.maxItems / 2 || this.pendingBytes > this.maxBytes / 2
-    if (busy || this.overloaded || this.failed || this.closing || this.statusError) return
-    void this.enqueue('refineLevels', [Date.now()], 'write')
+    if (busy || this.overloaded || this.failed || this.closing || this.statusError) return Promise.resolve(false)
+    // Admitted as a read, whose answer comes back: whether work is left. A
+    // skipped or failed call answers no, so the next one waits for the
+    // ordinary tick.
+    return this.enqueue('refineLevels', [Date.now()]).then(
+      (more) => more === true,
+      () => false,
+    )
   }
   prune(maxAge: number, keep?: Context): void {
     const now = Date.now()
