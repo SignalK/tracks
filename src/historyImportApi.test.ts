@@ -210,7 +210,15 @@ describe('the history import route', () => {
           { timeout: 20_000, interval: 50 },
         )
         h.emit(SELF_CONTEXT, [60.1, 24.9], Date.now())
-        await vi.advanceTimersByTimeAsync(30_000)
+        // The restart reads the stopped import back by itself, which can come
+        // after the route has answered: report until the status has it.
+        await vi.waitFor(
+          async () => {
+            await vi.advanceTimersByTimeAsync(30_000)
+            expect(h.statuses.at(-1)).toContain('History import')
+          },
+          { timeout: 20_000, interval: 50 },
+        )
         expect(h.statuses.at(-1)).toBe(
           "Not recording: navigation.state is 'moored'. 1 position(s) skipped. " +
             'History import stopped: provider unavailable. Resume it in the Tracks webapp.',
