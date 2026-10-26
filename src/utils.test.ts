@@ -601,4 +601,16 @@ describe('fillGaps', () => {
   it('fills everything when nothing is recorded', () => {
     expect(fillGaps([at(1, 2)], [], MIN_FILLED_GAP_MS)).toEqual({ runs: [at(1, 2)], overlapping: 0 })
   })
+
+  it('fills a gap of exactly minGap, and leaves out and counts the recorded instants', () => {
+    const { runs, overlapping } = fillGaps([at(1, 2, 3, 4, 5, 6, 7, 8)], at(2, 7), MIN_FILLED_GAP_MS)
+    expect(minutesOf(runs)).toEqual([[1], [3, 4, 5, 6], [8]])
+    expect(overlapping).toBe(2)
+  })
+
+  it('leaves out and counts every point in a gap shorter than minGap', () => {
+    const { runs, overlapping } = fillGaps([at(3, 4, 5, 6)], at(2, 6.5), MIN_FILLED_GAP_MS)
+    expect(runs).toEqual([])
+    expect(overlapping).toBe(4)
+  })
 })
