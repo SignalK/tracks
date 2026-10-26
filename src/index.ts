@@ -217,16 +217,16 @@ interface TracksPluginConfig {
 
 const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
 
-const DEFAULT_RESOLUTION = 60000
+const DEFAULT_RESOLUTION = 10000
 // At anchor every second: fine enough to draw the swing around the anchor,
 // which the normal resolution misses. The store thins detail finer than the
 // normal resolution back to it once it is a day old.
 const DEFAULT_STATE_RESOLUTIONS = [{ state: 'anchored', resolution: 1000 }]
 // How long the positions of a vessel other than the own one are kept. The own
-// vessel is never dropped — see TrackStore.prune. A month is long enough that a
-// passage last week is still there to compare against, and short enough that a
-// season in a busy harbour does not accumulate every target that ever passed.
-const DEFAULT_AIS_RETENTION_DAYS = 30
+// vessel is never dropped — see TrackStore.prune. A week keeps a ferry's
+// passages to follow and more than any chart draws of other vessels, while 30
+// days of a boat's AIS took 1.25 M rows, about 280 MB.
+const DEFAULT_AIS_RETENTION_DAYS = 7
 // Long enough to notice a track deleted by mistake after a season ashore.
 const DEFAULT_RECYCLE_BIN_DAYS = 180
 // Below a GPS's own noise, so what simplifying to it deletes is where the
@@ -622,8 +622,9 @@ export default function ThePlugin(app: App): Plugin {
             file: join(dataDir, 'tracks.db'),
             resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
             // The own vessel's track is never aged out: it is the one worth
-            // keeping, and a year of it at the default resolution is a few
-            // megabytes. Other vessels are pruned by aisRetentionDays.
+            // keeping, and a thousand hours under way at the default
+            // resolution take about 80 MB. Other vessels are pruned by
+            // aisRetentionDays.
             retention: 0,
             binRetention: binRetentionMs,
             storageTolerance: Math.max(0, toNumber(config.storageTolerance) ?? DEFAULT_STORAGE_TOLERANCE),

@@ -202,6 +202,30 @@ describe('own vessel retention', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('keeps other vessels a week by default', async () => {
+    vi.useFakeTimers()
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-week-'))
+    const { app, emit } = createApp(dir)
+    const plugin = ThePlugin(app)
+    try {
+      await plugin.start({ resolution: 0 })
+      const day = 24 * 60 * 60 * 1000
+      const lastWeek = 'vessels.urn:mrn:imo:mmsi:987654321' as ContextPosition['context']
+      const thisWeek = 'vessels.urn:mrn:imo:mmsi:987654322' as ContextPosition['context']
+      emit(lastWeek, [61, 25], Date.now() - 8 * day)
+      emit(thisWeek, [62, 26], Date.now() - 6 * day)
+
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+
+      await expect(plugin.getTracks()?.get(lastWeek)).rejects.toThrow()
+      await expect(plugin.getTracks()?.get(thisWeek)).resolves.toHaveLength(1)
+    } finally {
+      await plugin.stop()
+      vi.useRealTimers()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 // A base station or an aid to navigation never moves, so a track of it is a
@@ -252,6 +276,28 @@ describe('the own vessel at anchor', () => {
 
       await expect(plugin.getTracks()?.get(SELF_CONTEXT as never)).resolves.toHaveLength(5)
       await expect(plugin.getTracks()?.get(other as never)).resolves.toHaveLength(1)
+    } finally {
+      await plugin.stop()
+    }
+  })
+
+  // Every ten seconds for other vessels too: a ferry followed through a
+  // channel needs its turns, which a fix a minute cuts off.
+  it('records the own vessel and other vessels every ten seconds by default', async () => {
+    const { app, emit } = createApp(dir)
+    app.getSelfPath = (path?: string): unknown => (path === 'navigation.state' ? { value: 'motoring' } : undefined)
+    const plugin = ThePlugin(app)
+    try {
+      await plugin.start({})
+      const other = 'vessels.urn:mrn:imo:mmsi:987654321'
+      const t0 = Date.now() - 2 * 60_000
+      for (let i = 0; i <= 12; i++) {
+        emit(SELF_CONTEXT, [60 + i * 1e-5, 24], t0 + i * 5000)
+        emit(other, [61 + i * 1e-5, 25], t0 + i * 5000)
+      }
+
+      await expect(plugin.getTracks()?.get(SELF_CONTEXT as never)).resolves.toHaveLength(7)
+      await expect(plugin.getTracks()?.get(other as never)).resolves.toHaveLength(7)
     } finally {
       await plugin.stop()
     }
