@@ -198,6 +198,13 @@ export interface SqliteStoreConfig {
    * in. Tests lower it.
    */
   refineBudget?: number
+  /**
+   * Metres within which a position of a refined day may lie of the line its
+   * neighbours draw and still be deleted: what a track simplified to this
+   * tolerance leaves out; see `simplifyStored()`. 0 deletes none, and detail
+   * finer than the resolution is thinned by time instead (`thinOldDetail`).
+   */
+  storageTolerance?: number
   /** A gap longer than this ms starts a new track segment. */
   segmentGap?: number
 }
@@ -329,6 +336,13 @@ const unrefinedIn = (refined: RefinedDays | undefined, range: TimeRange): TimeRa
  */
 const DETAIL_KEEP = 24 * 60 * 60 * 1000
 /**
+ * The most time the stored positions are simplified to leave between two
+ * kept ones, where the recording had a position between them: a straight leg
+ * then never reads as a pause, to `segment()` at a gap of a minute or more,
+ * or to `fillGaps` and the imports that fill what it finds.
+ */
+const STORED_GAP_MAX = 60 * 1000
+/**
  * How many points a stretch still being recorded keeps over its whole length,
  * as an anchor alarm reads it: from the drop, at one point per this many
  * seconds of the stay, so a day per second.
@@ -374,6 +388,26 @@ function* fillPieces(run: TimedPosition[]): Generator<TimedPosition[]> {
     piece.push(point)
   }
   if (piece.length > 0) yield piece
+}
+
+/**
+ * Which positions of a piece simplifying the store to `tolerance` keeps: the
+ * ones `simplify()` keeps at it, its ends, and enough of the rest that no two
+ * kept ones lie further apart than STORED_GAP_MAX where the piece had a
+ * position between them.
+ */
+function storedKeep(piece: { timestamp: number }[], values: Float64Array, tolerance: number): boolean[] {
+  const keep = Array.from(values, (value) => value > tolerance)
+  let last = 0
+  for (let i = 1; i < piece.length - 1; i++) {
+    if (!keep[i] && piece[i + 1]!.timestamp - piece[last]!.timestamp > STORED_GAP_MAX) {
+      keep[i] = true
+    }
+    if (keep[i]) {
+      last = i
+    }
+  }
+  return keep
 }
 
 /**
@@ -429,6 +463,20 @@ export class SqliteTrackStore implements TrackStore {
    * one of the pass past its context's frontier.
    */
   private refinePartial: { context: Context; day: number; next: number; stale: boolean } | undefined
+  private readonly storageTolerance: number
+  /**
+   * Per context, the last refined day simplifyStored() has gone through and
+   * the tolerance it did so at; a copy of simplify_frontier.
+   */
+  private readonly simplifyFrontier = new Map<string, { through: number; tolerance: number }>()
+  /** The last refinable day as of the newest simplifying pass over every context. */
+  private simplifiedThrough: number | undefined
+  /** Where the simplifying pass over the contexts goes on after running out of budget. */
+  private simplifyResume: string | undefined
+  /** A day simplifyStored() stopped inside, to go on from `next`: a pending one, or one of the pass. */
+  private simplifyPartial: { context: Context; day: number; next: number; pending: boolean } | undefined
+  /** See simplifying(). */
+  private simplifyStatements: Record<'select' | 'held' | 'remove' | 'done' | 'frontier', StatementSync> | undefined
   /** See refining(). */
   private refineStatements:
     | Record<'select' | 'copy' | 'visit' | 'unstale' | 'frontier' | 'deleteSignificant' | 'deleteVisits', StatementSync>
@@ -438,6 +486,7 @@ export class SqliteTrackStore implements TrackStore {
     this.maxCells = config.maxCells ?? DEFAULT_MAX_CELLS
     this.readProbeLimit = config.readProbeLimit ?? DEFAULT_READ_PROBE_LIMIT
     this.refineBudget = config.refineBudget ?? DEFAULT_REFINE_BUDGET
+    this.storageTolerance = config.storageTolerance ?? 0
     this.segmentGap = config.segmentGap ?? DEFAULT_SEGMENT_GAP
     this.retention = config.retention ?? 0
     this.binRetention = config.binRetention ?? 0
@@ -597,6 +646,19 @@ export class SqliteTrackStore implements TrackStore {
         through     INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS level_stale (
+        context     TEXT    NOT NULL,
+        day         INTEGER NOT NULL,
+        PRIMARY KEY (context, day)
+      ) WITHOUT ROWID;
+      -- Per context, the last refined day simplifyStored() has gone
+      -- through and the tolerance it did so at, and the days a change has
+      -- since sent back to it.
+      CREATE TABLE IF NOT EXISTS simplify_frontier (
+        context     TEXT    PRIMARY KEY,
+        through     INTEGER NOT NULL,
+        tolerance   REAL    NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS simplify_pending (
         context     TEXT    NOT NULL,
         day         INTEGER NOT NULL,
         PRIMARY KEY (context, day)
@@ -1544,7 +1606,7 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     if (this.refinedThrough === lastDay) {
-      return false
+      return this.simplifyStored(lastDay, budget)
     }
     const nextContext = this.db.prepare('SELECT context FROM positions WHERE context > ? ORDER BY context LIMIT 1')
     const firstAt = this.db.prepare(
@@ -1574,7 +1636,7 @@ export class SqliteTrackStore implements TrackStore {
       context = (nextContext.get(context) as { context: string } | undefined)?.context
     }
     this.refinedThrough = lastDay
-    return false
+    return this.simplifyStored(lastDay, budget)
   }
 
   /**
@@ -1656,6 +1718,8 @@ export class SqliteTrackStore implements TrackStore {
     } else {
       statements.frontier.run(context, day)
       this.levelFrontier.set(context, day)
+      // A day refined is one more to simplify.
+      this.simplifiedThrough = undefined
     }
     return budget
   }
@@ -1682,6 +1746,174 @@ export class SqliteTrackStore implements TrackStore {
         `DELETE FROM significant WHERE context = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
       ),
       deleteVisits: this.db.prepare('DELETE FROM level_visits WHERE context = ? AND hour >= ? AND hour < ?'),
+    })
+  }
+
+  /**
+   * Delete the positions of refined days that simplifying to
+   * `storageTolerance` leaves out, keeping one at least every STORED_GAP_MAX
+   * where the recording had one (`storedKeep`), and every position
+   * `significant` holds. About `refineBudget` positions per call, each one
+   * deleted counting once more, once refineLevels() has nothing left, so no
+   * day is stale: days a change sent back first, then each context's refined
+   * days after its frontier. Returns whether it stopped with work left.
+   *
+   * A frontier reached at a smaller tolerance counts for none, so raising
+   * the tolerance goes over every day again. Lowering it brings nothing
+   * back: what is deleted is gone.
+   *
+   * It leaves the levels as they are, with no invalidateLevels(): what it
+   * deletes is below every level, and simplifying what remains to any
+   * tolerance from this one up gives what simplifying every position did.
+   */
+  private simplifyStored(lastDay: number, budget: number): boolean {
+    if (!(this.storageTolerance > 0)) {
+      return false
+    }
+    if (budget <= 0) {
+      return true
+    }
+    const partial = this.simplifyPartial
+    if (partial) {
+      this.simplifyPartial = undefined
+      budget = this.simplifyDay(partial.context, partial.day, partial.next, budget, partial.pending)
+      if (this.simplifyPartial || budget <= 0) {
+        return true
+      }
+    }
+    const pending = this.db.prepare('SELECT context, day FROM simplify_pending LIMIT 64')
+    for (
+      let batch = pending.all() as { context: string; day: number }[];
+      batch.length > 0;
+      batch = pending.all() as { context: string; day: number }[]
+    ) {
+      for (const { context, day } of batch) {
+        budget = this.simplifyDay(context, day, Number.NEGATIVE_INFINITY, budget, true)
+        if (this.simplifyPartial || budget <= 0) {
+          return true
+        }
+      }
+    }
+    if (this.simplifiedThrough === lastDay) {
+      return false
+    }
+    const nextContext = this.db.prepare('SELECT context FROM positions WHERE context > ? ORDER BY context LIMIT 1')
+    const firstAt = this.db.prepare(
+      'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
+    )
+    let context: string | undefined = this.simplifyResume
+    if (context === undefined) {
+      context = (nextContext.get('') as { context: string } | undefined)?.context
+    }
+    this.simplifyResume = undefined
+    while (context !== undefined) {
+      const refined = this.levelFrontier.get(context)
+      for (;;) {
+        const through = this.simplifiedDay(context)
+        const row = firstAt.get(
+          context,
+          through === undefined ? Number.NEGATIVE_INFINITY : (through + 1) * LEVEL_DAY_MS,
+        ) as { timestamp: number } | undefined
+        if (!row || refined === undefined || dayOf(row.timestamp) > refined) {
+          break
+        }
+        budget = this.simplifyDay(context, dayOf(row.timestamp), Number.NEGATIVE_INFINITY, budget, false)
+        if (this.simplifyPartial || budget <= 0) {
+          this.simplifyResume = context
+          return true
+        }
+      }
+      context = (nextContext.get(context) as { context: string } | undefined)?.context
+    }
+    this.simplifiedThrough = lastDay
+    return false
+  }
+
+  /** The last day simplifyStored() has gone through for a context at the store's tolerance or a larger one. */
+  private simplifiedDay(context: Context): number | undefined {
+    const frontier = this.simplifyFrontier.get(context)
+    return frontier && frontier.tolerance >= this.storageTolerance ? frontier.through : undefined
+  }
+
+  /**
+   * Simplify a context's refined day from `from` on, piece by piece as
+   * refineDay() refines it, while the budget lasts, resolving to the budget
+   * left. Stopping inside the day leaves it in simplifyPartial; finishing it
+   * takes it off simplify_pending, or moves the frontier to it.
+   */
+  private simplifyDay(context: Context, day: number, from: number, budget: number, pending: boolean): number {
+    budget -= REFINE_DAY_COST
+    const statements = this.simplifying()
+    const dayStart = day * LEVEL_DAY_MS
+    const dayEnd = dayStart + LEVEL_DAY_MS
+    const read = (limit: number) =>
+      statements.select.all(context, Math.max(from, dayStart), dayEnd, limit) as unknown as (Omit<
+        PositionRow,
+        'context'
+      > & {
+        id: number
+      })[]
+    const limit = budget + LEVEL_PIECE_MAX
+    let rows = read(limit)
+    let cuts = this.piecesOf(rows)
+    if (rows.length === limit) {
+      cuts.pop()
+      if (cuts.length < 2) {
+        rows = read(-1)
+        cuts = this.piecesOf(rows)
+      }
+    }
+    const held = new Set(
+      (statements.held.all(context, dayStart, dayEnd) as unknown as { position: number }[]).map(
+        ({ position }) => position,
+      ),
+    )
+    let stopped = false
+    for (let p = 1; p < cuts.length; p++) {
+      const piece = rows.slice(cuts[p - 1], cuts[p])
+      const keep = storedKeep(piece, significance(piece.map(toTimed)), this.storageTolerance)
+      let deleted = 0
+      for (const [i, row] of piece.entries()) {
+        if (!keep[i] && !held.has(row.id)) {
+          statements.remove.run(row.id)
+          deleted++
+        }
+      }
+      budget -= piece.length + deleted
+      const next = rows[cuts[p]!]
+      if (next && (budget <= 0 || p === cuts.length - 1)) {
+        this.simplifyPartial = { context, day, next: next.timestamp, pending }
+        stopped = true
+        break
+      }
+    }
+    if (stopped) {
+      return budget
+    }
+    if (pending) {
+      statements.done.run(context, day)
+    } else {
+      statements.frontier.run(context, day, this.storageTolerance)
+      this.simplifyFrontier.set(context, { through: day, tolerance: this.storageTolerance })
+    }
+    return budget
+  }
+
+  /** simplifyDay()'s statements, prepared once. */
+  private simplifying() {
+    return (this.simplifyStatements ??= {
+      select: this.db.prepare(
+        'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?',
+      ),
+      held: this.db.prepare(
+        `SELECT position FROM significant WHERE context = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
+      ),
+      remove: this.db.prepare('DELETE FROM positions WHERE rowid = ?'),
+      done: this.db.prepare('DELETE FROM simplify_pending WHERE context = ? AND day = ?'),
+      frontier: this.db.prepare(
+        `INSERT INTO simplify_frontier (context, through, tolerance) VALUES (?, ?, ?)
+         ON CONFLICT(context) DO UPDATE SET through = excluded.through, tolerance = excluded.tolerance`,
+      ),
     })
   }
 
@@ -1717,7 +1949,8 @@ export class SqliteTrackStore implements TrackStore {
    * `fillTrack`, `saveHistoryImport`, `binRecorded`, `restoreFromBin`, both
    * retentions and detail thinning. A stay still going on, thinned at the
    * spacing of the last prune, sends back only what aged since then, so its
-   * days are not refined again every hour.
+   * days are not refined again every hour. simplifyStored() alone deletes
+   * without it; see there.
    */
   private invalidateLevels(context: Context, from: number, to: number): void {
     const through = this.levelFrontier.get(context)
@@ -1752,6 +1985,10 @@ export class SqliteTrackStore implements TrackStore {
       'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp LIMIT 1',
     )
     const queue = this.db.prepare('INSERT OR IGNORE INTO level_stale (context, day) VALUES (?, ?)')
+    // A day simplified already is simplified again once refined again, for
+    // what the change brought in.
+    const simplified = this.simplifiedDay(context)
+    const resimplify = this.db.prepare('INSERT OR IGNORE INTO simplify_pending (context, day) VALUES (?, ?)')
     for (let day = first; day <= last;) {
       const row = next.get(context, day * LEVEL_DAY_MS, end) as { timestamp: number } | undefined
       if (!row) {
@@ -1759,8 +1996,17 @@ export class SqliteTrackStore implements TrackStore {
       }
       day = dayOf(row.timestamp)
       queue.run(context, day)
+      if (simplified !== undefined && day <= simplified) {
+        resimplify.run(context, day)
+      }
       day++
     }
+    // A day simplified in part starts over: its rows changed under it.
+    const simplifying = this.simplifyPartial
+    if (simplifying?.context === context && first <= simplifying.day && simplifying.day <= last) {
+      this.simplifyPartial = undefined
+    }
+    this.simplifiedThrough = undefined
   }
 
   /** Take a context's significant positions, and its visits, from `from` until `to` out. */
@@ -1776,10 +2022,17 @@ export class SqliteTrackStore implements TrackStore {
     this.db.prepare('DELETE FROM level_visits WHERE context = ?').run(context)
     this.db.prepare('DELETE FROM level_frontier WHERE context = ?').run(context)
     this.db.prepare('DELETE FROM level_stale WHERE context = ?').run(context)
+    this.db.prepare('DELETE FROM simplify_frontier WHERE context = ?').run(context)
+    this.db.prepare('DELETE FROM simplify_pending WHERE context = ?').run(context)
     this.levelFrontier.delete(context)
+    this.simplifyFrontier.delete(context)
     this.refinedThrough = undefined
+    this.simplifiedThrough = undefined
     if (this.refinePartial?.context === context) {
       this.refinePartial = undefined
+    }
+    if (this.simplifyPartial?.context === context) {
+      this.simplifyPartial = undefined
     }
   }
 
@@ -1905,6 +2158,9 @@ export class SqliteTrackStore implements TrackStore {
    * still going on, keeps its older part at the spacing an anchor alarm reads
    * the whole stay at, about `DETAIL_STAY_POINTS` points, until that spacing
    * reaches the store's resolution, which it never goes coarser than.
+   *
+   * Only without a `storageTolerance`: with one, simplifyStored() thins the
+   * detail of a refined day along with everything else.
    */
   private thinOldDetail(now: number): void {
     if (this.resolution <= 0) {
@@ -1914,6 +2170,11 @@ export class SqliteTrackStore implements TrackStore {
     for (const open of this.detail.values()) {
       extend.run(open.end, open.id)
       open.saved = open.end
+    }
+    // Simplifying the stored positions keeps the shape of the detail, at
+    // anchor the swing, where thinning by time keeps one fix in each step.
+    if (this.storageTolerance > 0) {
+      return
     }
     // On a bucket edge, so the hourly prune of a span still being recorded
     // never splits a bucket between two runs and keeps two rows of it.
@@ -2586,6 +2847,15 @@ export class SqliteTrackStore implements TrackStore {
     this.refinedThrough = undefined
     this.refineResume = undefined
     this.refinePartial = undefined
+    this.simplifyFrontier.clear()
+    for (const { context, through, tolerance } of this.db
+      .prepare('SELECT context, through, tolerance FROM simplify_frontier')
+      .all() as unknown as { context: string; through: number; tolerance: number }[]) {
+      this.simplifyFrontier.set(context, { through, tolerance })
+    }
+    this.simplifiedThrough = undefined
+    this.simplifyResume = undefined
+    this.simplifyPartial = undefined
   }
 
   close(): void {

@@ -211,14 +211,17 @@ interface TracksPluginConfig {
   stateResolutions?: { state?: unknown; resolution?: unknown }[]
   /** Milliseconds between recorded fixes of other vessels; `resolution` when unset. */
   otherVesselsResolution?: number
+  /** Metres a stored position older than a day may lie off its track and be deleted. 0 deletes none. */
+  storageTolerance?: number
 }
 
 const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
 
 const DEFAULT_RESOLUTION = 10000
 // At anchor every second: fine enough to draw the swing around the anchor,
-// which the normal resolution misses. The store thins detail finer than the
-// normal resolution back to it once it is a day old.
+// which the normal resolution misses. Once a day old it is simplified with the
+// rest of the track to storageTolerance, or, with that at 0, thinned back to the
+// normal resolution.
 const DEFAULT_STATE_RESOLUTIONS = [{ state: 'anchored', resolution: 1000 }]
 // How long the positions of a vessel other than the own one are kept. The own
 // vessel is never dropped — see TrackStore.prune. A week keeps a ferry's
@@ -227,6 +230,10 @@ const DEFAULT_STATE_RESOLUTIONS = [{ state: 'anchored', resolution: 1000 }]
 const DEFAULT_AIS_RETENTION_DAYS = 7
 // Long enough to notice a track deleted by mistake after a season ashore.
 const DEFAULT_RECYCLE_BIN_DAYS = 180
+// Below a GPS's own noise, so what simplifying to it deletes is where the
+// receiver put the boat rather than where it went. On a boat's store it left
+// 3 to 5% of a day recorded every second.
+const DEFAULT_STORAGE_TOLERANCE = 0.5
 const DAY_MS = 24 * 60 * 60 * 1000
 
 // A vessel that has aged out is not urgent, so this need not be frequent.
@@ -621,6 +628,7 @@ export default function ThePlugin(app: App): Plugin {
             // aisRetentionDays.
             retention: 0,
             binRetention: binRetentionMs,
+            storageTolerance: Math.max(0, toNumber(config.storageTolerance) ?? DEFAULT_STORAGE_TOLERANCE),
             segmentGap,
           },
           app.debug,
@@ -1425,6 +1433,14 @@ export default function ThePlugin(app: App): Plugin {
             'A deleted track, or part of one, can be restored from the recycle bin in the Tracks webapp until it is purged after this many days.',
           default: DEFAULT_RECYCLE_BIN_DAYS,
         },
+        storageTolerance: {
+          type: 'number',
+          minimum: 0,
+          title: 'Simplify stored tracks older than a day to this many metres',
+          description:
+            "Keeps reads fast on a small board. Once a day is a day old, a position that lies within this distance of the line its neighbours draw is deleted, as simplifying the track to it would leave it out, keeping at least one a minute. 0.5 m is below a GPS's own noise. What is deleted cannot be brought back: to keep every position, archive a copy elsewhere, a GPX export of the track or a history provider such as signalk-questdb. 0 turns it off, and detail recorded finer than the track resolution is thinned back to it after a day instead.",
+          default: DEFAULT_STORAGE_TOLERANCE,
+        },
         maxSpeedKnots: {
           type: 'integer',
           title: 'Discard positions implying a speed above this (knots)',
@@ -1448,7 +1464,7 @@ export default function ThePlugin(app: App): Plugin {
           type: 'array',
           title: 'Own vessel resolution by navigation.state',
           description:
-            'Records the own vessel at a different spacing while navigation.state has the given value, finer or coarser than the track resolution. The default records every second at anchor, so an anchor alarm or a look back at the night sees the swing around the anchor. Anything finer than the track resolution is kept for a day and then thinned back to it. Needs navigation.state to be set, by signalk-autostate or by hand.',
+            'Records the own vessel at a different spacing while navigation.state has the given value, finer or coarser than the track resolution. The default records every second at anchor, so an anchor alarm or a look back at the night sees the swing around the anchor. After a day it is simplified with the rest of the track, which keeps the swing, or, with that turned off, thinned back to the track resolution. Needs navigation.state to be set, by signalk-autostate or by hand.',
           items: {
             type: 'object',
             required: ['state', 'resolution'],

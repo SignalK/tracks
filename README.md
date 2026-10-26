@@ -96,7 +96,8 @@ application/gpx+xml`. Each track in the file becomes an imported track as above.
 timed one into the recording; otherwise a track names a vessel only if the file says which, as
 the plugin's own GPX export does. Ticking **Replace what my vessel recorded over the same time**
 as well (`onOverlap=replace`; the default is `keep`) replaces the recording rather than filling
-it.
+it. What is written into the recording is simplified with the rest of it once it is a day old (see
+[Simplifying stored tracks](#simplifying-stored-tracks)), so keep the file if you want every point.
 
 The file can be at most 25 MiB. A larger export, such as years of a chartplotter's tracks, is
 better imported into a history provider; see [Keeping tracks for years](#keeping-tracks-for-years).
@@ -197,8 +198,9 @@ The own vessel can be recorded at a different spacing for each `navigation.state
 coarser than the track resolution. Out of the box only `anchored` is set, to one second, so the
 swing around the anchor shows.
 
-Detail finer than the track resolution is kept in full for a day. While a stay at anchor goes on,
-its older part is thinned only to the spacing an anchor alarm reads the whole stay at, one second
+Detail finer than the track resolution is kept in full for a day, and is then simplified with
+everything else (see [Simplifying stored tracks](#simplifying-stored-tracks)). With that turned
+off, it is thinned by time instead: while a stay at anchor goes on, its older part is thinned only to the spacing an anchor alarm reads the whole stay at, one second
 per day of the stay, so it keeps roughly 86,400 points plus the last day. That holds until the
 spacing reaches the track resolution, after 10 days at the default ten seconds; from then on the older
 part is kept at the track resolution, never coarser. A day after the stay ends, it is thinned back
@@ -207,6 +209,34 @@ to the track resolution.
 Other vessels have a resolution of their own, the track resolution unless set. Their
 `navigation.state` is not used: it is whatever their transponder was last set to, and often stale.
 Detail recorded for them finer than the track resolution is thinned the same way.
+
+## Simplifying stored tracks
+
+To keep reads fast on a small board, the plugin simplifies what it stores once a day is more than a
+day old. By default, a position that lies within half a metre of the line its neighbours draw is
+deleted, as simplifying the track to half a metre would leave it out. One position a minute is kept
+wherever the recording had one, so a straight leg never looks like a pause. Half a metre is below a
+GPS's own noise. At that tolerance, a day recorded every second keeps 3 to 5 % of its positions.
+
+It applies to every vessel, and to what an import writes into the recording: the history import,
+and a GPX upload of the own vessel. Imported tracks kept on their own are left as they are.
+
+A track drawn at the storage tolerance or more, which is what a chart asks for, comes out the same
+as it would from every position. A track read without one has fewer points.
+
+> **Deleted positions cannot be brought back.** To keep every position, keep a copy of your own
+> somewhere else and archive it: a GPX export of the track, a backup of the plugin's `tracks.db`
+> taken before updating, or a history provider such as
+> [signalk-questdb](https://www.npmjs.com/package/signalk-questdb), which keeps a record of its
+> own.
+
+The setting "Simplify stored tracks older than a day to this many metres" sets the tolerance. 0
+turns it off, and detail finer than the track resolution is then thinned by time as described
+above. Raising it simplifies every day again; lowering it brings nothing back.
+
+After an update that turns it on, the store simplifies what it already holds in the background, a
+day at a time, without slowing reads. The database file does not shrink: SQLite reuses the space
+for new positions.
 
 ## Position sources
 

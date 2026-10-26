@@ -1429,6 +1429,190 @@ describe('detail at anchor', () => {
   })
 })
 
+describe('storage simplification', () => {
+  const MINUTE = 60_000
+  const DAY = 24 * 60 * MINUTE
+  const day0 = Date.UTC(2026, 5, 1)
+  // day0 ended more than a day before: refined, and then simplified.
+  const later = day0 + 3 * DAY
+  const noise = (i: number) => (Math.sin(i * 12.9898) * 43758.5453) % 1
+  /** An hour at one fix a second from `start`, a few metres either side of a slow curve. */
+  const wander = (store: SqliteTrackStore, start: number): void => {
+    for (let i = 0; i < 3600; i++) {
+      const lat = 60 + Math.sin(i / 400) * 0.002 + noise(i) * 0.00002
+      const lon = 24 + i * 0.000005 + noise(i + 1) * 0.00002
+      store.newPosition(ctx, [lat, lon], start + i * 1000)
+    }
+  }
+  /** An hour at one fix a second on a straight line from `start`. */
+  const straight = (store: SqliteTrackStore, start: number, context: Context = ctx): void => {
+    for (let i = 0; i < 3600; i++) {
+      store.newPosition(context, [60 + i * 1e-5, 24], start + i * 1000)
+    }
+  }
+  /** refineLevels() until it has nothing left, returning its answers. */
+  const settle = (store: SqliteTrackStore, now = later): boolean[] => {
+    const answers: boolean[] = []
+    for (let i = 0; i < 1000 && answers.at(-1) !== false; i++) {
+      answers.push(store.refineLevels(now))
+    }
+    return answers
+  }
+  const tolerant = (storageTolerance: number, refineBudget?: number) =>
+    new SqliteTrackStore({ file: ':memory:', storageTolerance, ...(refineBudget ? { refineBudget } : {}) }, debug)
+  const gaps = (points: TimedPosition[]) => points.slice(1).map((point, i) => point.timestamp - points[i]!.timestamp)
+
+  it('deletes what simplifying to the tolerance leaves out, keeping one a minute', async () => {
+    const store = tolerant(0.5)
+    straight(store, day0)
+    settle(store)
+    const points = await store.getTimed(ctx)
+    // The ends, and one a minute between them.
+    expect(points).toHaveLength(61)
+    expect(Math.max(...gaps(points))).toBeLessThanOrEqual(MINUTE)
+    store.close()
+  })
+
+  // What it deletes no simplification from its tolerance up keeps, so the
+  // tracks drawn from what is left are the same.
+  it('leaves what simplifies, from its tolerance up, as every position did', async () => {
+    const every = tolerant(0)
+    const store = tolerant(0.5)
+    for (const each of [every, store]) {
+      wander(each, day0)
+      settle(each)
+    }
+    const all = await every.getTimed(ctx)
+    const left = await store.getTimed(ctx)
+    expect(all).toHaveLength(3600)
+    expect(left.length).toBeLessThan(all.length)
+    for (const epsilon of [0.5, 1, 4, 20]) {
+      expect(simplify(left, epsilon)).toEqual(simplify(all, epsilon))
+    }
+    every.close()
+    store.close()
+  })
+
+  it('leaves a day alone until it is refined', async () => {
+    const store = tolerant(0.5)
+    straight(store, day0)
+    settle(store, day0 + DAY + MINUTE)
+    await expect(store.getTimed(ctx)).resolves.toHaveLength(3600)
+    settle(store)
+    await expect(store.getTimed(ctx)).resolves.toHaveLength(61)
+    store.close()
+  })
+
+  // Above the lowest level, a level holds positions simplifying to the
+  // tolerance leaves out; reads at a tolerance draw them.
+  it('never deletes a position a level holds', () => {
+    const store = tolerant(8)
+    wander(store, day0)
+    settle(store)
+    const db = store['db']
+    const count = (sql: string) => (db.prepare(sql).get() as { n: number }).n
+    expect(count('SELECT count(*) AS n FROM significant WHERE level = 4')).toBeGreaterThan(0)
+    expect(
+      count(
+        'SELECT count(*) AS n FROM significant s WHERE NOT EXISTS (SELECT 1 FROM positions p WHERE p.rowid = s.position)',
+      ),
+    ).toBe(0)
+    store.close()
+  })
+
+  it('simplifies a day again once a change brings positions into it', async () => {
+    const store = tolerant(0.5)
+    straight(store, day0)
+    settle(store)
+    // A second hour into the simplified day, as an import would bring it.
+    straight(store, day0 + 2 * 60 * MINUTE)
+    await expect(store.getTimed(ctx)).resolves.toHaveLength(61 + 3600)
+    settle(store)
+    await expect(store.getTimed(ctx)).resolves.toHaveLength(2 * 61)
+    store.close()
+  })
+
+  // An import into a day a vessel had none of moves its frontier on with no
+  // other day finishing.
+  it("simplifies a vessel's day refined after every other one was done", async () => {
+    const store = tolerant(0.5)
+    straight(store, day0)
+    settle(store)
+    const hour = Array.from({ length: 3600 }, (_, i) => ({
+      position: [61 + i * 1e-5, 25] as LatLngTuple,
+      timestamp: day0 + i * 1000,
+    }))
+    store.recordTrack(other, [hour], later, false)
+    settle(store)
+    await expect(store.getTimed(other)).resolves.toHaveLength(61)
+    store.close()
+  })
+
+  it('goes over every day again when the tolerance is raised, and brings nothing back when it is lowered', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-simplify-'))
+    const file = join(dir, 'tracks.db')
+    const left = async (storageTolerance: number) => {
+      const store = new SqliteTrackStore({ file, storageTolerance }, debug)
+      settle(store)
+      const { length } = await store.getTimed(ctx)
+      store.close()
+      return length
+    }
+    try {
+      const first = new SqliteTrackStore({ file, storageTolerance: 0.5 }, debug)
+      wander(first, day0)
+      first.close()
+      const atHalf = await left(0.5)
+      expect(atHalf).toBeLessThan(3600)
+      expect(await left(0.25)).toBe(atHalf)
+      expect(await left(2)).toBeLessThan(atHalf)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('says it has work left until every refined day is simplified', async () => {
+    const store = tolerant(0.5, 1000)
+    for (let d = 0; d < 3; d++) {
+      straight(store, day0 + d * DAY)
+    }
+    const answers = settle(store, day0 + 5 * DAY)
+    expect(answers.length).toBeGreaterThan(3)
+    expect(answers.slice(0, -1).every(Boolean)).toBe(true)
+    expect(answers.at(-1)).toBe(false)
+    await expect(store.getTimed(ctx)).resolves.toHaveLength(3 * 61)
+    expect(store.refineLevels(day0 + 5 * DAY)).toBe(false)
+    store.close()
+  })
+
+  // Thinned by time, an hour at anchor is one fix a minute; simplified, it
+  // keeps the swing around the anchor.
+  it('keeps the swing of old detail at anchor, which thinning by time would not', async () => {
+    const self = 'vessels.self' as Context
+    const swing = (store: SqliteTrackStore, from: number) => {
+      // Twenty metres around the anchor, once a minute round.
+      for (let i = 0; i < 600; i++) {
+        const angle = (i / 60) * 2 * Math.PI
+        store.newPosition(self, [60 + Math.sin(angle) * 0.00018, 24 + Math.cos(angle) * 0.00036], from + i * 1000, 1000)
+      }
+    }
+    const now = Date.now()
+    const kept = async (storageTolerance: number) => {
+      const store = new SqliteTrackStore({ file: ':memory:', resolution: MINUTE, storageTolerance }, debug)
+      swing(store, now - 30 * DAY)
+      store.prune(Infinity, self, now)
+      settle(store, now)
+      const { length } = await store.getTimed(self)
+      store.close()
+      return length
+    }
+    expect(await kept(0)).toBeLessThanOrEqual(12)
+    const simplified = await kept(0.5)
+    expect(simplified).toBeGreaterThan(100)
+    expect(simplified).toBeLessThan(600)
+  })
+})
+
 describe('splitAtAntimeridian', () => {
   it('leaves an ordinary bounds alone', () => {
     const bounds: GeoBounds = { sw: [60, 24], ne: [61, 26] }

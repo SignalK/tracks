@@ -17,6 +17,14 @@ another vessel's positions are dropped after the number of days set in the
 plugin settings, whether it is still in range or not. Setting that to 0 keeps
 every position.
 
+Once a day is more than a day old, the store also simplifies it, to half a
+metre unless the plugin's settings give another tolerance, for every vessel and
+for what the history import wrote: a position within that distance of the line
+its neighbours draw is deleted, keeping one a minute (see the README's
+"Simplifying stored tracks"). This is for speed, and it cannot be undone. To
+keep every position, archive a copy of your own: a GPX export, a backup of
+`tracks.db`, or the history provider's own record.
+
 The interval and the retention are both settings on the plugin's configuration
 page, which is where their current defaults are shown.
 

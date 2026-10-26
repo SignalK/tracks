@@ -384,3 +384,41 @@ describe('refining levels', () => {
     await plugin.stop()
   })
 })
+
+describe('storage simplification', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  // Five minutes at anchor three days ago, one fix a second on a straight
+  // line: refined at the first tick, then simplified to its ends and one a
+  // minute, unless the setting turns that off.
+  const anchored = async (config: Record<string, unknown>) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    const { app, emit } = createApp(dir)
+    app.getSelfPath = (path?: string): unknown => (path === 'navigation.state' ? { value: 'anchored' } : undefined)
+    const plugin = ThePlugin(app)
+    try {
+      await plugin.start(config)
+      // Noon three days back, so the five minutes lie within one UTC day:
+      // across a midnight each day would keep its own ends.
+      const day = 24 * 60 * 60 * 1000
+      const from = (Math.floor(Date.now() / day) - 3) * day + day / 2
+      for (let i = 0; i < 300; i++) {
+        emit(SELF_CONTEXT, [60 + i * 1e-5, 24], from + i * 1000)
+      }
+      await vi.advanceTimersByTimeAsync(10_000)
+      return (await plugin.getTracks()?.get(SELF_CONTEXT as never))?.length
+    } finally {
+      await plugin.stop()
+    }
+  }
+
+  it('simplifies stored positions to half a metre by default', async () => {
+    expect(await anchored({})).toBe(6)
+  })
+
+  it('keeps every position with a tolerance of 0', async () => {
+    expect(await anchored({ storageTolerance: 0 })).toBe(300)
+  })
+})
