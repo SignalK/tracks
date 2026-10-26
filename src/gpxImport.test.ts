@@ -172,9 +172,9 @@ describe('the GPX upload route', () => {
     }))
 
   // Each reads the gap before either writes, as a second client or a restore
-  // can while a slow provider is read.
+  // can between an upload's reads and its write.
   it('keeps one of two uploads of the same passage sent at once, and bins neither', async () => {
-    const h = createHarness({ history: { contexts: [SELF_CONTEXT], valuesDelayMs: 200 } })
+    const h = createHarness()
     try {
       const file = gpxFile(trk('Morning', [t0, t0 + MINUTE, t0 + 2 * MINUTE]))
       const answers = await Promise.all([upload(h, file, '?self=true'), upload(h, file, '?self=true')])
@@ -184,16 +184,6 @@ describe('the GPX upload route', () => {
       const [properties] = await listed(h)
       expect(properties).toMatchObject({ id: `recorded:${SELF_CONTEXT}`, pointCount: 3 })
       expect((await request(h.app).get('/plugins/tracks/recycle-bin')).body).toEqual([])
-    } finally {
-      await h.stop()
-    }
-  })
-
-  it('answers 503 when history cannot say where the gaps are', async () => {
-    const h = createHarness({ history: { contexts: [SELF_CONTEXT], getValuesRejects: true } })
-    try {
-      const res = await upload(h, gpxFile(trk('Morning', [t0, t0 + MINUTE])), '?self=true')
-      expect(res.status).toBe(503)
     } finally {
       await h.stop()
     }

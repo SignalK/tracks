@@ -1,6 +1,6 @@
 import { Temporal } from '@js-temporal/polyfill'
 import request from 'supertest'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { HarnessOptions, TestHarness } from './harness.test-utils.js'
 import { toImportedTrack } from './importedTracks.js'
@@ -127,85 +127,111 @@ describe('deleting recorded tracks', () => {
     }))
 })
 
+/** Run the history import to its end, as the webapp starts it. */
+const importHistory = async (h: TestHarness) => {
+  const started = await request(h.app).post('/plugins/tracks/history-import').expect(202)
+  const { startedAt } = (started.body as { state: { startedAt: string } }).state
+  await vi.waitFor(
+    async () => {
+      const { body } = await request(h.app).get('/plugins/tracks/history-import')
+      expect((body as { state?: { startedAt: string; finishedAt?: string } }).state).toMatchObject({
+        startedAt,
+        finishedAt: expect.any(String),
+      })
+    },
+    { timeout: 20_000, interval: 50 },
+  )
+}
+
+// Reads never ask a provider, but the history import brings what it holds
+// into the recording, so a delete of the own vessel's track has to keep its
+// span where the store held nothing, or an import would fill it back in.
 describe('deleting with a history provider installed', () => {
-  // History is not deletable through the History API, so a deleted span has
-  // to stay hidden from it, or the next query fills it back in.
   const history = {
-    contexts: [OTHER_CONTEXT],
+    contexts: [SELF_CONTEXT, OTHER_CONTEXT],
     rows: [0, 1, 2, 3].map((i) => [iso(t0 + i * MINUTE), [24, 60 + i / 100]]),
   }
+  const span = { from: instant(t0 + MINUTE), to: instant(t0 + 2 * MINUTE) }
 
-  it('hides the deleted span of history from v2 and v1', () =>
+  it('keeps a span of the own vessel the store held nothing of, which an import then leaves out', () =>
     withHarness(
       async (h) => {
         const provider = providerOf(h)
-        const id = `recorded:${OTHER_CONTEXT}`
-        expect(await timesOf(provider, OTHER_CONTEXT)).toHaveLength(4)
-        // History alone knows the vessel, and that is enough to delete from it.
-        expect(await provider.deleteTrackSpan(id, { from: instant(t0 + MINUTE), to: instant(t0 + 2 * MINUTE) })).toBe(
-          true,
-        )
-        expect(await timesOf(provider, OTHER_CONTEXT)).toEqual([iso(t0), iso(t0 + 3 * MINUTE)])
-        const v1 = await request(h.app)
-          .get(`/signalk/v1/api/vessels/urn:mrn:imo:mmsi:987654321/track?from=${iso(t0 - MINUTE)}&times=true`)
-          .expect(200)
-        expect((v1.body as { times: string[][] }).times.flat()).toEqual([iso(t0), iso(t0 + 3 * MINUTE)])
-      },
-      { history },
-    ))
-
-  it('shows history again once the delete is restored', () =>
-    withHarness(
-      async (h) => {
-        const provider = providerOf(h)
-        await provider.deleteTrack(`recorded:${OTHER_CONTEXT}`)
-        expect(await timesOf(provider, OTHER_CONTEXT)).toEqual([])
+        expect(await provider.deleteTrackSpan(`recorded:${SELF_CONTEXT}`, span)).toBe(true)
         const bin = await request(h.app).get('/plugins/tracks/recycle-bin').expect(200)
-        const [entry] = bin.body as { id: number; trackId: string; kind: string; pointCount: number }[]
-        expect(entry).toMatchObject({ trackId: `recorded:${OTHER_CONTEXT}`, kind: 'recorded', pointCount: 0 })
-        await request(h.app).post(`/plugins/tracks/recycle-bin/${entry!.id}/restore`).expect(200)
-        expect(await timesOf(provider, OTHER_CONTEXT)).toHaveLength(4)
+        expect(bin.body).toMatchObject([{ trackId: `recorded:${SELF_CONTEXT}`, pointCount: 0 }])
+        await importHistory(h)
+        expect(await timesOf(provider, SELF_CONTEXT)).toEqual([iso(t0), iso(t0 + 3 * MINUTE)])
       },
       { history },
     ))
 
-  it('keeps history hidden after the entry is purged', () =>
+  it('lets an import fill the span once the delete is restored', () =>
     withHarness(
       async (h) => {
         const provider = providerOf(h)
-        await provider.deleteTrack(`recorded:${OTHER_CONTEXT}`)
-        const bin = await request(h.app).get('/plugins/tracks/recycle-bin')
-        const [entry] = bin.body as { id: number }[]
+        await provider.deleteTrackSpan(`recorded:${SELF_CONTEXT}`, span)
+        const [entry] = (await request(h.app).get('/plugins/tracks/recycle-bin')).body as { id: number }[]
+        await request(h.app).post(`/plugins/tracks/recycle-bin/${entry!.id}/restore`).expect(200)
+        await importHistory(h)
+        expect(await timesOf(provider, SELF_CONTEXT)).toHaveLength(4)
+      },
+      { history },
+    ))
+
+  it('keeps the span from an import after the entry is purged', () =>
+    withHarness(
+      async (h) => {
+        const provider = providerOf(h)
+        await provider.deleteTrackSpan(`recorded:${SELF_CONTEXT}`, span)
+        const [entry] = (await request(h.app).get('/plugins/tracks/recycle-bin')).body as { id: number }[]
         await request(h.app).delete(`/plugins/tracks/recycle-bin/${entry!.id}`).expect(200)
         expect((await request(h.app).get('/plugins/tracks/recycle-bin')).body).toEqual([])
-        expect(await timesOf(provider, OTHER_CONTEXT)).toEqual([])
-        await request(h.app).post(`/plugins/tracks/recycle-bin/${entry!.id}/restore`).expect(404)
+        await importHistory(h)
+        expect(await timesOf(provider, SELF_CONTEXT)).toEqual([iso(t0), iso(t0 + 3 * MINUTE)])
+      },
+      { history },
+    ))
+
+  it('keeps the span while the provider is away, once an import has started', () =>
+    withHarness(
+      async (h) => {
+        await h.store()!.saveHistoryImport!({ context: SELF_CONTEXT, startedAt: Date.now(), filled: 0 }, [])
+        expect(await providerOf(h).deleteTrackSpan(`recorded:${SELF_CONTEXT}`, span)).toBe(true)
+        const bin = await request(h.app).get('/plugins/tracks/recycle-bin').expect(200)
+        expect(bin.body).toMatchObject([{ trackId: `recorded:${SELF_CONTEXT}`, pointCount: 0 }])
+      },
+      { history: { noProvider: true } },
+    ))
+
+  it('answers false for another vessel only the provider holds, binning nothing', () =>
+    withHarness(
+      async (h) => {
+        const provider = providerOf(h)
+        expect(await provider.deleteTrackSpan(`recorded:${OTHER_CONTEXT}`, span)).toBe(false)
+        expect((await request(h.app).get('/plugins/tracks/recycle-bin')).body).toEqual([])
       },
       { history },
     ))
 })
 
 describe('a span that starts after now', () => {
-  it('leaves nothing in the bin, even for a vessel history knows', () =>
+  it('leaves nothing in the bin, even for the own vessel with a history provider installed', () =>
     withHarness(
       async (h) => {
+        seedFour(h)
         const provider = providerOf(h)
         const later = Date.now() + 60 * MINUTE
         expect(
-          await provider.deleteTrackSpan(`recorded:${OTHER_CONTEXT}`, {
+          await provider.deleteTrackSpan(`recorded:${SELF_CONTEXT}`, {
             from: instant(later),
             to: instant(later + MINUTE),
           }),
         ).toBe(true)
         expect((await request(h.app).get('/plugins/tracks/recycle-bin')).body).toEqual([])
-        expect(await timesOf(provider, OTHER_CONTEXT)).toHaveLength(4)
+        expect(await timesOf(provider, SELF_CONTEXT)).toHaveLength(4)
       },
-      {
-        history: {
-          contexts: [OTHER_CONTEXT],
-          rows: [0, 1, 2, 3].map((i) => [iso(t0 + i * MINUTE), [24, 60 + i / 100]]),
-        },
-      },
+      { history: { contexts: [SELF_CONTEXT], rows: [] } },
     ))
 })
 
@@ -384,100 +410,87 @@ describe('an import of the own vessel', () => {
 })
 
 describe('an import of the own vessel with a history provider installed', () => {
-  const history = {
-    contexts: [SELF_CONTEXT],
-    rows: [0, 1, 2, 3].map((i) => [iso(t0 + i * MINUTE), [24, 60 + i / 100]]),
-  }
-
-  const overHistory: TrackImport = {
-    type: 'Feature',
-    geometry: {
-      type: 'MultiLineString',
-      coordinates: [
-        [
-          [25, 61],
-          [25, 61.01],
-        ],
-      ],
-    },
-    properties: {
-      coordTimes: [[iso(t0 + MINUTE), iso(t0 + 2 * MINUTE)]],
-      context: SELF_CONTEXT,
-    },
-  }
-
-  it('does not draw over history by default', () =>
-    withHarness(
-      async (h) => {
-        const provider = providerOf(h)
-        await provider.storeTrack(overHistory)
-        const { features } = await provider.getTracks({ ...lastHours, contexts: [SELF_CONTEXT], times: true })
-        const lats = features.flatMap(({ geometry }) => (geometry?.coordinates ?? []).flat().map(([, lat]) => lat))
-        expect(lats).toEqual([60, 60.01, 60.02, 60.03])
-      },
-      { history },
-    ))
-
-  // An outage would read as one long gap, and the import would draw over it.
-  it('refuses to fill gaps while history cannot be read', () =>
-    withHarness(
-      async (h) => {
-        await expect(importOwn(h, overHistory, 'keep')).rejects.toThrow(/could not be read/)
-        expect(await importOwn(h, overHistory, 'replace')).toEqual({ id: `recorded:${SELF_CONTEXT}`, overlapping: 0 })
-      },
-      { history: { ...history, getValuesRejects: true } },
-    ))
-
-  // One window spanning both would coarsen the buckets to cover the days between.
-  it('reads history over each segment rather than across them', () => {
-    const asked: [number, number][] = []
-    const days = (n: number) => t0 - n * 24 * 60 * MINUTE
-    const twoPassages: TrackImport = {
-      ...overHistory,
-      geometry: {
-        type: 'MultiLineString',
-        coordinates: [
-          [
-            [25, 61],
-            [25, 61.01],
-          ],
-          [
-            [25, 61.02],
-            [25, 61.03],
-          ],
-        ],
-      },
-      properties: {
-        coordTimes: [
-          [iso(days(10)), iso(days(10) + MINUTE)],
-          [iso(t0 + MINUTE), iso(t0 + 2 * MINUTE)],
-        ],
-        context: SELF_CONTEXT,
-      },
-    }
+  it('fills a gap the provider holds positions in, asking it nothing', () => {
+    let asked = 0
     return withHarness(
       async (h) => {
-        await importOwn(h, twoPassages, 'keep')
-        expect(asked.map(([from, to]) => to - from)).toEqual([11 * MINUTE, 11 * MINUTE])
+        const provider = providerOf(h)
+        const times = [5, 10, 15].map((minutes) => t0 + minutes * MINUTE)
+        await importOwn(
+          h,
+          {
+            type: 'Feature',
+            geometry: {
+              type: 'MultiLineString',
+              coordinates: [
+                [
+                  [25, 61],
+                  [25, 61.01],
+                  [25, 61.02],
+                ],
+              ],
+            },
+            properties: { coordTimes: [times.map(iso)], context: SELF_CONTEXT },
+          },
+          'keep',
+        )
+        expect(await timesOf(provider, SELF_CONTEXT)).toEqual(times.map(iso))
+        expect(asked).toBe(0)
       },
       {
         history: {
-          ...history,
-          onValues: ({ from, to }) => asked.push([Date.parse(from.toString()), Date.parse(to.toString())]),
+          contexts: [SELF_CONTEXT],
+          rows: [[iso(t0 + 10 * MINUTE), [24, 60]]],
+          onValues: () => {
+            asked++
+          },
+          onHistoryApi: () => {
+            asked++
+          },
         },
       },
     )
   })
 
-  it('hides the history it replaces', () =>
+  // A replace keeps the span it took over in the bin even where nothing was
+  // recorded, as a delete does, so a history import does not draw the old
+  // passage between the imported points.
+  it('leaves the span it replaced out of a history import', () =>
     withHarness(
       async (h) => {
         const provider = providerOf(h)
-        await importOwn(h, overHistory, 'replace')
-        const { features } = await provider.getTracks({ ...lastHours, contexts: [SELF_CONTEXT], times: true })
-        const lats = features.flatMap(({ geometry }) => (geometry?.coordinates ?? []).flat().map(([, lat]) => lat))
-        expect(lats).toEqual([60, 61, 61.01, 60.03])
+        await importOwn(
+          h,
+          {
+            type: 'Feature',
+            geometry: {
+              type: 'MultiLineString',
+              coordinates: [
+                [
+                  [25, 61],
+                  [25, 61.01],
+                ],
+              ],
+            },
+            properties: {
+              coordTimes: [[iso(t0 + MINUTE), iso(t0 + 21 * MINUTE)]],
+              context: SELF_CONTEXT,
+            },
+          },
+          'replace',
+        )
+        await importHistory(h)
+        expect(await timesOf(provider, SELF_CONTEXT)).toEqual([
+          iso(t0 + MINUTE),
+          iso(t0 + 21 * MINUTE),
+          iso(t0 + 40 * MINUTE),
+        ])
       },
-      { history },
+      {
+        history: {
+          contexts: [SELF_CONTEXT],
+          rows: [11, 40].map((minutes) => [iso(t0 + minutes * MINUTE), [24, 60]]),
+        },
+      },
     ))
 })

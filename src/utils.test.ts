@@ -593,13 +593,6 @@ describe('fillGaps', () => {
     minutes.map((m) => ({ position: [60, 24], timestamp: m * 60_000 }))
   const minutesOf = (runs: TimedPosition[][]) => runs.map((run) => run.map(({ timestamp }) => timestamp / 60_000))
 
-  it('keeps a history bucket covering the time between its fixes', () => {
-    const buckets = at(0, 20).map((point) => ({ ...point, span: 15 * 60_000 }))
-    const { runs, overlapping } = fillGaps([at(10, 16, 30, 40)], buckets, MIN_FILLED_GAP_MS)
-    expect(minutesOf(runs)).toEqual([[16], [40]])
-    expect(overlapping).toBe(2)
-  })
-
   it('starts a new run at each recorded stretch and segment boundary', () => {
     const { runs } = fillGaps([at(1, 2, 12, 13), at(14)], at(6, 7), MIN_FILLED_GAP_MS)
     expect(minutesOf(runs)).toEqual([[1, 2], [12, 13], [14]])
@@ -607,5 +600,17 @@ describe('fillGaps', () => {
 
   it('fills everything when nothing is recorded', () => {
     expect(fillGaps([at(1, 2)], [], MIN_FILLED_GAP_MS)).toEqual({ runs: [at(1, 2)], overlapping: 0 })
+  })
+
+  it('fills a gap of exactly minGap, and leaves out and counts the recorded instants', () => {
+    const { runs, overlapping } = fillGaps([at(1, 2, 3, 4, 5, 6, 7, 8)], at(2, 7), MIN_FILLED_GAP_MS)
+    expect(minutesOf(runs)).toEqual([[1], [3, 4, 5, 6], [8]])
+    expect(overlapping).toBe(2)
+  })
+
+  it('leaves out and counts every point in a gap shorter than minGap', () => {
+    const { runs, overlapping } = fillGaps([at(3, 4, 5, 6)], at(2, 6.5), MIN_FILLED_GAP_MS)
+    expect(runs).toEqual([])
+    expect(overlapping).toBe(4)
   })
 })

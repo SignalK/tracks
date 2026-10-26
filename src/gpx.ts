@@ -126,7 +126,7 @@ const NAMESPACE = 'https://signalk.org/specification/1.7.0/'
  * block can be a few milliseconds newer than the first point of the next. Out
  * of 5,550 points in a real export, 16 pairs are out of order, every one on a
  * 150-point boundary. Anything downstream that assumes ordering — time-window
- * queries, the history reconciliation — would quietly misbehave on such a file.
+ * queries, filling the gaps of a recording — would quietly misbehave on such a file.
  *
  * Sorting stops at the segment boundary, deliberately: a segment is a stretch
  * of continuous recording, and reordering points across a gap would merge two

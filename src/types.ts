@@ -45,8 +45,8 @@ export interface ImportedPoint {
  * A track a client supplied, kept apart from recorded positions.
  *
  * It belongs to whoever imported it rather than to the recording: it is never
- * merged into a vessel's recorded track, reconciled with a history provider,
- * or aged out by retention, and it stays until it is deleted by its id.
+ * merged into a vessel's recorded track or aged out by retention, and it
+ * stays until it is deleted by its id.
  */
 export interface ImportedTrack {
   id: string
@@ -110,7 +110,7 @@ export interface HistoryImportState {
   error?: string
 }
 
-/** A recorded vessel's deleted span, which hides history as well as the store. */
+/** A recorded vessel's deleted span, which the history import leaves out as well. */
 export interface RecordedSpan extends DeletedSpan {
   context: Context
 }

@@ -202,7 +202,7 @@ export interface TrackStore {
   /** Purge an entry now, resolving whether it was in the bin. */
   purgeFromBin?(id: number): boolean | Promise<boolean>
   binEntries?(): BinEntry[] | Promise<BinEntry[]>
-  /** Every deleted span of a recorded track, purged or not: what history must not show. */
+  /** Every deleted span of a recorded track, purged or not: what a history import must leave out. */
   deletedSpans?(): RecordedSpan[] | Promise<RecordedSpan[]>
 
   /**

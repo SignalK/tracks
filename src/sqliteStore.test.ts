@@ -2121,7 +2121,7 @@ describe('an import filling the gaps in a recording', () => {
   it('leaves out what was written into the gap since it was judged, and bins nothing', async () => {
     const store = newStore()
     try {
-      // Another upload, written while history was read for this one.
+      // Another upload, written after this one read the store.
       const earlier = run(61, t0, 121, 10_000)
       expect(store.fillTrack(ctx, [earlier])).toBe(0)
       const late = run(62, t0, 31, MINUTE)

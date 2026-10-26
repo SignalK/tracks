@@ -44,8 +44,6 @@ export interface TrackProviderDeps {
   selfContext: () => string
   /** Gap in ms that starts a new segment; 0 leaves the track as one line. */
   segmentGap: () => number
-  /** The store's recording resolution in ms, the coarsest a box query reads history at. */
-  recordingResolution: () => number
   /**
    * The vessel's name for `contextName`, or undefined when unknown.
    *
@@ -56,42 +54,16 @@ export interface TrackProviderDeps {
    */
   contextName: (context: string) => string | undefined
   /**
-   * Positions a history provider holds for a context and window, reconciled
-   * with the store's own.
-   *
-   * Injected rather than reached for directly: the reconciliation belongs to
-   * the plugin, and the v1 routes have done it since #73 — a query answered
-   * through the v2 provider has to give the same answer as the same query
-   * answered through v1, or the plugin contradicts itself depending on which
-   * route a client happens to use.
-   *
-   * Resolves to the store's own points unchanged when no provider is
-   * installed, which is the common case.
+   * Whether the history import could bring a vessel's track back into the
+   * recording: the own vessel's, where a history provider is installed or an
+   * import has started already, which goes on once its provider is back. A
+   * delete of it then leaves its span behind even where the store held
+   * nothing, so a later import leaves it deleted.
    */
-  /**
-   * Contexts a history provider holds data for within the window, empty when
-   * there is no provider, undefined when the provider could not say.
-   *
-   * The store can be far younger than the provider, so it alone cannot say
-   * which vessels exist or which passed through a box: a vessel recorded
-   * only before this plugin was installed is known to history alone.
-   */
-  historyContexts: (window: TimeWindow | undefined) => Promise<ReadonlySet<string> | undefined>
-  /** Whether a history provider holds anything at all for a context. */
-  historyKnows: (context: string) => Promise<boolean>
-  /** Called after a delete, so whatever hides deleted spans from history reloads them. */
+  importable: (context: string) => Promise<boolean>
+  /** Called after a delete, so whatever caches the deleted spans reloads them. */
   deleted: () => void
-  reconcileWithHistory: (
-    context: string,
-    stored: TimedPosition[],
-    window: TimeWindow | undefined,
-    resolutionMs: number | undefined,
-  ) => Promise<TimedPosition[]>
-  /**
-   * What the store and history hold for a context over a window, rejecting
-   * when history could not be read: an import that fills only the gaps
-   * cannot tell a gap from an outage.
-   */
+  /** What the store holds for a context over a window: where an import of the own vessel may not fill. */
   recordedOver: (context: string, window: TimeWindow) => Promise<TimedPosition[]>
 }
 
@@ -206,8 +178,6 @@ export type TrackProvider = TrackApi & {
 export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
   const matching = async (
     query: TracksRequest,
-    /** What history lists for the window, when the caller has asked already. */
-    known?: ReadonlySet<string>,
   ): Promise<{ tracks: Map<string, TimedPosition[]>; resolution: number | undefined }> => {
     const store = deps.store()
     if (!store) {
@@ -221,9 +191,6 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     const bounds = toGeoBounds(query.bbox)
     // Without a box there is nothing to clip to, whatever `clip` says.
     const clipTo = query.clip === true ? bounds : null
-
-    // Asked before the store is read, which a tolerance read depends on.
-    const listed = known ?? (await deps.historyContexts(window))
 
     // Thinning is handed to the store rather than applied to the result: it is
     // the same `thin()` either way, and asking twice is both wasted work and a
@@ -253,72 +220,23 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         // thinning cannot drop the point inside it, and a clipped one keeps
         // the points that carry it to the box edge.
         ...(resolution === undefined || bounds ? {} : { resolution }),
-        ...readTolerance(query, deps.segmentGap(), listed, wanted),
+        ...readTolerance(query, deps.segmentGap()),
       },
     )
 
-    // Contexts the store did not return but history holds data for: a vessel
-    // the store has never seen, or one whose crossing of the box only history
-    // recorded. The store's own points, if any, still take part in the
-    // reconciliation; whether such a context matches the box is decided on
-    // the reconciled track, since the store could not decide it.
-    const fromHistory = [...(listed ?? [])].filter(
-      (context) => !(context in collection) && (!wanted || wanted.includes(context)),
-    )
     const reaches = bounds ? createReachesBounds(bounds) : undefined
-    const storedFor = async (context: string): Promise<TimedPosition[]> => {
-      const points = await store.getTimed(context, window).catch(() => [])
-      return bounds ? points : thin(points, resolution)
-    }
-
-    // A provider aggregates to one position per bucket of the resolution it is
-    // asked for, so a box query asks at the recording resolution: at a coarser
-    // requested one, a crossing shorter than a bucket would be aggregated away
-    // before the match could see it. A finer requested one is asked as it is,
-    // or a box over a harbour would get one point per recording interval
-    // however finely history holds it.
-    const historyResolution = bounds ? Math.min(resolution ?? Infinity, deps.recordingResolution()) : resolution
-
     const result = new Map<string, TimedPosition[]>()
-    // Reconciled per context rather than in one pass: a history provider is
-    // asked per context, and the store's own points are what a provider-less
-    // install returns unchanged.
-    //
-    // A stored context the provider does not list for the window is not asked
-    // about: it holds nothing there to reconcile, and a box over a busy
-    // anchorage would otherwise send it one read per vessel in view, all at
-    // once, on every pan and zoom.
-    const reconciled = await Promise.all([
-      ...Object.entries(collection).map(
-        async ([context, stored]) =>
-          [
-            context,
-            listed && !listed.has(context)
-              ? stored
-              : await deps.reconcileWithHistory(context, stored, window, historyResolution),
-          ] as const,
-      ),
-      ...fromHistory.map(
-        async (context) =>
-          [
-            context,
-            await deps.reconcileWithHistory(context, await storedFor(context), window, historyResolution),
-          ] as const,
-      ),
-    ])
-    for (const [context, reconciledPoints] of reconciled) {
-      // History can replace the stored point that put a context in the box,
-      // so the match is decided on the reconciled track for every context.
-      if (reaches && !reaches(reconciledPoints)) {
+    for (const [context, stored] of Object.entries(collection)) {
+      // The store matches a box on the stretches it reads near it, which the
+      // match here decides on, with the lines between their points.
+      if (reaches && !reaches(stored)) {
         continue
       }
-      // Clipped after reconciling, because history positions come for the
-      // whole window and the box has to cut those too.
       const points = clipTo
-        ? thin(clipToBounds(reconciledPoints, clipTo), resolution)
+        ? thin(clipToBounds(stored, clipTo), resolution)
         : bounds
-          ? thin(reconciledPoints, resolution)
-          : reconciledPoints
+          ? thin(stored, resolution)
+          : stored
       // Dropped here rather than in getTracks, so both entry points agree on
       // what matched. A store filters on the *last* position, so a context can
       // match spatially and still have no point inside the time window;
@@ -338,14 +256,8 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
    * store's summaries rather than its points. A track's properties are then
    * its stored count, times and bounds, so reading every position only to
    * count them is the whole cost of a list over weeks of AIS traffic.
-   *
-   * A context history lists for the window still goes through `matching`,
-   * since history's positions count too; so does the whole query when
-   * history cannot say which contexts it holds.
    */
-  const listing = async (
-    query: TracksRequest,
-  ): Promise<{ summaries: TrackSummary[]; reconciled: string[]; history: ReadonlySet<string> } | undefined> => {
+  const listing = async (query: TracksRequest): Promise<TrackSummary[] | undefined> => {
     const store = deps.store()
     if (
       !store?.summarize ||
@@ -359,20 +271,10 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     ) {
       return undefined
     }
-    const window = toTimeWindow(query)
-    const listed = await deps.historyContexts(window)
-    if (!listed) {
-      return undefined
-    }
     const wanted = query.contexts?.length
       ? [...new Set(query.contexts.map(resolveSelf(deps.selfContext())))]
       : undefined
-    const summaries = await store.summarize(wanted, window)
-    return {
-      summaries: summaries.filter(({ context }) => !listed.has(context)),
-      reconciled: [...listed].filter((context) => !wanted || wanted.includes(context)),
-      history: listed,
-    }
+    return store.summarize(wanted, toTimeWindow(query))
   }
 
   /**
@@ -381,8 +283,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
    * The same filters as a recorded track, applied to the import's own points:
    * a context names the vessel it was imported for, a window needs times, a
    * box needs a point inside it or a line through it and clips like a
-   * recorded track. Never reconciled with history, which knows nothing of an
-   * import.
+   * recorded track.
    */
   const matchingImports = async (
     query: TracksRequest,
@@ -468,7 +369,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
       {
         store: writableStore(),
         selfContext: deps.selfContext(),
-        historyKnows: deps.historyKnows,
+        importable: deps.importable,
         recorded: (context, from, to) => deps.recordedOver(context, { from, to }),
         deleted: deps.deleted,
       },
@@ -489,7 +390,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
 
   /**
    * Move a vessel's recording within the span to the recycle bin, resolving
-   * false for a vessel neither the store nor history knows.
+   * false for a vessel the store does not know and no import could bring.
    *
    * `to` is the moment of the delete, never the end of time: recording goes
    * on, and what it records afterwards is a new track, not a deleted one.
@@ -501,23 +402,20 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
   ): Promise<boolean> => {
     const now = Date.now()
     const end = Math.min(to ?? now, now)
-    const historyKnown = await deps.historyKnows(context)
-    // A span that starts after now holds nothing anyone recorded, in either source.
-    const keepEmpty = historyKnown && (from === undefined || from <= end)
+    const importable = await deps.importable(context)
+    // A span that starts after now holds nothing anyone recorded yet.
+    const keepEmpty = importable && (from === undefined || from <= end)
     const { known } = await writableStore().binRecorded(context, from, end, now, keepEmpty)
     deps.deleted()
-    return known || historyKnown
+    return known || importable
   }
 
   return {
     async getTracks(query: TracksRequest): Promise<TracksResponse> {
-      const list = await listing(query)
-      const { tracks: matched, resolution: requested } = !list
-        ? await matching(query)
-        : // An empty contexts list would ask for every context, not none.
-          list.reconciled.length > 0
-          ? await matching({ ...query, contexts: list.reconciled }, list.history)
-          : { tracks: new Map<string, TimedPosition[]>(), resolution: undefined }
+      const summaries = await listing(query)
+      const { tracks: matched, resolution: requested } = summaries
+        ? { tracks: new Map<string, TimedPosition[]>(), resolution: undefined }
+        : await matching(query)
       const gap = deps.segmentGap()
       const features: TrackFeature[] = []
       for (const [context, all] of matched) {
@@ -526,7 +424,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
           features.push(feature)
         }
       }
-      for (const { context, pointCount, first, last, bbox } of list?.summaries ?? []) {
+      for (const { context, pointCount, first, last, bbox } of summaries ?? []) {
         // What shapeFeature reports for the same points, which nothing reshapes.
         features.push({
           type: 'Feature',
@@ -732,19 +630,10 @@ function shapeFeature(
  * given, since what a tolerance leaves out lies between them:
  * - tracks split at pauses: `segment()` would read a straight leg as a stop;
  * - a box without `clip`: a track matches on its points inside, and those a
- *   level leaves out can be all it had there;
- * - history listing a context the query can return, or unable to say:
- *   reconciling fills each bucket without a stored point, and would fill
- *   those too.
+ *   level leaves out can be all it had there.
  */
-function readTolerance(
-  query: TracksRequest,
-  gap: number,
-  listed: ReadonlySet<string> | undefined,
-  wanted: string[] | undefined,
-): { tolerance?: number } {
-  const reconciles = !listed || [...listed].some((context) => !wanted || wanted.includes(context))
-  if (gap > 0 || (query.bbox && query.clip !== true) || reconciles) {
+function readTolerance(query: TracksRequest, gap: number): { tolerance?: number } {
+  if (gap > 0 || (query.bbox && query.clip !== true)) {
     return {}
   }
   if (query.epsilon !== undefined && query.epsilon > 0) {
@@ -847,8 +736,9 @@ export type OnOverlap = 'keep' | 'replace'
 export interface KeepTrackDeps {
   store: Required<Pick<TrackStore, 'storeImport' | 'recordTrack' | 'fillTrack'>>
   selfContext: string
-  historyKnows: (context: string) => Promise<boolean>
-  /** The vessel's positions over a window, from the store and history alike. */
+  /** Whether the history import could bring the vessel's track back; see TrackProviderDeps. */
+  importable: (context: string) => Promise<boolean>
+  /** The vessel's recorded positions over a window. */
   recorded: (context: string, from: number, to: number) => Promise<TimedPosition[]>
   deleted: () => void
 }
@@ -877,9 +767,9 @@ export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOve
       points.map(({ position, timestamp }): TimedPosition => ({ position, timestamp: timestamp! })),
     )
     if (onOverlap === 'keep') {
-      // Read per segment: one window spanning segments days apart would ask
-      // history for the days between and coarsen its buckets to fit. One at a
-      // time, so a file of many segments cannot fill the store's read queue,
+      // Read per segment: one window spanning segments days apart would read
+      // the days between as well. One at a time, so a file of many segments
+      // cannot fill the store's read queue,
       // and each segment also yields to what earlier ones of the same file
       // filled, so overlapping segments are not both written.
       const runs: TimedPosition[][] = []
@@ -909,13 +799,13 @@ export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOve
         overlapping += kept.overlapping
       }
       // Not recordTrack: what another upload or a restore wrote into a gap
-      // while history was read would go to the recycle bin in its place.
+      // after it was read would go to the recycle bin in its place.
       overlapping += await deps.store.fillTrack(context, runs)
       return { id: recordedId(context), overlapping }
     }
-    // As a delete does: the binned span has to hide what a history provider
-    // holds there too, or the provider would draw the old passage beside it.
-    await deps.store.recordTrack(context, segments, Date.now(), await deps.historyKnows(context))
+    // As a delete does: the binned span stays where the store held nothing,
+    // so a history import later leaves the old passage out too.
+    await deps.store.recordTrack(context, segments, Date.now(), await deps.importable(context))
     deps.deleted()
     return { id: recordedId(context), overlapping: 0 }
   }

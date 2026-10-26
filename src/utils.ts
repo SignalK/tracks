@@ -230,8 +230,7 @@ export class QueryParameterError extends Error {}
  * A well-formed query the server cannot currently answer.
  *
  * `radius` measures from the own vessel, so it needs a self position. Not
- * having one is an outage, not a client mistake -- the same distinction the
- * single-vessel route already draws for a history provider it cannot read.
+ * having one is an outage, not a client mistake.
  */
 export class SelfPositionUnavailableError extends Error {}
 
@@ -585,23 +584,18 @@ export const MIN_FILLED_GAP_MS = 5 * 60_000
  * The parts of an import that fall where a recording has nothing for at least
  * `minGap`, as runs to record, and how many points were left out.
  *
- * Each recorded point covers its own instant, or a history bucket's whole
- * span, so a coarse provider read still counts as covering the time between
- * its buckets. A run never crosses a recorded stretch or a segment boundary.
+ * Each recorded point covers its own instant. A run never crosses a recorded
+ * stretch or a segment boundary.
  */
 export function fillGaps(
   segments: TimedPosition[][],
-  recorded: readonly Pick<TimedPosition, 'timestamp' | 'span'>[],
+  recorded: readonly Pick<TimedPosition, 'timestamp'>[],
   minGap: number,
 ): { runs: TimedPosition[][]; overlapping: number } {
   const covered: [number, number][] = []
-  for (const { timestamp, span } of [...recorded].sort((a, b) => a.timestamp - b.timestamp)) {
-    const end = timestamp + (span ?? 0)
-    const last = covered.at(-1)
-    if (last && timestamp <= last[1]) {
-      last[1] = Math.max(last[1], end)
-    } else {
-      covered.push([timestamp, end])
+  for (const { timestamp } of [...recorded].sort((a, b) => a.timestamp - b.timestamp)) {
+    if (covered.at(-1)?.[1] !== timestamp) {
+      covered.push([timestamp, timestamp])
     }
   }
   /** Index of the first covered stretch ending at or after `time`. */
