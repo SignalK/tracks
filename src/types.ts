@@ -92,6 +92,24 @@ export interface DeletedSpan {
   to: number
 }
 
+/** How far the import of a vessel's track from a history provider got; see historyImport.ts. */
+export interface HistoryImportState {
+  context: Context
+  /** When the import was started: history is read up to here, and live recording covers the rest. */
+  startedAt: number
+  /** Start of the first day history holds, once found. */
+  firstDay?: number
+  /** Where the next day to read starts. */
+  nextDay?: number
+  /** Positions written into the recording. */
+  filled: number
+  /** Whether `nextDay` starts inside a stretch the day before was filling. */
+  inGap?: boolean
+  finishedAt?: number
+  /** Why the import stopped before it finished; asked again, it goes on from `nextDay`. */
+  error?: string
+}
+
 /** A recorded vessel's deleted span, which hides history as well as the store. */
 export interface RecordedSpan extends DeletedSpan {
   context: Context

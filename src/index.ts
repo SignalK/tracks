@@ -24,6 +24,7 @@ import { AsyncTrackStore } from './asyncTrackStore.js'
 import type { TrackStore } from './store.js'
 import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
 import { fillFromHistory, reconcile } from './reconcile.js'
+import { importStatus, runHistoryImport } from './historyImport.js'
 import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
 import { fromGpx, toGpx } from './gpx.js'
@@ -36,6 +37,7 @@ import type {
   Context,
   DeletedSpan,
   Debug,
+  HistoryImportState,
   LatLngTuple,
   LngLatTuple,
   Position,
@@ -373,6 +375,19 @@ const HISTORY_REUSE_MS = 5 * 60_000
 
 /** The most history positions kept for reuse across all reads. */
 const HISTORY_REUSE_MAX_POINTS = 200_000
+
+/**
+ * How long one read of the history import may take. Far longer than a
+ * query's: a day at a second is 86,400 buckets, and nobody waits on it but
+ * the import.
+ */
+const IMPORT_READ_TIMEOUT_MS = 5 * 60_000
+
+/**
+ * How long after a start an unfinished history import goes on. A history
+ * provider is a plugin too, and the server may start it after this one.
+ */
+const IMPORT_RESUME_DELAY_MS = 60_000
 
 interface HistoryRead {
   to: number
@@ -816,28 +831,8 @@ async function historyPositions(
     let points = reads.get(key, window.to, now)
     if (!points) {
       points = historyApi
-        .getValues({
-          context,
-          // Instants, not ISO strings: providers call Instant methods on these.
-          from: Temporal.Instant.from(new Date(from).toISOString()),
-          to: Temporal.Instant.from(new Date(window.to).toISOString()),
-          pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
-          resolution: seconds,
-        })
-        .then((response) => {
-          const parsed: TimedPosition[] = []
-          for (const row of response?.data ?? []) {
-            const position = historyRowPosition(row)
-            // A row with no position means the provider had none for that
-            // bucket, which is what lets the store fill it.
-            if (position) {
-              // A bucket, not a fix: its width keeps segment() from reading
-              // the spacing between buckets as a stop in the recording.
-              parsed.push({ position, timestamp: historyRowTimestamp(row), span: seconds * 1000 })
-            }
-          }
-          return parsed
-        })
+        .getValues(positionQuery(context, from, window.to, seconds))
+        .then((response) => historyRows(response, seconds))
       reads.add(key, window.to, now, points)
     }
     const read = await withTimeout(points, HISTORY_QUERY_TIMEOUT_MS)
@@ -911,6 +906,91 @@ const historyRowTimestamp = (row: unknown): number => {
   }
   const parsed = Date.parse(raw)
   return Number.isNaN(parsed) ? 0 : parsed
+}
+
+/** A read of a vessel's positions over `[from, to]`, in buckets of `seconds`. */
+const positionQuery = (context: Context, from: number, to: number, seconds: number): HistoryValuesQuery => ({
+  context,
+  // Instants, not ISO strings: providers call Instant methods on these.
+  from: Temporal.Instant.from(new Date(from).toISOString()),
+  to: Temporal.Instant.from(new Date(to).toISOString()),
+  pathSpecs: [{ path: 'navigation.position', aggregate: 'first' }],
+  resolution: seconds,
+})
+
+/** The positions in a provider's answer, each standing for a bucket of `seconds`. */
+const historyRows = (response: HistoryValuesResponse | undefined, seconds: number): TimedPosition[] => {
+  const parsed: TimedPosition[] = []
+  for (const row of response?.data ?? []) {
+    const position = historyRowPosition(row)
+    const timestamp = historyRowTimestamp(row)
+    // A row with no position means the provider had none for that bucket,
+    // which is what lets the store fill it. One without a usable time cannot
+    // be placed, and dated to the epoch it would start an import there.
+    if (position && timestamp > 0) {
+      // A bucket, not a fix: its width keeps segment() from reading the
+      // spacing between buckets as a stop in the recording.
+      parsed.push({ position, timestamp, span: seconds * 1000 })
+    }
+  }
+  return parsed
+}
+
+/**
+ * What a history provider holds for a vessel over `[from, to)`, for the
+ * history import, rejecting when there is no provider or it cannot be read:
+ * unlike a query, the import has nothing else to fall back on, and an outage
+ * must not read as a day with nothing.
+ */
+async function importedHistory(
+  app: App,
+  context: Context,
+  from: number,
+  to: number,
+  seconds: number,
+): Promise<TimedPosition[]> {
+  if (!app.getHistoryApi) {
+    throw new Error('This server has no History API')
+  }
+  const historyApi = await withTimeout(
+    app.getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
+    HISTORY_QUERY_TIMEOUT_MS,
+  )
+  const response = await withTimeout(
+    historyApi.getValues(positionQuery(context, from, to, seconds)),
+    IMPORT_READ_TIMEOUT_MS,
+  )
+  // Not clipped to the range: a provider that stamps a bucket on its end puts
+  // the last one past it, and the import keeps only what falls in the
+  // stretches it asked about anyway.
+  return historyRows(response, seconds)
+}
+
+/** Whether a history provider is installed and answers, for the import to read. */
+async function historyProviderAvailable(app: App): Promise<boolean> {
+  if (!app.getHistoryApi) {
+    return false
+  }
+  try {
+    await withTimeout(app.getHistoryApi(app.config?.settings?.historyApi?.defaultProvider), HISTORY_QUERY_TIMEOUT_MS)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The history import's state as the routes answer it, with ISO times. */
+const historyImportJson = (state: HistoryImportState, running: boolean) => {
+  const iso = (ms: number) => new Date(ms).toISOString()
+  return {
+    running,
+    startedAt: iso(state.startedAt),
+    ...(state.firstDay === undefined ? {} : { firstDay: iso(state.firstDay) }),
+    ...(state.nextDay === undefined ? {} : { nextDay: iso(state.nextDay) }),
+    filled: state.filled,
+    ...(state.finishedAt === undefined ? {} : { finishedAt: iso(state.finishedAt) }),
+    ...(state.error === undefined ? {} : { error: state.error }),
+  }
 }
 
 export default function ThePlugin(app: App): Plugin {
@@ -1011,6 +1091,58 @@ export default function ThePlugin(app: App): Plugin {
    */
   const knownContexts: HistoryContextCache = { current: undefined }
   const historyReads = new HistoryReads()
+  /**
+   * The history import while it runs, or as it last stopped; see
+   * historyImport.ts. `stop` asks it to stop before its next day.
+   */
+  let historyImport: { state: HistoryImportState; running: boolean; stop: boolean } | undefined
+  /** Set while a request to start the import is on its way, so two cannot both start one. */
+  let historyImportStarting = false
+
+  /** Go on with the history import from `state`, unless it is running. */
+  function startHistoryImport(state: HistoryImportState): void {
+    const store = tracks
+    if (!store?.saveHistoryImport || historyImport?.running) {
+      return
+    }
+    // Without the error it stopped on, which this run tries again.
+    const begun = { ...state }
+    delete begun.error
+    const run = { state: begun, running: true, stop: false }
+    historyImport = run
+    void runHistoryImport(state, {
+      history: (from, to, seconds) => importedHistory(app, state.context, from, to, seconds),
+      stored: async (from, to) =>
+        // Through the filtered read, as recordedOver does: a vessel the store
+        // has never recorded is left out rather than rejected.
+        (
+          await store.getFilteredTimedTracks(
+            { bbox: null, radius: null, intersects: true, contexts: [state.context] },
+            undefined,
+            undefined,
+            { window: { from, to, inclusiveEnd: true } },
+          )
+        )[state.context] ?? [],
+      deleted: () => deletedSpansOf(state.context),
+      save: async (next, runs, since) => store.saveHistoryImport!(next, runs, since),
+      // A restart replaces the store, and the new one goes on by itself.
+      stopped: () => run.stop || tracks !== store,
+      progress: (next) => {
+        run.state = next
+      },
+    }).then((final) => {
+      run.state = final
+      run.running = false
+      if (final.error !== undefined && !run.stop && tracks === store) {
+        app.error(`History import stopped: ${final.error}`)
+      }
+    })
+  }
+
+  /** The history import's part of the plugin status. */
+  function historyImportStatus(): string | undefined {
+    return historyImport && importStatus(historyImport.state, historyImport.running)
+  }
 
   /** The own vessel's navigation.state, or undefined when it reports none. */
   function getVesselState(): string | undefined {
@@ -1036,6 +1168,7 @@ export default function ThePlugin(app: App): Plugin {
   return {
     start: function (config: TracksPluginConfig) {
       storageError = undefined
+      historyImport = undefined
       const { resolution } = config
       storeResolution = toNumber(config.resolution) ?? DEFAULT_RESOLUTION
       const segmentGapMinutes = toNumber(config.segmentGapMinutes) ?? DEFAULT_SEGMENT_GAP_MINUTES
@@ -1194,7 +1327,10 @@ export default function ThePlugin(app: App): Plugin {
         // Being paused is the more useful thing to report: a user who has
         // opted in wants to see it is working, and one who has not wonders why
         // nothing is recording.
-        const status = stateGate.status() ?? sourceWatch.warning(app.selfContext) ?? 'Recording tracks'
+        const recording = stateGate.status() ?? sourceWatch.warning(app.selfContext) ?? 'Recording tracks'
+        const importing = historyImportStatus()
+        // The paused and source messages end their sentence, 'Recording tracks' does not.
+        const status = importing === undefined ? recording : `${recording.replace(/\.$/, '')}. ${importing}`
         if (status !== lastStatus) {
           lastStatus = status
           app.setPluginStatus?.(storageError ?? status)
@@ -1267,6 +1403,33 @@ export default function ThePlugin(app: App): Plugin {
         },
       })
       app.registerTrackApiProvider?.(trackProvider)
+      // A history import a stop or a restart broke off goes on by itself.
+      void starting.ready
+        .then(() => starting.historyImport(app.selfContext))
+        .then((state) => {
+          if (!state || state.finishedAt !== undefined || tracks !== starting) {
+            return
+          }
+          const waiting = { state, running: false, stop: false }
+          historyImport = waiting
+          // Not once an import started by hand meanwhile has replaced it, and
+          // not while one is being started: that start read the progress
+          // already, and would save it back over what this run did.
+          let resume: ReturnType<typeof setTimeout>
+          const goOn = () => {
+            if (tracks !== starting || historyImport !== waiting) {
+              return
+            }
+            if (historyImportStarting) {
+              resume = setTimeout(goOn, IMPORT_RESUME_DELAY_MS)
+              return
+            }
+            startHistoryImport(state)
+          }
+          resume = setTimeout(goOn, IMPORT_RESUME_DELAY_MS)
+          onStop.push(() => clearTimeout(resume))
+        })
+        .catch(() => {})
       return starting.ready.catch(async () => {
         // A failed start must release the worker before callers remove the data directory.
         await starting.close().catch(() => {})
@@ -1283,6 +1446,7 @@ export default function ThePlugin(app: App): Plugin {
         }
       })
       onStop = []
+      if (historyImport) historyImport.stop = true
       // Forget which sources were seen: the point of a restart is often to
       // apply a source priority change, and carrying the old observations over
       // would keep warning about a setup that has just been fixed.
@@ -1852,6 +2016,69 @@ export default function ThePlugin(app: App): Plugin {
             }
           })
           .catch(failed(res))
+      })
+
+      // The import of the own vessel's track from a history provider, and
+      // how far it got. Admin-only, as the recycle bin is: it writes into the
+      // recording.
+      const importFailed = (res: Response) => (err: unknown) => {
+        app.error(`History import: ${errorDetail(err)}`)
+        if (!res.headersSent) {
+          res.status(500).json({ message: 'Track storage failed' })
+        }
+      }
+      router.get('/history-import', (_req: Request, res: Response) => {
+        const store = tracks
+        if (!store?.historyImport) {
+          notAvailable(res)
+          return
+        }
+        Promise.all([historyProviderAvailable(app), store.historyImport(app.selfContext)])
+          .then(([provider, stored]) => {
+            const run = historyImport
+            // The run's own state is the newer one while it writes a day, and
+            // the only one with the error when the store could not save it.
+            const state = run ? run.state : stored
+            res.json({ provider, ...(state ? { state: historyImportJson(state, run?.running === true) } : {}) })
+          })
+          .catch(importFailed(res))
+      })
+      router.post('/history-import', (_req: Request, res: Response) => {
+        const store = tracks
+        if (!store?.historyImport || !store.saveHistoryImport) {
+          notAvailable(res)
+          return
+        }
+        if (historyImport?.running || historyImportStarting) {
+          res.status(409).json({ message: 'The history import is already running' })
+          return
+        }
+        historyImportStarting = true
+        void (async () => {
+          if (!(await historyProviderAvailable(app))) {
+            res.status(409).json({ message: 'No history provider is installed to import from' })
+            return
+          }
+          const previous = await store.historyImport!(app.selfContext)
+          // Unfinished, it goes on from the day it stopped at. Finished, it
+          // starts over, and fills only what is still missing: what the last
+          // one filled is the recording now.
+          const state: HistoryImportState =
+            previous && previous.finishedAt === undefined
+              ? previous
+              : { context: app.selfContext, startedAt: Date.now(), filled: 0 }
+          await store.saveHistoryImport!(state, [])
+          if (tracks !== store) {
+            notAvailable(res)
+            return
+          }
+          startHistoryImport(state)
+          res.status(202).json({ state: historyImportJson(historyImport?.state ?? state, true) })
+        })()
+          .catch(importFailed(res))
+          .finally(() => {
+            historyImportStarting = false
+          })
       })
       return router
     },

@@ -30,6 +30,7 @@ export default tseslint.config(
       globals: {
         AbortSignal: 'readonly',
         clearInterval: 'readonly',
+        clearTimeout: 'readonly',
         confirm: 'readonly',
         console: 'readonly',
         CustomEvent: 'readonly',

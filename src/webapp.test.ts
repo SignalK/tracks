@@ -6,6 +6,8 @@ import { parseDuration } from './timeWindow.js'
 import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '../public/bin.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { imported, importQuery, start as startImport } from '../public/import.js'
+// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
+import { historyView, POLL_MS, start as startHistory } from '../public/history.js'
 
 /**
  * The webapp ships as plain static files with no build step, so it cannot
@@ -1168,6 +1170,161 @@ describe('the import form', () => {
     answer({ ok: false, status: 400, json: () => Promise.resolve({ message: 'No track found' }) })
     await first
     expect(status.textContent).toBe('No track found')
+    expect(button.disabled).toBe(false)
+  })
+})
+
+describe('the history import section', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  const running = {
+    running: true,
+    startedAt: '2026-06-11T00:00:00.000Z',
+    firstDay: '2026-06-01T00:00:00.000Z',
+    nextDay: '2026-06-05T00:00:00.000Z',
+    filled: 1234,
+  }
+
+  it('offers an import only where a history provider is installed', () => {
+    expect(historyView({ provider: false })).toBeUndefined()
+    expect(historyView({ provider: true })).toEqual({ text: 'Not imported yet.', button: 'Import' })
+  })
+
+  it('says how far a running import got, and offers nothing meanwhile', () => {
+    // West of UTC, where the UTC day the import got to begins the day before.
+    const zone = process.env.TZ
+    process.env.TZ = 'America/Los_Angeles'
+    try {
+      const view = historyView({ provider: true, state: running })
+      const day = new Date(running.nextDay).toLocaleDateString(undefined, { timeZone: 'UTC' })
+      expect(day).not.toBe(new Date(running.nextDay).toLocaleDateString())
+      expect(view.text).toBe(`Importing: 40% done, up to ${day}. 1234 positions filled so far.`)
+      expect(view.button).toBeUndefined()
+    } finally {
+      if (zone === undefined) delete process.env.TZ
+      else process.env.TZ = zone
+    }
+    expect(historyView({ provider: true, state: { running: true, startedAt: running.startedAt, filled: 0 } })).toEqual({
+      text: 'Importing: finding where the history begins…',
+    })
+  })
+
+  it('offers to resume an import that stopped, and to import again once it finished', () => {
+    const stopped = { ...running, running: false }
+    const failed = historyView({ provider: true, state: { ...stopped, error: 'provider unavailable' } })
+    expect(failed.text).toMatch(/^The import stopped at .+: provider unavailable\. 1234 positions filled\.$/)
+    expect(failed).toMatchObject({ button: 'Resume', state: 'error' })
+    expect(historyView({ provider: true, state: stopped }).button).toBe('Resume')
+    const done = historyView({ provider: true, state: { ...stopped, finishedAt: '2026-06-11T01:00:00.000Z' } })
+    expect(done.text).toMatch(/^Imported on .+: 1234 positions filled\.$/)
+    expect(done.button).toBe('Import again')
+    // Shown, but with nothing to read from there is nothing to offer.
+    expect(
+      historyView({ provider: false, state: { ...stopped, finishedAt: running.startedAt } }).button,
+    ).toBeUndefined()
+    expect(historyView({ provider: false, state: stopped }).button).toBeUndefined()
+  })
+
+  /** The section's elements, as stubs the script writes to. */
+  const page = () => {
+    let click: () => Promise<void> = async () => {}
+    const section = { hidden: true }
+    const status = { textContent: '', dataset: {} as Record<string, string> }
+    const button = {
+      hidden: true,
+      textContent: '',
+      disabled: false,
+      addEventListener: (_type: string, handler: () => Promise<void>) => {
+        click = handler
+      },
+    }
+    const elements: Record<string, unknown> = { history: section, 'history-status': status, 'history-start': button }
+    vi.stubGlobal('document', { getElementById: (id: string) => elements[id] })
+    return { section, status, button, click: () => click() }
+  }
+  const answer = (status: number, body: unknown) => ({ ok: status < 300, status, json: () => Promise.resolve(body) })
+
+  it('stays hidden from anyone but an administrator', async () => {
+    const { section } = page()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(answer(401, { message: 'Unauthorized' }))),
+    )
+    await startHistory()
+    expect(section.hidden).toBe(true)
+  })
+
+  it('starts the import, and follows it until it finished', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { section, status, button, click } = page()
+    const answers = [
+      answer(200, { provider: true }),
+      answer(202, { state: { ...running, nextDay: running.firstDay, filled: 0 } }),
+      answer(200, { provider: true, state: running }),
+      answer(200, { provider: true, state: { ...running, running: false, finishedAt: running.startedAt } }),
+    ]
+    const fetch = vi.fn<(url: string, init?: { method?: string }) => Promise<unknown>>(() =>
+      Promise.resolve(answers.shift()),
+    )
+    vi.stubGlobal('fetch', fetch)
+    await startHistory()
+    expect(section.hidden).toBe(false)
+    expect(button).toMatchObject({ hidden: false, textContent: 'Import' })
+
+    await click()
+    expect(fetch.mock.calls[1]![1]?.method).toBe('POST')
+    expect(status.textContent).toMatch(/^Importing: 40% done/)
+    expect(button.hidden).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(POLL_MS)
+    expect(fetch).toHaveBeenCalledTimes(4)
+    expect(status.textContent).toMatch(/^Imported on /)
+    expect(button).toMatchObject({ hidden: false, textContent: 'Import again' })
+    await vi.advanceTimersByTimeAsync(10 * POLL_MS)
+    expect(fetch).toHaveBeenCalledTimes(4)
+  })
+
+  // Between stop() and the next start() the route answers 404, as on a
+  // config save; the progress shown must not freeze there.
+  it('keeps following an import across a refused or unreadable answer', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { status } = page()
+    const answers = [
+      answer(200, { provider: true, state: running }),
+      answer(404, { message: 'Tracks API not available because tracks plugin is not enabled' }),
+      // A body that does not read, as a proxy's error page would be.
+      { ok: true, status: 200, json: () => Promise.reject(new SyntaxError('Unexpected token <')) },
+      answer(200, { provider: true, state: { ...running, running: false, finishedAt: running.startedAt } }),
+    ]
+    const fetch = vi.fn(() => Promise.resolve(answers.shift()))
+    vi.stubGlobal('fetch', fetch)
+    await startHistory()
+    await vi.advanceTimersByTimeAsync(POLL_MS)
+    await vi.advanceTimersByTimeAsync(POLL_MS)
+    await vi.advanceTimersByTimeAsync(POLL_MS)
+    expect(fetch).toHaveBeenCalledTimes(4)
+    expect(status.textContent).toMatch(/^Imported on /)
+  })
+
+  it('says why a start was refused, and allows another', async () => {
+    const { status, button, click } = page()
+    const answers = [
+      answer(200, { provider: true }),
+      answer(409, { message: 'No history provider is installed to import from' }),
+    ]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(answers.shift())),
+    )
+    await startHistory()
+    await click()
+    expect(status).toMatchObject({
+      textContent: 'No history provider is installed to import from',
+      dataset: { state: 'error' },
+    })
     expect(button.disabled).toBe(false)
   })
 })
