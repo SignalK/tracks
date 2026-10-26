@@ -138,8 +138,11 @@ export interface TrackStore {
    * call. The plugin calls it on a timer; it is no part of the Track API.
    * Optional: a store without it reads every position, and the caller
    * simplifies them all.
+   *
+   * Answers whether the call left work for another, so the plugin can come
+   * back sooner while there is a backlog.
    */
-  refineLevels?(): void
+  refineLevels?(): boolean | Promise<boolean>
 
   /**
    * Each context's track in a window as a listing describes it, without its

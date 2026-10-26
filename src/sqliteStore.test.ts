@@ -367,6 +367,23 @@ describe('significance levels', () => {
     store.close()
   })
 
+  it('says whether it left work for another call', () => {
+    const store = new SqliteTrackStore({ file: ':memory:', refineBudget: 1000 }, debug)
+    for (let d = 0; d < 3; d++) {
+      seedHour(store, day0 + d * DAY)
+    }
+    const refined = () => [0, 1, 2].every((d) => levels(store, day0 + d * DAY, day0 + (d + 1) * DAY).length > 1)
+    const answers: boolean[] = []
+    for (let i = 0; i < 10 && answers.at(-1) !== false; i++) {
+      answers.push(store.refineLevels(day0 + 5 * DAY))
+    }
+    expect(answers.slice(0, 3)).toEqual([true, true, true])
+    expect(answers.at(-1)).toBe(false)
+    expect(refined()).toBe(true)
+    expect(store.refineLevels(day0 + 5 * DAY)).toBe(false)
+    store.close()
+  })
+
   // Each change takes positions out from under the levels of the day it
   // touches, or adds some: that day's significant positions go, the day is
   // read from positions until the next refinement measures it again.

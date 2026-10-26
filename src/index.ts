@@ -233,10 +233,17 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000
 /**
  * How often the store refines levels. A call with nothing to do returns at
- * once, and one with a backlog holds the worker about 50 ms on a Pi 5, so a
- * million positions take about 25 minutes at half a percent of its time.
+ * once, and one with a backlog holds the worker about 50 ms on a Pi 5.
  */
 const REFINE_INTERVAL_MS = 10 * 1000
+/**
+ * The pace while a call leaves work. A day waiting for its levels, after an
+ * import or a restore, is read from every position: on a Pi 5, with 30 such
+ * days of a fix a second, a trail took 4 s to read rather than 76 ms. At this
+ * pace they took 7 minutes, at about 5% of the worker's time, rather than an
+ * hour, and a read waits behind at most one call.
+ */
+const REFINE_BACKLOG_INTERVAL_MS = 1000
 // Off by default. Segmenting changes the shape of every response, and measured
 // against real AIS traffic a 5-minute rule split 61 of 879 gaps that were just
 // a slow-updating target rather than a stop. Opt in, and pick a threshold that
@@ -697,11 +704,22 @@ export default function ThePlugin(app: App): Plugin {
       onStop.push(() => {
         clearInterval(pruneInterval)
       })
-      const refineInterval = setInterval(() => {
-        tracks?.refineLevels?.()
-      }, REFINE_INTERVAL_MS)
+      // Each call waits for the answer to the one before, so calls never
+      // pile up behind a long read, and one that left work comes back sooner.
+      let refining = true
+      let refineTimer: ReturnType<typeof setTimeout> | undefined
+      const refine = (): void => {
+        void Promise.resolve()
+          .then(() => tracks?.refineLevels?.() ?? false)
+          .catch(() => false)
+          .then((more) => {
+            if (refining) refineTimer = setTimeout(refine, more ? REFINE_BACKLOG_INTERVAL_MS : REFINE_INTERVAL_MS)
+          })
+      }
+      refineTimer = setTimeout(refine, REFINE_INTERVAL_MS)
       onStop.push(() => {
-        clearInterval(refineInterval)
+        refining = false
+        clearTimeout(refineTimer)
       })
 
       // Report on a timer rather than per delta: at 10Hz across several

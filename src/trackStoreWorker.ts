@@ -123,15 +123,20 @@ if (store) {
           i++
           // Housekeeping, in a transaction of its own: a failure takes back
           // what it refined and nothing else, and never stops the recording.
+          let more = false
           if (!writeFailure) {
             try {
-              target.transaction(() => target.refineLevels(...operation.args))
+              target.transaction(() => {
+                more = target.refineLevels(...operation.args)
+              })
             } catch (error) {
               if (error instanceof TransactionStateError) throw error
               debug(`Refining levels failed: ${errorText(error)}`)
+              // Rolled back: the next try waits for the ordinary tick.
+              more = false
             }
           }
-          results.push({ id: operation.id })
+          results.push({ id: operation.id, value: more })
           continue
         }
         if (isWrite(operation)) {

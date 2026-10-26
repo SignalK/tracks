@@ -287,3 +287,54 @@ describe('the own vessel at anchor', () => {
     }
   })
 })
+
+describe('refining levels', () => {
+  const timers = ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] as const
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('comes back after a second while a call leaves work, and after ten once none does', async () => {
+    vi.useFakeTimers({ toFake: [...timers] })
+    const { app } = createApp(dir)
+    const plugin = ThePlugin(app)
+    await plugin.start({ resolution: 0 })
+    const refine = vi
+      .spyOn(plugin.getTracks()!, 'refineLevels')
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false)
+    const callsAfter = async (ms: number) => {
+      await vi.advanceTimersByTimeAsync(ms)
+      return refine.mock.calls.length
+    }
+    expect(await callsAfter(10_000)).toBe(1)
+    expect(await callsAfter(1_000)).toBe(2)
+    expect(await callsAfter(1_000)).toBe(3)
+    expect(await callsAfter(9_000)).toBe(3)
+    expect(await callsAfter(1_000)).toBe(4)
+    await plugin.stop()
+    expect(await callsAfter(20_000)).toBe(4)
+  })
+
+  // A call that answers after the stop must not keep a second chain of calls
+  // going beside the one the next start begins.
+  it('schedules nothing after a stop, even for a call that answers later', async () => {
+    vi.useFakeTimers({ toFake: [...timers] })
+    const { app } = createApp(dir)
+    const plugin = ThePlugin(app)
+    await plugin.start({ resolution: 0 })
+    let answer: (more: boolean) => void = () => {}
+    vi.spyOn(plugin.getTracks()!, 'refineLevels').mockReturnValue(new Promise<boolean>((resolve) => (answer = resolve)))
+    await vi.advanceTimersByTimeAsync(10_000)
+    await plugin.stop()
+    answer(true)
+    await plugin.start({ resolution: 0 })
+    const refine = vi.spyOn(plugin.getTracks()!, 'refineLevels').mockResolvedValue(false)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(refine).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(refine).toHaveBeenCalledTimes(2)
+    await plugin.stop()
+  })
+})

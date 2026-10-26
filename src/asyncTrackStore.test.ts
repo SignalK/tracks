@@ -204,13 +204,28 @@ describe('worker-owned SQLite', () => {
     const store = create((error) => errors.push(error), { maxItems: 2 })
     store.newPosition('self', [60, 24], 100)
     store.newPosition('self', [61, 25], 200)
-    store.refineLevels()
+    const skipped = store.refineLevels()
     await store.close()
+    expect(await skipped).toBe(false)
     expect(errors).toEqual([])
     expect(await create().get('self')).toEqual([
       [60, 24],
       [61, 25],
     ])
+  })
+
+  it('answers whether refining left work for another call', async () => {
+    const DAY = 24 * 60 * 60 * 1000
+    const start = Math.floor(Date.now() / DAY) * DAY - 5 * DAY
+    // Finished days with more positions than one call's budget.
+    const seed = new SqliteTrackStore({ file: join(dir, 'tracks.db'), resolution: 0 }, debug)
+    for (let i = 0; i < 8000; i++) seed.newPosition('self', [60 + i * 1e-5, 24 + (i % 7) * 1e-5], start + i * 20_000)
+    seed.close()
+    const store = create()
+    const answers: boolean[] = []
+    for (let i = 0; i < 10 && answers.at(-1) !== false; i++) answers.push(await store.refineLevels())
+    expect(answers[0]).toBe(true)
+    expect(answers.at(-1)).toBe(false)
   })
 
   it('refines behind a little queued work, rather than waiting for none', async () => {

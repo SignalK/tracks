@@ -1515,8 +1515,11 @@ export class SqliteTrackStore implements TrackStore {
    * after its frontier, the pass picking up where the last call stopped. Once
    * a pass finds nothing left to do, calls cost nothing until another day
    * finishes.
+   *
+   * Returns whether the call stopped with work left, so the caller can come
+   * back sooner while there is a backlog.
    */
-  refineLevels(now = Date.now()): void {
+  refineLevels(now = Date.now()): boolean {
     const lastDay = dayOf(now - DETAIL_KEEP) - 1
     let budget = this.refineBudget
     const partial = this.refinePartial
@@ -1524,7 +1527,7 @@ export class SqliteTrackStore implements TrackStore {
       this.refinePartial = undefined
       budget = this.refineDay(partial.context, partial.day, partial.next, budget, partial.stale)
       if (this.refinePartial || budget <= 0) {
-        return
+        return true
       }
     }
     const stale = this.db.prepare('SELECT context, day FROM level_stale LIMIT 64')
@@ -1536,12 +1539,12 @@ export class SqliteTrackStore implements TrackStore {
       for (const { context, day } of batch) {
         budget = this.refineDay(context, day, Number.NEGATIVE_INFINITY, budget, true)
         if (this.refinePartial || budget <= 0) {
-          return
+          return true
         }
       }
     }
     if (this.refinedThrough === lastDay) {
-      return
+      return false
     }
     const nextContext = this.db.prepare('SELECT context FROM positions WHERE context > ? ORDER BY context LIMIT 1')
     const firstAt = this.db.prepare(
@@ -1565,12 +1568,13 @@ export class SqliteTrackStore implements TrackStore {
         budget = this.refineDay(context, dayOf(row.timestamp), Number.NEGATIVE_INFINITY, budget, false)
         if (this.refinePartial || budget <= 0) {
           this.refineResume = context
-          return
+          return true
         }
       }
       context = (nextContext.get(context) as { context: string } | undefined)?.context
     }
     this.refinedThrough = lastDay
+    return false
   }
 
   /**
