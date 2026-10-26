@@ -200,7 +200,7 @@ swing around the anchor shows.
 Detail finer than the track resolution is kept in full for a day. While a stay at anchor goes on,
 its older part is thinned only to the spacing an anchor alarm reads the whole stay at, one second
 per day of the stay, so it keeps roughly 86,400 points plus the last day. That holds until the
-spacing reaches the track resolution, after 60 days at the default minute; from then on the older
+spacing reaches the track resolution, after 10 days at the default ten seconds; from then on the older
 part is kept at the track resolution, never coarser. A day after the stay ends, it is thinned back
 to the track resolution.
 
