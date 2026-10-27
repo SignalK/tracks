@@ -2643,6 +2643,24 @@ describe('an import filling the gaps in a recording', () => {
     }
   })
 
+  // A day apart, and with many runs between, so the lookup has to find the
+  // earlier run by time rather than by its place in the upload.
+  it('judges a run against an earlier one that started a day before it', async () => {
+    const store = newStore()
+    try {
+      const long = run(61, t0, 8641, 10_000)
+      const between = Array.from({ length: 50 }, (_, i) =>
+        run(63, t0 + 3 * 24 * 60 * MINUTE + i * 60 * MINUTE, 2, 1000),
+      )
+      const late = run(62, t0 + 24 * 60 * MINUTE - 5 * MINUTE, 10, 10_000)
+      expect(store.fillTrack(ctx, [long, ...between, late])).toBe(10)
+      const points = await store.getTimed(ctx)
+      expect(points.filter(({ position }) => position[0] === 62)).toHaveLength(0)
+    } finally {
+      store.close()
+    }
+  })
+
   it('judges each run against the ones before it in the same call', async () => {
     const store = newStore()
     try {

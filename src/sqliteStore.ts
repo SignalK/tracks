@@ -419,28 +419,45 @@ function storedKeep(piece: { timestamp: number }[], values: Float64Array, tolera
   return keep
 }
 
-/** The points of runs sorted by time from `from` until `to`, both included. */
-function keptWithin(runs: TimedPosition[][], from: number, to: number): TimedPosition[] {
-  const within: TimedPosition[] = []
-  const firstAt = (run: TimedPosition[], time: number): number => {
-    let low = 0
-    let high = run.length
-    while (low < high) {
-      const mid = (low + high) >> 1
-      if (run[mid]!.timestamp < time) low = mid + 1
-      else high = mid
-    }
-    return low
+/** Index of the first of `items` whose key is `time` or later, the items sorted by that key. */
+function lowerBound<T>(items: readonly T[], time: number, key: (item: T) => number): number {
+  let low = 0
+  let high = items.length
+  while (low < high) {
+    const mid = (low + high) >> 1
+    if (key(items[mid]!) < time) low = mid + 1
+    else high = mid
   }
-  for (const run of runs) {
-    const first = run[0]
-    const last = run.at(-1)
-    if (first === undefined || last === undefined || first.timestamp > to || last.timestamp < from) continue
-    for (let i = firstAt(run, from); i < run.length && run[i]!.timestamp <= to; i++) {
-      within.push(run[i]!)
-    }
+  return low
+}
+
+const startOf = (run: TimedPosition[]): number => run[0]!.timestamp
+
+/**
+ * The runs `fillTrack` kept so far, sorted by their first point, each sorted
+ * by time and, coming from one of `fillPieces`, no longer than
+ * FILL_PIECE_MS: a lookup then reads only the runs that start within that of
+ * its window, however many runs an upload brings.
+ */
+class KeptRuns {
+  private readonly runs: TimedPosition[][] = []
+
+  add(run: TimedPosition[]): void {
+    if (run.length > 0) this.runs.splice(lowerBound(this.runs, startOf(run) + 1, startOf), 0, run)
   }
-  return within
+
+  /** The points from `from` until `to`, both included. */
+  within(from: number, to: number): TimedPosition[] {
+    const within: TimedPosition[] = []
+    for (let r = lowerBound(this.runs, from - FILL_PIECE_MS, startOf); r < this.runs.length; r++) {
+      const run = this.runs[r]!
+      if (startOf(run) > to) break
+      for (let i = lowerBound(run, from, (point) => point.timestamp); i < run.length && run[i]!.timestamp <= to; i++) {
+        within.push(run[i]!)
+      }
+    }
+    return within
+  }
 }
 
 /**
@@ -2491,6 +2508,7 @@ export class SqliteTrackStore implements TrackStore {
       'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?',
     )
     const kept: TimedPosition[][] = []
+    const index = new KeptRuns()
     let overlapping = 0
     for (const run of runs) {
       // Added once the whole run is judged, so it never counts against itself.
@@ -2501,12 +2519,13 @@ export class SqliteTrackStore implements TrackStore {
         if (first === undefined || last === undefined) continue
         const from = first.timestamp - MIN_FILLED_GAP_MS
         const to = last.timestamp + MIN_FILLED_GAP_MS
-        const around = [...(recorded.all(context, from, to) as { timestamp: number }[]), ...keptWithin(kept, from, to)]
+        const around = [...(recorded.all(context, from, to) as { timestamp: number }[]), ...index.within(from, to)]
         const filled = fillGaps([piece], around, MIN_FILLED_GAP_MS)
         judged.push(...filled.runs)
         overlapping += filled.overlapping
       }
       kept.push(...judged)
+      for (const run of judged) index.add(run)
     }
     this.fill(context, kept)
     return overlapping
