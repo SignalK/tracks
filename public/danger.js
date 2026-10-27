@@ -16,6 +16,13 @@ export const CONFIRMATION = 'DELETE'
 /** Relative, because the server mounts this page under /@signalk/tracks-plugin. */
 const DATABASE_URL = `../../plugins/tracks/database?confirm=${CONFIRMATION}`
 
+/**
+ * How long the dialog waits for the delete. The plugin stops, removes the
+ * file and starts again, which takes seconds; past this the answer is not
+ * coming, and the dialog must not stay locked open.
+ */
+const DELETE_WAIT_MS = 60_000
+
 /** Whether what was typed confirms the delete. */
 export function confirmed(typed) {
   return typed.trim() === CONFIRMATION
@@ -65,9 +72,18 @@ export function start() {
     button.disabled = true
     let response
     try {
-      response = await fetch(DATABASE_URL, { method: 'DELETE', credentials: 'include' })
-    } catch {
-      fail('Could not reach the server.')
+      response = await fetch(DATABASE_URL, {
+        method: 'DELETE',
+        credentials: 'include',
+        signal: AbortSignal.timeout(DELETE_WAIT_MS),
+      })
+    } catch (failure) {
+      // Not asked again: the server may still finish the delete.
+      fail(
+        failure?.name === 'TimeoutError'
+          ? 'The server did not answer. The database may still have been deleted: reload the page to see.'
+          : 'Could not reach the server.',
+      )
       return
     }
     if (!response.ok) {

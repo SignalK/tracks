@@ -1583,6 +1583,24 @@ describe('the danger zone', () => {
     expect(dialog.close).toHaveBeenCalled()
     expect(reload).toHaveBeenCalled()
   })
+  it('stops waiting for a delete that is not answered, and says it may have gone through', async () => {
+    const timedOut = Object.assign(new Error('signal timed out'), { name: 'TimeoutError' })
+    const { handlers, button, confirm, error, fetch, reload, submit, keptOpen } = mount(() => Promise.reject(timedOut))
+    handlers.click!()
+    confirm.value = 'DELETE'
+    handlers.input!()
+
+    await submit()
+    expect(fetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(error.textContent).toBe(
+      'The server did not answer. The database may still have been deleted: reload the page to see.',
+    )
+    expect(button.disabled).toBe(false)
+    expect(keptOpen('cancel')).toBe(false)
+    expect(reload).not.toHaveBeenCalled()
+  })
+
   it('asks once and stays open while a delete is on its way', async () => {
     let answer!: (response: unknown) => void
     const { handlers, button, confirm, error, fetch, reload, submit, keptOpen } = mount(
