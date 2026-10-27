@@ -1582,6 +1582,29 @@ describe('storage simplification', () => {
       store.close()
     })
 
+    it('is simplified again once the tolerance is raised', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-simplify-'))
+      const file = join(dir, 'tracks.db')
+      const settled = (storageTolerance: number) => {
+        const store = new SqliteTrackStore({ file, storageTolerance }, debug)
+        settle(store)
+        const n = count(store, day0, day0 + DAY)
+        store.close()
+        return n
+      }
+      try {
+        const first = new SqliteTrackStore({ file, storageTolerance: 0.5 }, debug)
+        first.transaction(() => first.fillTrack(ctx, [wandering(day0)]))
+        const atHalf = count(first, day0, day0 + DAY)
+        first.close()
+        expect(atHalf).toBeLessThan(3 * 3600)
+        // Raised before the day was gone over, so it is still noted as written.
+        expect(settled(2)).toBeLessThan(atHalf)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     it('is simplified again once a fix comes into the day', () => {
       const store = tolerant(0.5)
       store.fillTrack(ctx, [wandering(day0)])
