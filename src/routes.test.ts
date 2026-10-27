@@ -757,7 +757,6 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     for (const window of windows) expect(window!.to - window!.from).toBeLessThanOrEqual(24 * 60 * 60_000)
   })
 
-  // A download the client gave up on is not read on to its end.
   it('reads no day more once the client has gone', async () => {
     const h = (harness = createHarness({ selfPosition: [60, 24] }))
     const day = Date.UTC(2026, 6, 1)
