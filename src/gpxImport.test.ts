@@ -158,6 +158,26 @@ describe('the GPX upload route', () => {
       expect(properties).not.toHaveProperty('imported')
     }))
 
+  // Twenty minutes at one fix a second, twice, half an hour apart, on a day
+  // the recording has nothing of: written as simplifying the day leaves them,
+  // the ends of each and one a minute between.
+  it('writes the own vessel’s passage into an old day simplified', () =>
+    withHarness(async (h) => {
+      const segment = (start: number) =>
+        `<trkseg>${Array.from(
+          { length: 1200 },
+          (_, i) => `<trkpt lat="${60 + i / 100_000}" lon="24"><time>${iso(start + i * 1000)}</time></trkpt>`,
+        ).join('')}</trkseg>`
+      const file = gpxFile(`<trk><name>Passage</name>${segment(t0)}${segment(t0 + 50 * MINUTE)}</trk>`)
+      const res = await upload(h, file, '?self=true')
+      expect(res.status).toBe(201)
+      expect(res.body).toMatchObject({ overlappingPoints: 0 })
+      const stored = await h.store()!.getTimed(SELF_CONTEXT)
+      expect(stored).toHaveLength(2 * 21)
+      expect(stored[0]!.timestamp).toBe(t0)
+      expect(stored.at(-1)!.timestamp).toBe(t0 + 50 * MINUTE + 1199 * 1000)
+    }))
+
   it('reports the points it left out where the recording already has positions', () =>
     withHarness(async (h) => {
       h.seedTrack(SELF_CONTEXT, [[60, 24]], [t0])

@@ -419,6 +419,30 @@ function storedKeep(piece: { timestamp: number }[], values: Float64Array, tolera
   return keep
 }
 
+/** The points of runs sorted by time from `from` until `to`, both included. */
+function keptWithin(runs: TimedPosition[][], from: number, to: number): TimedPosition[] {
+  const within: TimedPosition[] = []
+  const firstAt = (run: TimedPosition[], time: number): number => {
+    let low = 0
+    let high = run.length
+    while (low < high) {
+      const mid = (low + high) >> 1
+      if (run[mid]!.timestamp < time) low = mid + 1
+      else high = mid
+    }
+    return low
+  }
+  for (const run of runs) {
+    const first = run[0]
+    const last = run.at(-1)
+    if (first === undefined || last === undefined || first.timestamp > to || last.timestamp < from) continue
+    for (let i = firstAt(run, from); i < run.length && run[i]!.timestamp <= to; i++) {
+      within.push(run[i]!)
+    }
+  }
+  return within
+}
+
 /**
  * A position store backed by SQLite, so tracks survive a restart.
  *
@@ -489,7 +513,20 @@ export class SqliteTrackStore implements TrackStore {
   private simplifyPartial: { context: Context; day: number; next: number; pending: boolean } | undefined
   /** See simplifying(). */
   private simplifyStatements:
-    | Record<'select' | 'held' | 'remove' | 'written' | 'unwritten' | 'count' | 'done' | 'frontier', StatementSync>
+    | Record<
+        | 'select'
+        | 'held'
+        | 'remove'
+        | 'written'
+        | 'unwritten'
+        | 'count'
+        | 'mark'
+        | 'unwrite'
+        | 'recorded'
+        | 'done'
+        | 'frontier',
+        StatementSync
+      >
     | undefined
   /** See refining(). */
   private refineStatements:
@@ -2026,6 +2063,14 @@ export class SqliteTrackStore implements TrackStore {
       count: this.db.prepare(
         'SELECT count(*) AS n FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ?',
       ),
+      mark: this.db.prepare(
+        `INSERT INTO simplified_days (context, day, tolerance, positions) VALUES (?, ?, ?, ?)
+         ON CONFLICT(context, day) DO UPDATE SET tolerance = excluded.tolerance, positions = excluded.positions`,
+      ),
+      unwrite: this.db.prepare('DELETE FROM simplified_days WHERE context = ? AND day >= ? AND day <= ?'),
+      recorded: this.db.prepare(
+        'SELECT 1 AS found FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? LIMIT 1',
+      ),
       done: this.db.prepare('DELETE FROM simplify_pending WHERE context = ? AND day = ?'),
       frontier: this.db.prepare(
         `INSERT INTO simplify_frontier (context, through, tolerance) VALUES (?, ?, ?)
@@ -2071,9 +2116,7 @@ export class SqliteTrackStore implements TrackStore {
    */
   private invalidateLevels(context: Context, from: number, to: number): void {
     // A day an import wrote simplified is so no longer once it changes.
-    this.db
-      .prepare('DELETE FROM simplified_days WHERE context = ? AND day >= ? AND day <= ?')
-      .run(context, dayOf(from), dayOf(to))
+    this.simplifying().unwrite.run(context, dayOf(from), dayOf(to))
     const through = this.levelFrontier.get(context)
     // A day refined in part starts over when the change reaches it. One the
     // pass is in does too when the change reaches any day between it and the
@@ -2425,8 +2468,10 @@ export class SqliteTrackStore implements TrackStore {
    * nothing (`fillGaps`), and return how many points were left out. Nothing
    * is binned. The runs are judged here, inside the write, so what another
    * upload or a restore wrote stays. Each run is sorted by time, as an
-   * import's segments are, and is written before the next is judged, so two
-   * runs that overlap are not both written.
+   * import's segments are, and is judged against what the runs before it
+   * kept as well, so two runs that overlap are not both written. They are
+   * written together, so a day several reach is simplified as one
+   * (`simplifyUnrecorded`).
    *
    * A run is read a piece at a time (`fillPieces`): an import spread thinly
    * over weeks recorded at one fix a second would otherwise read the weeks at
@@ -2438,35 +2483,25 @@ export class SqliteTrackStore implements TrackStore {
     const recorded = this.db.prepare(
       'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?',
     )
-    // A day two runs write into is written in full: simplified as the first
-    // is written, it would not give what simplifying both did.
-    const seen = new Set<number>()
-    const shared = new Set<number>()
-    for (const run of runs) {
-      for (const day of new Set(run.map(({ timestamp }) => dayOf(timestamp)))) {
-        if (seen.has(day)) shared.add(day)
-        seen.add(day)
-      }
-    }
+    const kept: TimedPosition[][] = []
     let overlapping = 0
     for (const run of runs) {
-      // Written once the whole run is judged, so it never counts against itself.
-      const kept: TimedPosition[][] = []
+      // Added once the whole run is judged, so it never counts against itself.
+      const judged: TimedPosition[][] = []
       for (const piece of fillPieces(run)) {
         const first = piece[0]
         const last = piece.at(-1)
         if (first === undefined || last === undefined) continue
-        const around = recorded.all(
-          context,
-          first.timestamp - MIN_FILLED_GAP_MS,
-          last.timestamp + MIN_FILLED_GAP_MS,
-        ) as { timestamp: number }[]
-        const judged = fillGaps([piece], around, MIN_FILLED_GAP_MS)
-        kept.push(...judged.runs)
-        overlapping += judged.overlapping
+        const from = first.timestamp - MIN_FILLED_GAP_MS
+        const to = last.timestamp + MIN_FILLED_GAP_MS
+        const around = [...(recorded.all(context, from, to) as { timestamp: number }[]), ...keptWithin(kept, from, to)]
+        const filled = fillGaps([piece], around, MIN_FILLED_GAP_MS)
+        judged.push(...filled.runs)
+        overlapping += filled.overlapping
       }
-      this.fill(context, kept, shared)
+      kept.push(...judged)
     }
+    this.fill(context, kept)
     return overlapping
   }
 
@@ -2475,7 +2510,7 @@ export class SqliteTrackStore implements TrackStore {
    * them as imported rather than thin them as detail. What
    * simplifyUnrecorded() leaves out of them is not written.
    */
-  private fill(context: Context, segments: TimedPosition[][], shared?: ReadonlySet<number>): void {
+  private fill(context: Context, segments: TimedPosition[][]): void {
     for (const points of segments) {
       const first = points[0]
       const last = points.at(-1)
@@ -2485,7 +2520,7 @@ export class SqliteTrackStore implements TrackStore {
     // The next live fix would otherwise open a detail span from the last one
     // recorded before the import, reaching over the imported points.
     this.lastStored.delete(context)
-    const { written, days } = this.simplifyUnrecorded(context, segments, shared)
+    const { written, days } = this.simplifyUnrecorded(context, segments)
     for (const [s, points] of segments.entries()) {
       for (const { position, timestamp } of written[s]!) {
         this.store(context, position, timestamp)
@@ -2497,20 +2532,15 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     // After invalidateLevels(), which takes a day changed off simplified_days.
-    const mark = this.db.prepare(
-      `INSERT INTO simplified_days (context, day, tolerance, positions) VALUES (?, ?, ?, ?)
-       ON CONFLICT(context, day) DO UPDATE SET tolerance = excluded.tolerance, positions = excluded.positions`,
-    )
     for (const [day, positions] of days) {
-      mark.run(context, day, this.storageTolerance, positions)
+      this.simplifying().mark.run(context, day, this.storageTolerance, positions)
     }
   }
 
   /**
    * The points of an import to write, segment by segment: on each day that
-   * simplifyStored() will go over, that the recording holds nothing of, and
-   * that no other write of the same import reaches (`shared`), only what
-   * simplifyStored() would leave of it. Writing every position and deleting
+   * simplifyStored() will go over and the recording holds nothing of, only
+   * what simplifyStored() would leave of it. Writing every position and deleting
    * most of them a day later costs an SD card twice the writes, and deleting
    * is the dearer half: the location indexes put each deleted row on a page
    * of its own. Resolves the days written so, too, with how many positions
@@ -2518,12 +2548,12 @@ export class SqliteTrackStore implements TrackStore {
    *
    * A day the recording has positions of is written in full: simplifying the
    * import's stretches alone keeps their ends, and judges a point by the
-   * chord its stretch draws rather than the one the whole day does.
+   * chord its stretch draws rather than the one the whole day does. So is a
+   * day an earlier write of the same import reached, for the same reason.
    */
   private simplifyUnrecorded(
     context: Context,
     segments: TimedPosition[][],
-    shared: ReadonlySet<number> | undefined,
     now = Date.now(),
   ): { written: TimedPosition[][]; days: Map<number, number> } {
     const days = new Map<number, number>()
@@ -2536,15 +2566,13 @@ export class SqliteTrackStore implements TrackStore {
     for (const [segment, points] of segments.entries()) {
       for (const [index, point] of points.entries()) {
         const day = dayOf(point.timestamp)
-        if (day > lastDay || shared?.has(day)) continue
+        if (day > lastDay) continue
         let entries = byDay.get(day)
         if (!entries) byDay.set(day, (entries = []))
         entries.push({ segment, index, point })
       }
     }
-    const recorded = this.db.prepare(
-      'SELECT 1 AS found FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? LIMIT 1',
-    )
+    const { recorded } = this.simplifying()
     const dropped = segments.map(() => new Set<number>())
     for (const [day, entries] of byDay) {
       if (recorded.get(context, day * LEVEL_DAY_MS, (day + 1) * LEVEL_DAY_MS)) continue

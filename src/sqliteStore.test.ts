@@ -1618,16 +1618,27 @@ describe('storage simplification', () => {
     store.close()
   })
 
-  it('writes two runs of an import into one day in full, and simplifies them as one', () => {
+  it('writes two runs of an import into one day as simplifying the day leaves them', () => {
     const first = wandering(day0)
     const second = wandering(day0 + 6 * 60 * MINUTE)
+    const recorded = recordedAndSettled(first, second)
     const store = tolerant(0.5)
     store.fillTrack(ctx, [first, second])
-    expect(rows(store)).toHaveLength(first.length + second.length)
+    const written = rows(store)
+    expect(written).toEqual(rows(recorded))
     settle(store)
-    const recorded = recordedAndSettled(first, second)
-    expect(rows(store)).toEqual(rows(recorded))
+    expect(rows(store)).toEqual(written)
     recorded.close()
+    store.close()
+  })
+
+  it('writes an import in full into a day an earlier import wrote', () => {
+    const store = tolerant(0.5)
+    store.fillTrack(ctx, [wandering(day0)])
+    const before = rows(store).length
+    const second = wandering(day0 + 6 * 60 * MINUTE)
+    store.fillTrack(ctx, [second])
+    expect(rows(store)).toHaveLength(before + second.length)
     store.close()
   })
 
