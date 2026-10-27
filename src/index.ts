@@ -874,13 +874,15 @@ export default function ThePlugin(app: App): Plugin {
        * reads the window in one piece; otherwise it is read a day at a time,
        * stepping over the days with nothing, and each day is handed to
        * `onPoints` once thinning has settled it, so a recording of years is
-       * never held whole. Resolves false for a vessel the store does not know.
+       * never held whole, until `cancelled` says the answer is no longer
+       * wanted. Resolves false for a vessel the store does not know.
        */
       const readTrack = async (
         context: string,
         query: TrackQuery,
         pieces: 'whole' | 'days',
         onPoints: (points: StreamedPoint[]) => void | Promise<void>,
+        cancelled: () => boolean = () => false,
       ): Promise<boolean> => {
         const store = tracks!
         const stream = new TrackStream(query.resolution, segmentGap)
@@ -892,7 +894,7 @@ export default function ThePlugin(app: App): Plugin {
           let extent: TimeExtent | undefined | null = await store.timeExtent(context, query.window).catch(() => null)
           if (extent === null) return false
           const last = extent?.last
-          while (extent !== undefined && last !== undefined) {
+          while (extent !== undefined && last !== undefined && !cancelled()) {
             const dayEnd: number = (Math.floor(extent.first / DAY_MS) + 1) * DAY_MS
             const lastDay = dayEnd > last
             await onPoints(
@@ -910,6 +912,7 @@ export default function ThePlugin(app: App): Plugin {
               : await store.timeExtent(context, { from: dayEnd, to: last, inclusiveEnd: true })
           }
         }
+        if (cancelled()) return true
         await onPoints(stream.finish())
         return true
       }
@@ -1034,11 +1037,18 @@ export default function ThePlugin(app: App): Plugin {
             )
             await send(writer.start())
           }
-          readTrack(context, query, 'days', async (points) => {
-            if (closed) throw new Error('The client went away')
-            await begin()
-            await send(writer.write(points))
-          })
+          readTrack(
+            context,
+            query,
+            'days',
+            async (points) => {
+              if (closed) throw new Error('The client went away')
+              await begin()
+              await send(writer.write(points))
+            },
+            // No day more is read for a client that went away.
+            () => closed,
+          )
             .then(async (known) => {
               if (closed) return
               if (!known) {
