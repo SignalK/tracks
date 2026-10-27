@@ -117,6 +117,36 @@ describe('source: sqlite', () => {
     await pluginB.stop()
   })
 
+  // Back-dated and 7 km off, the first fix after the restart is dropped by the
+  // store, but was the glitch filter's first, unchecked reference. The real
+  // fixes after it must not all be rejected as jumps away from it.
+  it('records again one fix after a dropped first fix', async () => {
+    const minute = 60_000
+    const t0 = 1_000_000
+    const self = SELF_CONTEXT as ContextPosition['context']
+    const first = createApp(dir)
+    const pluginA = ThePlugin(first.app)
+    await pluginA.start({ resolution: 0 })
+    first.emit(SELF_CONTEXT, [60, 24], t0)
+    first.emit(SELF_CONTEXT, [60, 24.0005], t0 + minute)
+    first.emit(SELF_CONTEXT, [60, 24.001], t0 + 2 * minute)
+    await pluginA.stop()
+
+    const second = createApp(dir)
+    const pluginB = ThePlugin(second.app)
+    await pluginB.start({ resolution: 0 })
+    second.emit(SELF_CONTEXT, [60, 24.13], t0 + 90_000)
+    second.emit(SELF_CONTEXT, [60, 24.0011], t0 + 3 * minute)
+    second.emit(SELF_CONTEXT, [60, 24.0012], t0 + 3 * minute + 1000)
+    await expect(pluginB.getTracks()?.get(self)).resolves.toEqual([
+      [60, 24],
+      [60, 24.0005],
+      [60, 24.001],
+      [60, 24.0012],
+    ])
+    await pluginB.stop()
+  })
+
   // There is no in-memory fallback any more: a track recorder that forgets
   // everything on restart is not worth starting, so it says why and stops.
   // Every server that can load this plugin provides a data directory.

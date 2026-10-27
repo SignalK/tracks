@@ -13,6 +13,9 @@ const HELSINKI: LatLngTuple = [60.1, 24.9]
 const NEARBY: LatLngTuple = [60.11, 24.9]
 /** Roughly the Gulf of Guinea — the classic null-island-ish glitch. */
 const GLITCH: LatLngTuple = [0, 0]
+/** About eleven metres north of Helsinki: the next fix of a vessel at rest. */
+const JUST_BY: LatLngTuple = [60.1001, 24.9]
+const SECOND = 1000
 
 const filter = (maxSpeedKnots = DEFAULT_MAX_SPEED_KNOTS) => new GlitchFilter({ maxSpeedKnots })
 
@@ -90,6 +93,8 @@ describe('GlitchFilter', () => {
   it('counts rejections per context and in total', () => {
     const f = filter()
     f.accept(SELF, HELSINKI, 0)
+    // Confirmed, so the two glitches agreeing with each other do not replace it.
+    f.accept(SELF, JUST_BY, SECOND)
     f.accept(SELF, GLITCH, MINUTE)
     f.accept(SELF, GLITCH, 2 * MINUTE)
     f.accept(OTHER, HELSINKI, 0)
@@ -122,6 +127,63 @@ describe('GlitchFilter', () => {
     const metresPerMinute = (40 * 1852) / 60
     const degreesNorth = metresPerMinute / 111_320
     expect(f.accept(SELF, [60.1 + degreesNorth, 24.9], MINUTE)).toBe(true)
+  })
+})
+
+// The first fix, and one after a long silence, nothing has checked. Were it a
+// glitch, every real fix after it would look like a jump away from it.
+describe('a reference not yet confirmed', () => {
+  it('gives way when the first fix is a glitch, losing one real fix', () => {
+    const f = filter()
+    f.accept(SELF, GLITCH, 0)
+    expect(f.accept(SELF, HELSINKI, SECOND)).toBe(false)
+    expect(f.accept(SELF, JUST_BY, 2 * SECOND)).toBe(true)
+    expect(f.accept(SELF, HELSINKI, 3 * SECOND)).toBe(true)
+    expect(f.accept(SELF, GLITCH, 4 * SECOND)).toBe(false)
+  })
+
+  it('rejects a glitch after a first fix, which the next fix confirms', () => {
+    const f = filter()
+    f.accept(SELF, HELSINKI, 0)
+    expect(f.accept(SELF, GLITCH, SECOND)).toBe(false)
+    expect(f.accept(SELF, JUST_BY, 2 * SECOND)).toBe(true)
+  })
+
+  it('gives way only to two fixes that agree with each other', () => {
+    const f = filter()
+    f.accept(SELF, GLITCH, 0)
+    expect(f.accept(SELF, HELSINKI, SECOND)).toBe(false)
+    expect(f.accept(SELF, [10, 10], 2 * SECOND)).toBe(false)
+    expect(f.accept(SELF, JUST_BY, 3 * SECOND)).toBe(false)
+    expect(f.accept(SELF, HELSINKI, 4 * SECOND)).toBe(true)
+  })
+
+  it('gives way only to a fix soon after the one it agrees with', () => {
+    const f = filter()
+    f.accept(SELF, GLITCH, 0)
+    expect(f.accept(SELF, HELSINKI, SECOND)).toBe(false)
+    // An hour on, nearly anything agrees with the fix before.
+    expect(f.accept(SELF, NEARBY, 60 * MINUTE)).toBe(false)
+    expect(f.accept(SELF, NEARBY, 60 * MINUTE + SECOND)).toBe(true)
+  })
+
+  it('holds a confirmed reference against a run of glitches', () => {
+    const f = filter()
+    f.accept(SELF, HELSINKI, 0)
+    f.accept(SELF, JUST_BY, SECOND)
+    for (let i = 2; i < 6; i++) expect(f.accept(SELF, GLITCH, i * SECOND)).toBe(false)
+    expect(f.accept(SELF, HELSINKI, 6 * SECOND)).toBe(true)
+  })
+
+  it('takes a fix after a long silence only provisionally', () => {
+    const f = filter()
+    f.accept(SELF, HELSINKI, 0)
+    f.accept(SELF, JUST_BY, SECOND)
+    const later = 30 * 24 * 60 * MINUTE
+    // A month on, the ceiling lets a glitch a hemisphere away through.
+    expect(f.accept(SELF, GLITCH, later)).toBe(true)
+    expect(f.accept(SELF, HELSINKI, later + SECOND)).toBe(false)
+    expect(f.accept(SELF, JUST_BY, later + 2 * SECOND)).toBe(true)
   })
 })
 
