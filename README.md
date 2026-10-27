@@ -168,7 +168,8 @@ but the history import keeps leaving it out for good.
 ### Deleting the whole database
 
 For a store gone wrong past repair, the webapp's **Danger zone** deletes the whole database and
-starts the plugin again on an empty one, as if it had just been installed. That deletes:
+starts the plugin again on an empty one, as if it had just been installed. It works on a database
+that no longer opens as well. That deletes:
 
 - the own vessel's whole recording;
 - every other vessel's track;

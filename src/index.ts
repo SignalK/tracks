@@ -467,8 +467,13 @@ export default function ThePlugin(app: App): Plugin {
   let aisRetentionDays = DEFAULT_AIS_RETENTION_DAYS
   /** The configuration the plugin runs with, while it runs. */
   let startedWith: TracksPluginConfig | undefined
-  /** Whether the whole database is being deleted; see DELETE /database. */
   let resetting = false
+  /**
+   * Counts start() and stop() calls. A delete of the whole database stops the
+   * plugin itself, and the server can stop or restart it meanwhile, on a
+   * configuration save or a disable; the count tells the delete it happened.
+   */
+  let lifecycle = 0
   /**
    * The deleted spans of recorded tracks by context, loaded once and dropped
    * whenever a delete, restore or purge changes them. Read for each day of a
@@ -579,6 +584,7 @@ export default function ThePlugin(app: App): Plugin {
 
   const plugin: Plugin = {
     start: function (config: TracksPluginConfig) {
+      lifecycle++
       startedWith = config
       storageError = undefined
       historyImport = undefined
@@ -831,6 +837,7 @@ export default function ThePlugin(app: App): Plugin {
     },
 
     stop: async function () {
+      lifecycle++
       startedWith = undefined
       onStop.forEach((f) => {
         try {
@@ -1423,19 +1430,34 @@ export default function ThePlugin(app: App): Plugin {
           res.status(400).json({ message: 'Deleting the whole track database needs confirm=DELETE.' })
           return
         }
-        const config = startedWith
-        const dataDir = app.getDataDirPath?.()
-        if (!config || !dataDir || !tracks) {
-          notAvailable(res)
-          return
-        }
+        // Before anything else: the delete's own stop() clears what the
+        // checks below read, so a second request would otherwise be told the
+        // plugin is not running.
         if (resetting) {
           res.status(409).json({ message: 'The track database is being deleted already.' })
           return
         }
+        const config = startedWith
+        const dataDir = app.getDataDirPath?.()
+        // Not `tracks`: a store that will not open is the case this is for.
+        if (!config || !dataDir) {
+          notAvailable(res)
+          return
+        }
         resetting = true
         void (async () => {
-          await plugin.stop()
+          const stopping = plugin.stop()
+          const stopped = lifecycle
+          await stopping
+          if (lifecycle !== stopped) {
+            // The server's restart or stop wins: removing the file under a
+            // store it opened, or starting a plugin it stopped, would leave
+            // two instances or one it does not know about.
+            res
+              .status(409)
+              .json({ message: 'The plugin was restarted or stopped while the delete waited; nothing was deleted.' })
+            return
+          }
           try {
             for (const suffix of ['', '-wal', '-shm']) {
               rmSync(join(dataDir, `tracks.db${suffix}`), { force: true })
@@ -1444,6 +1466,13 @@ export default function ThePlugin(app: App): Plugin {
             // Started again whatever the delete did, so a file that would not
             // go leaves the plugin recording to it rather than stopped.
             await plugin.start(config)
+          }
+          if (!tracks) {
+            app.error('Deleted the track database, but the new one did not open')
+            res.status(500).json({
+              message: 'The track database was deleted, but the plugin could not start again. The server log says why.',
+            })
+            return
           }
           app.debug('Deleted the whole track database on request')
           res.json({ deleted: true })

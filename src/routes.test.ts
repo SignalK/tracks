@@ -1,5 +1,7 @@
+import { rmSync, writeFileSync } from 'node:fs'
 import { get } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { join } from 'node:path'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AsyncTrackStore } from './asyncTrackStore.js'
@@ -835,7 +837,6 @@ describe('GET /plugins/tracks/settings', () => {
   })
 })
 
-// The webapp's danger zone: everything gone, and recording on, on an empty store.
 describe('DELETE /plugins/tracks/database', () => {
   it('refuses without the confirming word, and keeps everything', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
@@ -869,9 +870,105 @@ describe('DELETE /plugins/tracks/database', () => {
     expect((await request(h.app).get('/plugins/tracks/imports').expect(200)).body).toEqual([])
     expect((await request(h.app).get('/plugins/tracks/recycle-bin').expect(200)).body).toEqual([])
 
+    // Started again with the configuration it ran with: at its resolution of
+    // 0 both positions a second apart are kept, where the default keeps one.
+    h.emit(SELF_CONTEXT, [60.3, 24.7], Date.now() - 2000)
+    h.emit(SELF_CONTEXT, [60.30001, 24.7], Date.now() - 1000)
+    const after = await request(h.app).get(`${API}/self/track`).expect(200)
+    expect(after.body.coordinates).toEqual([
+      [
+        [24.7, 60.3],
+        [24.7, 60.30001],
+      ],
+    ])
+  })
+
+  const DELETE_URL = '/plugins/tracks/database?confirm=DELETE'
+
+  /**
+   * Holds every store's close() until `release()`, so that a test can act
+   * while a delete waits for the old store; `then` runs once a held close has
+   * finished, with the old store's files released.
+   */
+  function holdClose(then: () => void = () => {}) {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const close = AsyncTrackStore.prototype.close
+    const spy = vi.spyOn(AsyncTrackStore.prototype, 'close').mockImplementation(async function (this: AsyncTrackStore) {
+      await held
+      await close.call(this)
+      then()
+    })
+    return { release, waiting: () => vi.waitFor(() => expect(spy).toHaveBeenCalled()) }
+  }
+
+  it('deletes a database that will not open, and records on', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    await h.stop()
+    for (const suffix of ['-wal', '-shm']) rmSync(join(h.dataDir, `tracks.db${suffix}`), { force: true })
+    writeFileSync(join(h.dataDir, 'tracks.db'), 'not a database '.repeat(512))
+    await h.restart()
+    expect(h.store()).toBeUndefined()
+
+    await request(h.app).delete(DELETE_URL).expect(200)
+
     h.emit(SELF_CONTEXT, [60.3, 24.7])
     const after = await request(h.app).get(`${API}/self/track`).expect(200)
     expect(after.body.coordinates).toEqual([[[24.7, 60.3]]])
+  })
+
+  it('answers 409 to a second delete while the first waits for the store to close', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    const gate = holdClose()
+    const first = request(h.app)
+      .delete(DELETE_URL)
+      .then((res) => res)
+    await gate.waiting()
+
+    const second = await request(h.app).delete(DELETE_URL).expect(409)
+    expect(second.body.message).toBe('The track database is being deleted already.')
+
+    gate.release()
+    expect((await first).status).toBe(200)
+  })
+
+  it('deletes nothing when the server restarts the plugin while the delete waits', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    const gate = holdClose()
+    const answer = request(h.app)
+      .delete(DELETE_URL)
+      .then((res) => res)
+    await gate.waiting()
+
+    // A configuration save: the server stops the plugin and starts it again.
+    await h.stop()
+    const restarted = h.restart()
+    gate.release()
+    await restarted
+
+    const res = await answer
+    expect(res.status).toBe(409)
+    expect(res.body.message).toBe('The plugin was restarted or stopped while the delete waited; nothing was deleted.')
+    const kept = await request(h.app).get(`${API}/self/track`).expect(200)
+    expect(kept.body.coordinates).toEqual([[[24.9, 60.1]]])
+  })
+
+  it('says so when the plugin does not start again after the delete', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    // With its directory gone, the new store cannot be created.
+    const gate = holdClose(() => rmSync(h.dataDir, { recursive: true, force: true }))
+    const answer = request(h.app)
+      .delete(DELETE_URL)
+      .then((res) => res)
+    await gate.waiting()
+    gate.release()
+
+    const res = await answer
+    expect(res.status).toBe(500)
+    expect(res.body.message).toBe(
+      'The track database was deleted, but the plugin could not start again. The server log says why.',
+    )
+    expect(h.store()).toBeUndefined()
   })
 })
 
