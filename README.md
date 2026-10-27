@@ -257,7 +257,9 @@ wherever the recording had one, so a straight leg never looks like a pause. Half
 GPS's own noise. At that tolerance, a day recorded every second keeps 3 to 5 % of its positions.
 
 It applies to every vessel, and to what an import writes into the recording: the history import,
-and a GPX upload of the own vessel. Imported tracks kept on their own are left as they are.
+and a GPX upload of the own vessel. Imported tracks kept on their own are left as they are. An
+import into a day more than a day old that the recording has nothing of is simplified before it is
+written, so an SD card is not written to twice for the positions deleted again.
 
 A track drawn at the storage tolerance or more, which is what a chart asks for, comes out the same
 as it would from every position. A track read without one has fewer points.
