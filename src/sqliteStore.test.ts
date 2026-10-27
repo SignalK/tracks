@@ -1592,6 +1592,21 @@ describe('storage simplification', () => {
       store.close()
     })
 
+    // The restore's span reaches over the day, but none of its positions
+    // lie in it.
+    it('is left so by a change to the days either side of it', () => {
+      const store = tolerant(0.5)
+      straight(store, day0)
+      straight(store, day0 + 2 * DAY)
+      const { id } = store.binRecorded(ctx, day0, day0 + 3 * DAY, later, false)
+      store.fillTrack(ctx, [wandering(day0 + DAY)])
+      const written = count(store, day0 + DAY, day0 + 2 * DAY)
+      store.restoreFromBin(id!)
+      settle(store)
+      expect(count(store, day0 + DAY, day0 + 2 * DAY)).toBe(written)
+      store.close()
+    })
+
     it('is written in full while the store keeps every position', () => {
       const points = wandering(day0)
       const store = tolerant(0)

@@ -2067,7 +2067,14 @@ export class SqliteTrackStore implements TrackStore {
         `INSERT INTO simplified_days (context, day, tolerance, positions) VALUES (?, ?, ?, ?)
          ON CONFLICT(context, day) DO UPDATE SET tolerance = excluded.tolerance, positions = excluded.positions`,
       ),
-      unwrite: this.db.prepare('DELETE FROM simplified_days WHERE context = ? AND day >= ? AND day <= ?'),
+      // Only a day whose count the change moved: a change is a write or a
+      // delete, never both, and its span can reach over days it left alone.
+      unwrite: this.db.prepare(
+        `DELETE FROM simplified_days WHERE context = ? AND day >= ? AND day <= ? AND positions !=
+           (SELECT count(*) FROM positions p WHERE p.context = simplified_days.context
+              AND p.timestamp >= simplified_days.day * ${LEVEL_DAY_MS}
+              AND p.timestamp < (simplified_days.day + 1) * ${LEVEL_DAY_MS})`,
+      ),
       recorded: this.db.prepare(
         'SELECT 1 AS found FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? LIMIT 1',
       ),
@@ -2548,8 +2555,8 @@ export class SqliteTrackStore implements TrackStore {
    *
    * A day the recording has positions of is written in full: simplifying the
    * import's stretches alone keeps their ends, and judges a point by the
-   * chord its stretch draws rather than the one the whole day does. So is a
-   * day an earlier write of the same import reached, for the same reason.
+   * chord its stretch draws rather than the one the whole day does. An
+   * earlier import's positions count as the recording's.
    */
   private simplifyUnrecorded(
     context: Context,
