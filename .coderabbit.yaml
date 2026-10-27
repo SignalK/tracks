@@ -5,6 +5,12 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+  tools:
+    # CodeRabbit runs ESLint without installing devDependencies, so it cannot
+    # resolve tsconfig.json's `@tsconfig/node24` base and parses no TypeScript
+    # file. CI runs `npm run lint` on every pull request instead.
+    eslint:
+      enabled: false
   high_level_summary_instructions: |
     Write all summaries in present tense.
     Describe what the code does, not what it did.
