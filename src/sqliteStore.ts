@@ -488,7 +488,9 @@ export class SqliteTrackStore implements TrackStore {
   /** A day simplifyStored() stopped inside, to go on from `next`: a pending one, or one of the pass. */
   private simplifyPartial: { context: Context; day: number; next: number; pending: boolean } | undefined
   /** See simplifying(). */
-  private simplifyStatements: Record<'select' | 'held' | 'remove' | 'done' | 'frontier', StatementSync> | undefined
+  private simplifyStatements:
+    | Record<'select' | 'held' | 'remove' | 'written' | 'unwritten' | 'count' | 'done' | 'frontier', StatementSync>
+    | undefined
   /** See refining(). */
   private refineStatements:
     | Record<'select' | 'copy' | 'visit' | 'unstale' | 'frontier' | 'deleteSignificant' | 'deleteVisits', StatementSync>
@@ -674,6 +676,16 @@ export class SqliteTrackStore implements TrackStore {
       CREATE TABLE IF NOT EXISTS simplify_pending (
         context     TEXT    NOT NULL,
         day         INTEGER NOT NULL,
+        PRIMARY KEY (context, day)
+      ) WITHOUT ROWID;
+      -- Days an import wrote simplified already (see simplifyUnrecorded()),
+      -- with the tolerance and how many positions they held then, which
+      -- simplifyStored() passes over rather than simplifies again.
+      CREATE TABLE IF NOT EXISTS simplified_days (
+        context     TEXT    NOT NULL,
+        day         INTEGER NOT NULL,
+        tolerance   REAL    NOT NULL,
+        positions   INTEGER NOT NULL,
         PRIMARY KEY (context, day)
       ) WITHOUT ROWID;
       -- How far the import of a vessel's track from a history provider got,
@@ -1923,6 +1935,24 @@ export class SqliteTrackStore implements TrackStore {
     const statements = this.simplifying()
     const dayStart = day * LEVEL_DAY_MS
     const dayEnd = dayStart + LEVEL_DAY_MS
+    if (from === Number.NEGATIVE_INFINITY) {
+      const written = statements.written.get(context, day) as { tolerance: number; positions: number } | undefined
+      if (written) {
+        statements.unwritten.run(context, day)
+        // Simplifying it again would not give what simplifying every position
+        // did: its pieces are cut where the import's were, not where what is
+        // left would cut them. Unless a fix came in since without
+        // invalidateLevels(), as a live one dated into a day not refined yet
+        // does.
+        if (
+          written.tolerance >= this.storageTolerance &&
+          (statements.count.get(context, dayStart, dayEnd) as { n: number }).n === written.positions
+        ) {
+          this.simplifiedDayDone(context, day, pending)
+          return budget
+        }
+      }
+    }
     const read = (limit: number) =>
       statements.select.all(context, Math.max(from, dayStart), dayEnd, limit) as unknown as (Omit<
         PositionRow,
@@ -1964,16 +1994,21 @@ export class SqliteTrackStore implements TrackStore {
         break
       }
     }
-    if (stopped) {
-      return budget
+    if (!stopped) {
+      this.simplifiedDayDone(context, day, pending)
     }
+    return budget
+  }
+
+  /** Take a day simplifyDay() finished off simplify_pending, or move the frontier to it. */
+  private simplifiedDayDone(context: Context, day: number, pending: boolean): void {
+    const statements = this.simplifying()
     if (pending) {
       statements.done.run(context, day)
     } else {
       statements.frontier.run(context, day, this.storageTolerance)
       this.simplifyFrontier.set(context, { through: day, tolerance: this.storageTolerance })
     }
-    return budget
   }
 
   /** simplifyDay()'s statements, prepared once. */
@@ -1986,6 +2021,11 @@ export class SqliteTrackStore implements TrackStore {
         `SELECT position FROM significant WHERE context = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
       ),
       remove: this.db.prepare('DELETE FROM positions WHERE rowid = ?'),
+      written: this.db.prepare('SELECT tolerance, positions FROM simplified_days WHERE context = ? AND day = ?'),
+      unwritten: this.db.prepare('DELETE FROM simplified_days WHERE context = ? AND day = ?'),
+      count: this.db.prepare(
+        'SELECT count(*) AS n FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ?',
+      ),
       done: this.db.prepare('DELETE FROM simplify_pending WHERE context = ? AND day = ?'),
       frontier: this.db.prepare(
         `INSERT INTO simplify_frontier (context, through, tolerance) VALUES (?, ?, ?)
@@ -2030,6 +2070,10 @@ export class SqliteTrackStore implements TrackStore {
    * without it; see there.
    */
   private invalidateLevels(context: Context, from: number, to: number): void {
+    // A day an import wrote simplified is so no longer once it changes.
+    this.db
+      .prepare('DELETE FROM simplified_days WHERE context = ? AND day >= ? AND day <= ?')
+      .run(context, dayOf(from), dayOf(to))
     const through = this.levelFrontier.get(context)
     // A day refined in part starts over when the change reaches it. One the
     // pass is in does too when the change reaches any day between it and the
@@ -2101,6 +2145,7 @@ export class SqliteTrackStore implements TrackStore {
     this.db.prepare('DELETE FROM level_stale WHERE context = ?').run(context)
     this.db.prepare('DELETE FROM simplify_frontier WHERE context = ?').run(context)
     this.db.prepare('DELETE FROM simplify_pending WHERE context = ?').run(context)
+    this.db.prepare('DELETE FROM simplified_days WHERE context = ?').run(context)
     this.levelFrontier.delete(context)
     this.simplifyFrontier.delete(context)
     this.refinedThrough = undefined
@@ -2393,6 +2438,16 @@ export class SqliteTrackStore implements TrackStore {
     const recorded = this.db.prepare(
       'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?',
     )
+    // A day two runs write into is written in full: simplified as the first
+    // is written, it would not give what simplifying both did.
+    const seen = new Set<number>()
+    const shared = new Set<number>()
+    for (const run of runs) {
+      for (const day of new Set(run.map(({ timestamp }) => dayOf(timestamp)))) {
+        if (seen.has(day)) shared.add(day)
+        seen.add(day)
+      }
+    }
     let overlapping = 0
     for (const run of runs) {
       // Written once the whole run is judged, so it never counts against itself.
@@ -2410,16 +2465,17 @@ export class SqliteTrackStore implements TrackStore {
         kept.push(...judged.runs)
         overlapping += judged.overlapping
       }
-      this.fill(context, kept)
+      this.fill(context, kept, shared)
     }
     return overlapping
   }
 
   /**
-   * Write positions into a vessel's recording as they come, past the
-   * throttle, and keep them as imported rather than thin them as detail.
+   * Write positions into a vessel's recording past the throttle, and keep
+   * them as imported rather than thin them as detail. What
+   * simplifyUnrecorded() leaves out of them is not written.
    */
-  private fill(context: Context, segments: TimedPosition[][]): void {
+  private fill(context: Context, segments: TimedPosition[][], shared?: ReadonlySet<number>): void {
     for (const points of segments) {
       const first = points[0]
       const last = points.at(-1)
@@ -2429,8 +2485,9 @@ export class SqliteTrackStore implements TrackStore {
     // The next live fix would otherwise open a detail span from the last one
     // recorded before the import, reaching over the imported points.
     this.lastStored.delete(context)
-    for (const points of segments) {
-      for (const { position, timestamp } of points) {
+    const { written, days } = this.simplifyUnrecorded(context, segments, shared)
+    for (const [s, points] of segments.entries()) {
+      for (const { position, timestamp } of written[s]!) {
         this.store(context, position, timestamp)
       }
       const first = points[0]
@@ -2439,6 +2496,83 @@ export class SqliteTrackStore implements TrackStore {
         this.invalidateLevels(context, first.timestamp, last.timestamp)
       }
     }
+    // After invalidateLevels(), which takes a day changed off simplified_days.
+    const mark = this.db.prepare(
+      `INSERT INTO simplified_days (context, day, tolerance, positions) VALUES (?, ?, ?, ?)
+       ON CONFLICT(context, day) DO UPDATE SET tolerance = excluded.tolerance, positions = excluded.positions`,
+    )
+    for (const [day, positions] of days) {
+      mark.run(context, day, this.storageTolerance, positions)
+    }
+  }
+
+  /**
+   * The points of an import to write, segment by segment: on each day that
+   * simplifyStored() will go over, that the recording holds nothing of, and
+   * that no other write of the same import reaches (`shared`), only what
+   * simplifyStored() would leave of it. Writing every position and deleting
+   * most of them a day later costs an SD card twice the writes, and deleting
+   * is the dearer half: the location indexes put each deleted row on a page
+   * of its own. Resolves the days written so, too, with how many positions
+   * each keeps.
+   *
+   * A day the recording has positions of is written in full: simplifying the
+   * import's stretches alone keeps their ends, and judges a point by the
+   * chord its stretch draws rather than the one the whole day does.
+   */
+  private simplifyUnrecorded(
+    context: Context,
+    segments: TimedPosition[][],
+    shared: ReadonlySet<number> | undefined,
+    now = Date.now(),
+  ): { written: TimedPosition[][]; days: Map<number, number> } {
+    const days = new Map<number, number>()
+    if (!(this.storageTolerance > 0)) {
+      return { written: segments, days }
+    }
+    // As refineLevels() reckons the last day it refines.
+    const lastDay = dayOf(now - DETAIL_KEEP) - 1
+    const byDay = new Map<number, { segment: number; index: number; point: TimedPosition }[]>()
+    for (const [segment, points] of segments.entries()) {
+      for (const [index, point] of points.entries()) {
+        const day = dayOf(point.timestamp)
+        if (day > lastDay || shared?.has(day)) continue
+        let entries = byDay.get(day)
+        if (!entries) byDay.set(day, (entries = []))
+        entries.push({ segment, index, point })
+      }
+    }
+    const recorded = this.db.prepare(
+      'SELECT 1 AS found FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? LIMIT 1',
+    )
+    const dropped = segments.map(() => new Set<number>())
+    for (const [day, entries] of byDay) {
+      if (recorded.get(context, day * LEVEL_DAY_MS, (day + 1) * LEVEL_DAY_MS)) continue
+      // In the order refineDay() reads them: by time, and as written, which is the rowid's order.
+      entries.sort((a, b) => a.point.timestamp - b.point.timestamp)
+      const points = entries.map(({ point }) => point)
+      const cuts = this.piecesOf(points)
+      let kept = 0
+      for (let p = 1; p < cuts.length; p++) {
+        const piece = points.slice(cuts[p - 1], cuts[p])
+        const values = significance(piece)
+        const keep = storedKeep(piece, values, this.storageTolerance)
+        for (const [i, value] of values.entries()) {
+          // What a level holds simplifyStored() keeps as well.
+          if (keep[i] || levelOf(value) >= MIN_READ_LEVEL) {
+            kept++
+          } else {
+            const { segment, index } = entries[cuts[p - 1]! + i]!
+            dropped[segment]!.add(index)
+          }
+        }
+      }
+      days.set(day, kept)
+    }
+    const written = segments.map((points, s) =>
+      dropped[s]!.size === 0 ? points : points.filter((_, i) => !dropped[s]!.has(i)),
+    )
+    return { written, days }
   }
 
   /** How far the import of a vessel's track from a history provider got, or undefined before one started. */

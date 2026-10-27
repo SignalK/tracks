@@ -13,8 +13,10 @@ const from = startOfDay(Date.now()) - 3 * DAY_MS + 10 * HOUR
 const rows = Array.from({ length: 7200 }, (_, i) => [iso(from + i * 1000), [24 + i * 1e-5, 60]])
 const history = { rows, aggregatesFirst: true }
 
+// Every position kept, so a test can tell which ones the import filled; see
+// the one test below that simplifies.
 const withHarness = async (run: (h: TestHarness) => Promise<void>, options?: HarnessOptions) => {
-  const h = createHarness(options)
+  const h = createHarness({ ...options, config: { storageTolerance: 0, ...options?.config } })
   try {
     await run(h)
   } finally {
@@ -65,6 +67,21 @@ describe('the history import route', () => {
         expect(await storedTimes(h)).toEqual(rows.map(([time]) => Date.parse(String(time))))
       },
       { history },
+    )
+  })
+
+  it('writes a day the recording has nothing of as simplifying it leaves it, by default', async () => {
+    await withHarness(
+      async (h) => {
+        await request(h.app).post('/plugins/tracks/history-import')
+        expect(await finished(h)).toMatchObject({ filled: 7200 })
+        const times = await storedTimes(h)
+        expect(times.length).toBeLessThan(7200 / 30)
+        expect(times[0]).toBe(from)
+        expect(times.at(-1)).toBe(from + 7199 * 1000)
+        expect(Math.max(...times.slice(1).map((time, i) => time - times[i]!))).toBeLessThanOrEqual(60_000)
+      },
+      { history, config: { storageTolerance: 0.5 } },
     )
   })
 

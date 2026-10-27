@@ -21,7 +21,8 @@ Once a day is more than a day old, the store also simplifies it, to half a
 metre unless the plugin's settings give another tolerance, for every vessel and
 for what the history import wrote: a position within that distance of the line
 its neighbours draw is deleted, keeping one a minute (see the README's
-"Simplifying stored tracks"). This is for speed, and it cannot be undone. To
+"Simplifying stored tracks"). An imported day the recording has nothing of
+is simplified that way as it is written. This is for speed, and it cannot be undone. To
 keep every position, archive a copy of your own: a GPX export, a backup of
 `tracks.db`, or the history provider's own record.
 

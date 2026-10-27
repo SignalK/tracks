@@ -1524,6 +1524,113 @@ describe('storage simplification', () => {
     store.close()
   })
 
+  /** Three hours at one fix a second from `start`, as `wander` draws them: more than one piece of refining. */
+  const wandering = (start: number): TimedPosition[] =>
+    Array.from({ length: 3 * 3600 }, (_, i) => ({
+      position: [60 + Math.sin(i / 400) * 0.002 + noise(i) * 0.00002, 24 + i * 0.000005 + noise(i + 1) * 0.00002],
+      timestamp: start + i * 1000,
+    }))
+  const rows = (store: SqliteTrackStore, context: Context = ctx) =>
+    store['db']
+      .prepare('SELECT timestamp, lat, lon FROM positions WHERE context = ? ORDER BY timestamp, rowid')
+      .all(context)
+  const count = (store: SqliteTrackStore, from: number, to: number) =>
+    (
+      store['db']
+        .prepare('SELECT count(*) AS n FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ?')
+        .get(ctx, from, to) as { n: number }
+    ).n
+  const recordedAndSettled = (...runs: TimedPosition[][]) => {
+    const store = tolerant(0.5)
+    for (const { position, timestamp } of runs.flat()) {
+      store.newPosition(ctx, position, timestamp)
+    }
+    settle(store)
+    return store
+  }
+
+  describe('an import into a day the recording has none of', () => {
+    const writers: [string, (store: SqliteTrackStore, points: TimedPosition[]) => void][] = [
+      ['fillTrack', (store, points) => store.fillTrack(ctx, [points])],
+      ['recordTrack', (store, points) => store.recordTrack(ctx, [points], later, false)],
+      [
+        'saveHistoryImport',
+        (store, points) => store.saveHistoryImport({ context: ctx, startedAt: later, filled: points.length }, [points]),
+      ],
+    ]
+    it.each(writers)('is written by %s as simplifying the day leaves it, and left so', (_, write) => {
+      const points = wandering(day0)
+      const recorded = recordedAndSettled(points)
+      const store = tolerant(0.5)
+      write(store, points)
+      const written = rows(store)
+      expect(written).toEqual(rows(recorded))
+      expect(written.length).toBeLessThan(points.length)
+      // Simplifying it again would cut its pieces elsewhere and drop their ends.
+      settle(store)
+      expect(rows(store)).toEqual(written)
+      recorded.close()
+      store.close()
+    })
+
+    it('counts every position it filled, written or not', () => {
+      const points = wandering(day0)
+      const store = tolerant(0.5)
+      expect(store.saveHistoryImport({ context: ctx, startedAt: later, filled: points.length }, [points])).toBe(
+        points.length,
+      )
+      store.close()
+    })
+
+    it('is simplified again once a fix comes into the day', () => {
+      const store = tolerant(0.5)
+      store.fillTrack(ctx, [wandering(day0)])
+      // Into a day not refined yet, which does not send it back.
+      straight(store, day0 + 4 * 60 * MINUTE)
+      settle(store)
+      expect(count(store, day0 + 4 * 60 * MINUTE, day0 + 5 * 60 * MINUTE)).toBe(61)
+      store.close()
+    })
+
+    it('is written in full while the store keeps every position', () => {
+      const points = wandering(day0)
+      const store = tolerant(0)
+      store.fillTrack(ctx, [points])
+      expect(rows(store)).toHaveLength(points.length)
+      store.close()
+    })
+  })
+
+  it('writes an import in full into a day the recording has positions of', () => {
+    const store = tolerant(0.5)
+    straight(store, day0)
+    const points = wandering(day0 + 2 * 60 * MINUTE)
+    store.fillTrack(ctx, [points])
+    expect(rows(store)).toHaveLength(3600 + points.length)
+    store.close()
+  })
+
+  it('writes an import in full into a day that ended less than a day ago', () => {
+    const store = tolerant(0.5)
+    const points = wandering(Date.now() - 4 * 60 * MINUTE)
+    store.fillTrack(ctx, [points])
+    expect(rows(store)).toHaveLength(points.length)
+    store.close()
+  })
+
+  it('writes two runs of an import into one day in full, and simplifies them as one', () => {
+    const first = wandering(day0)
+    const second = wandering(day0 + 6 * 60 * MINUTE)
+    const store = tolerant(0.5)
+    store.fillTrack(ctx, [first, second])
+    expect(rows(store)).toHaveLength(first.length + second.length)
+    settle(store)
+    const recorded = recordedAndSettled(first, second)
+    expect(rows(store)).toEqual(rows(recorded))
+    recorded.close()
+    store.close()
+  })
+
   it('simplifies a day again once a change brings positions into it', async () => {
     const store = tolerant(0.5)
     straight(store, day0)
