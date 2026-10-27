@@ -95,6 +95,14 @@ h2 {
   gap: 0.5rem 1rem;
 }
 
+/* A file's tracks, one to a line, across the whole form. */
+#import-tracks {
+  display: grid;
+  gap: 0.25rem;
+  flex-basis: 100%;
+  margin: 0;
+}
+
 #bin-status,
 #import-status,
 #history-status,

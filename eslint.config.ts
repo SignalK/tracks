@@ -28,6 +28,7 @@ export default tseslint.config(
       // projectService would otherwise look for these in tsconfig and fail.
       parserOptions: { projectService: false, project: false },
       globals: {
+        AbortController: 'readonly',
         AbortSignal: 'readonly',
         clearInterval: 'readonly',
         clearTimeout: 'readonly',
@@ -35,10 +36,12 @@ export default tseslint.config(
         console: 'readonly',
         CustomEvent: 'readonly',
         document: 'readonly',
+        DOMException: 'readonly',
         fetch: 'readonly',
         location: 'readonly',
         setInterval: 'readonly',
         setTimeout: 'readonly',
+        TextDecoder: 'readonly',
         URL: 'readonly',
         URLSearchParams: 'readonly',
       },
