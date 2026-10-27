@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { fromGpx, toGpx } from './gpx.js'
-import type { GpxTrack } from './gpx.js'
+import { fromGpx, GpxTrackWriter, toGpx } from './gpx.js'
+import type { GpxExportTrack, GpxPoint, GpxTrack } from './gpx.js'
 import type { TimedPosition } from './types.js'
 
 const at = (lat: number, lng: number, timestamp = 0): TimedPosition => ({ position: [lat, lng], timestamp })
@@ -118,6 +118,45 @@ describe('toGpx', () => {
   it('omits the extensions block when there is no context', () => {
     expect(toGpx([track()])).not.toContain('<extensions>')
   })
+})
+
+// The GPX export writes a long track as it reads it; the document must be the
+// one toGpx() writes for the same points.
+describe('GpxTrackWriter', () => {
+  const now = new Date('2026-10-27T00:00:00Z')
+  const at = (lat: number, lon: number, timestamp?: number): GpxPoint =>
+    timestamp === undefined ? { position: [lat, lon] } : { position: [lat, lon], timestamp }
+  const tracks: GpxExportTrack[] = [
+    {
+      name: 'Own Ship',
+      context: 'vessels.urn:mrn:imo:mmsi:123456789',
+      segments: [[at(60, 24, 1000), at(60.1, 24.1, 2000)], [at(60.2, 24.2, 3000)]],
+    },
+    {
+      // Points out of range are left out, and so is a segment of nothing else.
+      name: 'Glitches & <odd> names',
+      segments: [[at(91, 0, 1000), at(60, 24, 2000)], [at(0, 181, 3000)], [at(60, 24.1), at(-91, 0)]],
+    },
+    { name: 'Nothing in range', context: 'vessels.x', segments: [[at(91, 0, 1000)], [at(0, 200, 2000)]] },
+    { name: 'No points', segments: [] },
+  ]
+  const write = (track: GpxExportTrack, size: number): string => {
+    const writer = new GpxTrackWriter(track, now)
+    const points = track.segments.flatMap((segment) => segment.map((point, i) => ({ point, starts: i === 0 })))
+    const pieces = [writer.start()]
+    for (let i = 0; i < points.length; i += size) pieces.push(writer.write(points.slice(i, i + size)))
+    pieces.push(writer.end())
+    return pieces.join('')
+  }
+
+  it.each(tracks.map((track) => [track.name, track] as const))(
+    'writes %s as toGpx() does, in any pieces',
+    (_name, track) => {
+      for (const size of [1, 2, 100]) {
+        expect(write(track, size)).toBe(toGpx([track], now))
+      }
+    },
+  )
 })
 
 describe('fromGpx', () => {

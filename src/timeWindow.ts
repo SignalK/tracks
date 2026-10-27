@@ -288,6 +288,15 @@ export class Thinner {
     this.previous = point
   }
 
+  /**
+   * The points kept so far, handed over once there are more than two: until
+   * then the stretch may end short enough to be returned as given. `finish()`
+   * returns the rest.
+   */
+  take(): TimedPosition[] {
+    return this.count > 2 ? this.kept.splice(0) : []
+  }
+
   /** The points kept, the last one included whether or not its spacing allowed it. */
   finish(): TimedPosition[] {
     if (this.count <= 2) {
@@ -369,25 +378,91 @@ export function thinToBudget(
  * distinguish "no track" from "a track with no points".
  */
 export function segment(points: TimedPosition[], gap: number | undefined): TimedPosition[][] {
-  if (points.length === 0) {
-    return []
-  }
-  if (!gap || gap <= 0) {
-    return splitAtBreaks(points)
-  }
+  const segmenter = new Segmenter(gap)
   const segments: TimedPosition[][] = []
-  let current: TimedPosition[] = []
-  let previous: TimedPosition | undefined
   for (const point of points) {
-    if (previous !== undefined && (point.breakBefore || pauseBetween(previous, point) > gap)) {
-      segments.push(current)
-      current = []
+    if (segmenter.starts(point)) {
+      segments.push([])
     }
-    current.push(point)
-    previous = point
-  }
-  if (current.length > 0) {
-    segments.push(current)
+    segments.at(-1)!.push(point)
   }
   return segments
+}
+
+/**
+ * Where `segment()` starts a segment, judged a point at a time, so a track
+ * read in pieces splits where the whole of it would. `segment()` runs through
+ * this too.
+ */
+export class Segmenter {
+  private previous: TimedPosition | undefined
+
+  constructor(private readonly gap: number | undefined) {}
+
+  /** Whether this point, the next in time, starts a segment; the first one does. */
+  starts(point: TimedPosition): boolean {
+    const previous = this.previous
+    this.previous = point
+    if (previous === undefined) {
+      return true
+    }
+    return point.breakBefore === true || (!!this.gap && this.gap > 0 && pauseBetween(previous, point) > this.gap)
+  }
+}
+
+/** A point of a track as `TrackStream` hands it on, and whether it starts a segment. */
+export interface StreamedPoint {
+  point: TimedPosition
+  starts: boolean
+}
+
+/**
+ * `segment(thin(points, resolution), gap)`, fed the points a piece at a time
+ * in time order, handing back the points as soon as thinning has settled
+ * them. A long track can then be read and written a day at a time without
+ * holding all of it; one read in a single piece comes out exactly as the
+ * whole would.
+ */
+export class TrackStream {
+  private readonly segmenter: Segmenter
+  private thinner: Thinner | undefined
+
+  constructor(
+    private readonly resolution: number | undefined,
+    gap: number | undefined,
+  ) {
+    this.segmenter = new Segmenter(gap)
+  }
+
+  push(points: TimedPosition[]): StreamedPoint[] {
+    if (!this.resolution) {
+      return this.mark(points)
+    }
+    const settled: TimedPosition[] = []
+    for (const point of points) {
+      // Each stretch of a clipped track is thinned on its own, as thin() does.
+      if (point.breakBefore && this.thinner) {
+        for (const point of this.thinner.finish()) settled.push(point)
+        this.thinner = undefined
+      }
+      this.thinner ??= new Thinner(this.resolution)
+      this.thinner.push(point)
+    }
+    if (this.thinner) {
+      // A loop, not a spread: a piece can keep more points than a call takes arguments.
+      for (const point of this.thinner.take()) settled.push(point)
+    }
+    return this.mark(settled)
+  }
+
+  /** What thinning held back for the end of the track. */
+  finish(): StreamedPoint[] {
+    const rest = this.thinner?.finish() ?? []
+    this.thinner = undefined
+    return this.mark(rest)
+  }
+
+  private mark(points: TimedPosition[]): StreamedPoint[] {
+    return points.map((point) => ({ point, starts: this.segmenter.starts(point) }))
+  }
 }

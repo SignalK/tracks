@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { parseDuration, parseTrackQuery, segment, thin, Thinner, thinToBudget, TimeWindowError } from './timeWindow.js'
+import {
+  parseDuration,
+  parseTrackQuery,
+  segment,
+  thin,
+  Thinner,
+  thinToBudget,
+  TimeWindowError,
+  TrackStream,
+} from './timeWindow.js'
+import type { StreamedPoint } from './timeWindow.js'
 import type { TimedPosition } from './types.js'
 
 const MINUTE = 60 * 1000
@@ -356,5 +366,81 @@ describe('segmenting a thinned track', () => {
         }
       }
     }
+  })
+})
+
+// The GPX export reads a long track a day at a time through TrackStream; the
+// JSON route reads it in one piece. The two must answer a query alike.
+describe('TrackStream', () => {
+  // Seeded, so a failure reproduces.
+  let seed = 271
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) % 2 ** 31
+    return seed / 2 ** 31
+  }
+  /** Fixes seconds to minutes apart, now and then a stop, and now and then a stretch read apart. */
+  const recorded = (): TimedPosition[] => {
+    const points: TimedPosition[] = []
+    let t = 0
+    for (let i = 0, n = Math.floor(random() * 200); i < n; i++) {
+      t += random() < 0.05 ? (20 + random() * 40) * MINUTE : 1000 + Math.floor(random() * 90_000)
+      points.push({ position: [60 + i * 1e-4, 24], timestamp: t, ...(random() < 0.03 ? { breakBefore: true } : {}) })
+    }
+    return points
+  }
+  const streamed = (
+    points: TimedPosition[],
+    resolution: number | undefined,
+    gap: number | undefined,
+    cut: () => number,
+  ) => {
+    const stream = new TrackStream(resolution, gap)
+    const segments: TimedPosition[][] = []
+    const take = (out: StreamedPoint[]) => {
+      for (const { point, starts } of out) {
+        if (starts) segments.push([])
+        segments.at(-1)!.push(point)
+      }
+    }
+    for (let i = 0; i < points.length;) {
+      const n = Math.max(1, cut())
+      take(stream.push(points.slice(i, i + n)))
+      i += n
+    }
+    take(stream.finish())
+    return segments
+  }
+
+  it('comes out as segment(thin()) does, in whatever pieces it is fed', () => {
+    for (let run = 0; run < 100; run++) {
+      const points = recorded()
+      for (const resolution of [undefined, 1000, 30_000, 5 * MINUTE]) {
+        for (const gap of [undefined, 10 * MINUTE]) {
+          const whole = segment(thin(points, resolution), gap)
+          for (const cut of [() => points.length, () => 1, () => Math.floor(random() * 20)]) {
+            expect(streamed(points, resolution, gap, cut)).toEqual(whole)
+          }
+        }
+      }
+    }
+  })
+
+  // Read in one piece, months of a recording keep hundreds of thousands of
+  // points: more than a call can take as arguments.
+  it('takes a piece of hundreds of thousands of points', () => {
+    const points = Array.from({ length: 300_000 }, (_, i): TimedPosition => ({
+      position: [60, 24],
+      timestamp: i * 1000,
+    }))
+    const stream = new TrackStream(1000, 10 * MINUTE)
+
+    expect(stream.push(points).length + stream.finish().length).toBe(points.length)
+  })
+
+  it('hands points on before the track ends', () => {
+    const stream = new TrackStream(30_000, 10 * MINUTE)
+    const points = Array.from({ length: 100 }, (_, i): TimedPosition => ({ position: [60, 24], timestamp: i * 10_000 }))
+
+    expect(stream.push(points.slice(0, 50)).length).toBeGreaterThan(10)
   })
 })

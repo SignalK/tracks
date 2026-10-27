@@ -12,6 +12,7 @@ export type StoreMethod =
   | 'getFilteredTracks'
   | 'getFilteredTimedTracks'
   | 'summarize'
+  | 'timeExtent'
   | 'storeImport'
   | 'getImport'
   | 'findImports'

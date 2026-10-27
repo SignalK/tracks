@@ -33,6 +33,7 @@ import type {
   RestoreResult,
   TimedPosition,
   TimedTrackCollection,
+  TimeExtent,
   TimeWindow,
   TrackCollection,
   TrackParams,
@@ -922,6 +923,27 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     return Promise.resolve(thinner ? thinner.finish() : points)
+  }
+
+  timeExtent(context: Context, window?: TimeWindow): Promise<TimeExtent | undefined> {
+    if (!this.knows(context)) {
+      return Promise.reject(new Error(`No track for ${context}`))
+    }
+    // The end as getTimed() reads it, so the two agree on what lies inside.
+    const end = !window || window.inclusiveEnd === true ? '<=' : '<'
+    // Two seeks on the (context, timestamp) index, rather than MIN and MAX in
+    // one statement, which reads the whole window.
+    const at = (order: 'ASC' | 'DESC') =>
+      this.db
+        .prepare(
+          `SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp ${end} ?
+           ORDER BY timestamp ${order} LIMIT 1`,
+        )
+        .get(context, window?.from ?? Number.NEGATIVE_INFINITY, window?.to ?? Number.POSITIVE_INFINITY) as
+        { timestamp: number } | undefined
+    const first = at('ASC')
+    const last = at('DESC')
+    return Promise.resolve(first && last ? { first: first.timestamp, last: last.timestamp } : undefined)
   }
 
   /**

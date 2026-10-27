@@ -11,6 +11,7 @@ import type {
   RestoreResult,
   TimedPosition,
   TimedTrackCollection,
+  TimeExtent,
   TimeWindow,
   TrackCollection,
   TrackParams,
@@ -150,6 +151,14 @@ export interface TrackStore {
    * caller without it reads the points and summarises them itself.
    */
   summarize?(contexts: Context[] | undefined, window?: TimeWindow): TrackSummary[] | Promise<TrackSummary[]>
+
+  /**
+   * The times of a context's first and last position in `window`, or undefined
+   * when it has none there, without reading the ones between; rejects for a
+   * context the store does not know, as `getTimed()` does. Optional: a caller
+   * without it reads the window in one piece.
+   */
+  timeExtent?(context: Context, window?: TimeWindow): Promise<TimeExtent | undefined>
 
   /**
    * Keep a track a client imported. Optional: a store that only records what

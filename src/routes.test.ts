@@ -1,5 +1,8 @@
+import { get } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import request from 'supertest'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AsyncTrackStore } from './asyncTrackStore.js'
 import { fromGpx } from './gpx.js'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { TestHarness } from './harness.test-utils.js'
@@ -12,6 +15,7 @@ let harness: TestHarness | undefined
 afterEach(async () => {
   await harness?.stop()
   harness = undefined
+  vi.restoreAllMocks()
 })
 
 const withTracks = (...positions: [string, [number, number]][]) => {
@@ -695,6 +699,107 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
 
     await request(h.app).get(`${API}/vessels/urn:mrn:imo:mmsi:999999999/track.gpx`).expect(404)
+  })
+
+  // The export reads a day at a time, stepping over days with nothing; the
+  // JSON route reads the window in one piece. Thinned and split at a stop
+  // across midnight, the two must still agree point for point.
+  it('exports a track of several days as the JSON route reads it', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24], config: { segmentGapMinutes: 10 } }))
+    const day = Date.UTC(2026, 6, 1)
+    const times = [
+      ...Array.from({ length: 60 }, (_, i) => day - 30 * 60_000 + i * 30_000),
+      // On after a stop of an hour across midnight, then again three days on.
+      ...Array.from({ length: 60 }, (_, i) => day + 60 * 60_000 + i * 30_000),
+      ...Array.from({ length: 60 }, (_, i) => day + 3 * 24 * 60 * 60_000 + i * 30_000),
+    ]
+    h.seedTrack(
+      SELF_CONTEXT,
+      times.map((_, i) => [60 + i * 1e-4, 24]),
+      times,
+    )
+
+    for (const query of ['', '?resolution=2m']) {
+      const json = await request(h.app)
+        .get(`${API}/self/track${query}${query ? '&' : '?'}times`)
+        .expect(200)
+      const gpx = await request(h.app).get(`${API}/self/track.gpx${query}`).expect(200)
+
+      const segments = fromGpx(gpx.text)[0]!.segments
+      expect(segments).toHaveLength(3)
+      expect(segments.map((points) => points.map(({ position }) => [position[1], position[0]]))).toEqual(
+        json.body.coordinates,
+      )
+      expect(segments.map((points) => points.map(({ timestamp }) => new Date(timestamp).toISOString()))).toEqual(
+        json.body.times,
+      )
+    }
+  })
+
+  // A recording of years read in one piece is copied whole to the server's
+  // thread and then written whole: hundreds of megabytes on a Pi.
+  it('reads the export a day at a time, and only the days with positions', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+    const day = Date.UTC(2026, 6, 1)
+    const times = [day + 1000, day + 2000, day + 10 * 24 * 60 * 60_000, day + 12 * 24 * 60 * 60_000]
+    h.seedTrack(
+      SELF_CONTEXT,
+      times.map(() => [60, 24]),
+      times,
+    )
+    const read = vi.spyOn(AsyncTrackStore.prototype, 'getTimed')
+
+    await request(h.app).get(`${API}/self/track.gpx`).expect(200)
+
+    const windows = read.mock.calls.map(([, window]) => window)
+    expect(windows).toHaveLength(3)
+    for (const window of windows) expect(window!.to - window!.from).toBeLessThanOrEqual(24 * 60 * 60_000)
+  })
+
+  it('reads no day more once the client has gone', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+    const day = Date.UTC(2026, 6, 1)
+    const times = [0, 1, 2].map((i) => day + i * 24 * 60 * 60_000 + 1000)
+    h.seedTrack(
+      SELF_CONTEXT,
+      times.map(() => [60, 24]),
+      times,
+    )
+    // The step to the second day waits until the client has gone, so the
+    // route sees that before it could read on.
+    let release = () => {}
+    const gone = new Promise<void>((resolve) => (release = resolve))
+    const extent = AsyncTrackStore.prototype.timeExtent
+    let steps = 0
+    vi.spyOn(AsyncTrackStore.prototype, 'timeExtent').mockImplementation(async function (
+      this: AsyncTrackStore,
+      ...args
+    ) {
+      if (steps++ === 1) await gone
+      return extent.apply(this, args)
+    })
+    const read = vi.spyOn(AsyncTrackStore.prototype, 'getTimed')
+    const server = h.app.listen(0)
+    try {
+      const { port } = server.address() as AddressInfo
+      await new Promise<void>((resolve) => {
+        const req = get(`http://127.0.0.1:${port}${API}/self/track.gpx`, (res) => {
+          res.once('data', () => {
+            req.destroy()
+            setTimeout(() => {
+              release()
+              setTimeout(resolve, 100)
+            }, 100)
+          })
+        })
+        req.on('error', () => {})
+      })
+    } finally {
+      server.close()
+    }
+
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(h.errors).toEqual([])
   })
 
   // The GPX and JSON routes share one read pipeline, so a query answered by

@@ -155,6 +155,12 @@ export interface TimeWindow {
  * A recorded track in a window as a listing describes it: how many points,
  * when it starts and ends, and where it lies, without the points themselves.
  */
+/** The times of a track's first and last position, in ms. */
+export interface TimeExtent {
+  first: number
+  last: number
+}
+
 export interface TrackSummary {
   context: Context
   pointCount: number
