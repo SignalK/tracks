@@ -971,8 +971,9 @@ export default function ThePlugin(app: App): Plugin {
       /**
        * One vessel's track as a GPX file.
        *
-       * Serialised by `toGpx` rather than assembled here, so the export a user
-       * downloads is the same document the module produces everywhere else.
+       * Written a day at a time by `GpxTrackWriter`, which shares its lines with
+       * `toGpx`, so the export a user downloads is the same document the module
+       * produces everywhere else.
        * The webapp cannot reach that module — it ships as static files with no
        * bundler — which is why the conversion lives behind a route instead of
        * being duplicated in the page.
