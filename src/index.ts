@@ -15,6 +15,7 @@
 
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
+import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { createTrackProvider } from './trackProvider.js'
 import type { TrackProvider } from './trackProvider.js'
@@ -464,6 +465,10 @@ export default function ThePlugin(app: App): Plugin {
   let binRetentionMs = DEFAULT_RECYCLE_BIN_DAYS * DAY_MS
   /** How long other vessels' positions are kept, as set; 0 keeps them. */
   let aisRetentionDays = DEFAULT_AIS_RETENTION_DAYS
+  /** The configuration the plugin runs with, while it runs. */
+  let startedWith: TracksPluginConfig | undefined
+  /** Whether the whole database is being deleted; see DELETE /database. */
+  let resetting = false
   /**
    * The deleted spans of recorded tracks by context, loaded once and dropped
    * whenever a delete, restore or purge changes them. Read for each day of a
@@ -572,8 +577,9 @@ export default function ThePlugin(app: App): Plugin {
     return undefined
   }
 
-  return {
+  const plugin: Plugin = {
     start: function (config: TracksPluginConfig) {
+      startedWith = config
       storageError = undefined
       historyImport = undefined
       const { resolution } = config
@@ -825,6 +831,7 @@ export default function ThePlugin(app: App): Plugin {
     },
 
     stop: async function () {
+      startedWith = undefined
       onStop.forEach((f) => {
         try {
           f()
@@ -1394,6 +1401,50 @@ export default function ThePlugin(app: App): Plugin {
         res.json({ aisRetentionDays })
       })
 
+      // The webapp's danger zone: the whole database deleted, for a store gone
+      // wrong past repair. Admin-only, as it is registered on the router
+      // itself, and only with the word the webapp has the user type, so no
+      // stray request can do it. The plugin stops, the file goes, and the
+      // plugin starts again as it was set up, on an empty store.
+      router.delete('/database', (req: Request, res: Response) => {
+        if (req.query.confirm !== 'DELETE') {
+          res.status(400).json({ message: 'Deleting the whole track database needs confirm=DELETE.' })
+          return
+        }
+        const config = startedWith
+        const dataDir = app.getDataDirPath?.()
+        if (!config || !dataDir || !tracks) {
+          notAvailable(res)
+          return
+        }
+        if (resetting) {
+          res.status(409).json({ message: 'The track database is being deleted already.' })
+          return
+        }
+        resetting = true
+        void (async () => {
+          await plugin.stop()
+          try {
+            for (const suffix of ['', '-wal', '-shm']) {
+              rmSync(join(dataDir, `tracks.db${suffix}`), { force: true })
+            }
+          } finally {
+            // Started again whatever the delete did, so a file that would not
+            // go leaves the plugin recording to it rather than stopped.
+            await plugin.start(config)
+          }
+          app.debug('Deleted the whole track database on request')
+          res.json({ deleted: true })
+        })()
+          .catch((err: unknown) => {
+            app.error(`Could not delete the track database: ${errorDetail(err)}`)
+            if (!res.headersSent) res.status(500).json({ message: 'Could not delete the track database' })
+          })
+          .finally(() => {
+            resetting = false
+          })
+      })
+
       router.get('/recycle-bin', (_req: Request, res: Response) => {
         const store = tracks
         if (!store?.binEntries) {
@@ -1588,6 +1639,7 @@ export default function ThePlugin(app: App): Plugin {
       },
     },
   }
+  return plugin
 }
 
 export { fromGpx, toGpx } from './gpx.js'

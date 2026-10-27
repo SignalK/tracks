@@ -7,6 +7,8 @@ import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { imported, importQuery, start as startImport } from '../public/import.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
+import { confirmed, start as startDanger } from '../public/danger.js'
+// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { historyView, POLL_MS, start as startHistory } from '../public/history.js'
 
 /**
@@ -1496,5 +1498,73 @@ describe('the history import section', () => {
       dataset: { state: 'error' },
     })
     expect(button.disabled).toBe(false)
+  })
+})
+
+// Nothing it deletes comes back, so the button waits for the word, and a
+// refusal says why rather than looking like nothing happened.
+describe('the danger zone', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('takes DELETE, and nothing else, as confirming', () => {
+    expect(confirmed('DELETE')).toBe(true)
+    expect(confirmed(' DELETE ')).toBe(true)
+    expect(confirmed('delete')).toBe(false)
+    expect(confirmed('')).toBe(false)
+  })
+
+  it('deletes only once the word is typed, says why it was refused, and reloads once done', async () => {
+    const handlers: Record<string, (event?: unknown) => unknown> = {}
+    const on = (name: string) => (_type: string, handler: (event?: unknown) => unknown) => {
+      handlers[name] = handler
+    }
+    const button = { disabled: true }
+    const confirm = { value: '', addEventListener: on('input') }
+    const form = { elements: { confirm }, querySelector: () => button, addEventListener: on('submit') }
+    const dialog = { querySelector: () => form, showModal: vi.fn(), close: vi.fn() }
+    const error = { textContent: '', hidden: true }
+    const elements: Record<string, unknown> = {
+      'reset-open': { addEventListener: on('click') },
+      'reset-dialog': dialog,
+      'reset-error': error,
+    }
+    const answers = [
+      { ok: false, status: 403, json: () => Promise.reject(new Error('not JSON')) },
+      { ok: true, status: 200, json: () => Promise.resolve({ deleted: true }) },
+    ]
+    const fetch = vi.fn(() => Promise.resolve(answers.shift()))
+    const reload = vi.fn()
+    vi.stubGlobal('document', { getElementById: (id: string) => elements[id] })
+    vi.stubGlobal('fetch', fetch)
+    vi.stubGlobal('location', { reload })
+    startDanger()
+
+    handlers.click!()
+    expect(dialog.showModal).toHaveBeenCalled()
+    for (const typed of ['delete', 'DELET']) {
+      confirm.value = typed
+      handlers.input!()
+      expect(button.disabled).toBe(true)
+    }
+    confirm.value = 'DELETE'
+    handlers.input!()
+    expect(button.disabled).toBe(false)
+
+    const submit = () => handlers.submit!({ submitter: { value: 'reset' }, preventDefault: () => {} })
+    await submit()
+    expect(fetch).toHaveBeenCalledWith(
+      '../../plugins/tracks/database?confirm=DELETE',
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    expect(error.textContent).toBe('This needs an administrator login.')
+    expect(error.hidden).toBe(false)
+    expect(button.disabled).toBe(false)
+    expect(reload).not.toHaveBeenCalled()
+
+    await submit()
+    expect(dialog.close).toHaveBeenCalled()
+    expect(reload).toHaveBeenCalled()
   })
 })

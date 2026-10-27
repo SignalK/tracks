@@ -4,6 +4,7 @@ import { AsyncTrackStore } from './asyncTrackStore.js'
 import { fromGpx } from './gpx.js'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { TestHarness } from './harness.test-utils.js'
+import type { TrackApi } from './trackApi.js'
 
 const API = '/signalk/v1/api'
 const SELF_ID = SELF_CONTEXT.replace('vessels.', '')
@@ -783,6 +784,46 @@ describe('GET /plugins/tracks/settings', () => {
     const res = await request(h.app).get('/plugins/tracks/settings').expect(200)
 
     expect(res.body).toEqual({ aisRetentionDays: days })
+  })
+})
+
+// The webapp's danger zone: everything gone, and recording on, on an empty store.
+describe('DELETE /plugins/tracks/database', () => {
+  it('refuses without the confirming word, and keeps everything', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+
+    await request(h.app).delete('/plugins/tracks/database').expect(400)
+    await request(h.app).delete('/plugins/tracks/database?confirm=delete').expect(400)
+
+    await request(h.app).get(`${API}/self/track`).expect(200)
+  })
+
+  it('deletes every track, import and bin entry, and records on', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]], [OTHER_CONTEXT, [60.2, 24.8]])
+    await request(h.app)
+      .post('/plugins/tracks/imports')
+      .set('Content-Type', 'application/gpx+xml')
+      .send(
+        '<?xml version="1.0"?><gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Old</name><trkseg>' +
+          '<trkpt lat="61" lon="25"><time>2020-01-01T00:00:00Z</time></trkpt></trkseg></trk></gpx>',
+      )
+      .expect(201)
+    const provider = h.trackProvider() as Required<TrackApi>
+    expect(await provider.deleteTrack(`recorded:${OTHER_CONTEXT}`)).toBe(true)
+    expect((await request(h.app).get('/plugins/tracks/imports').expect(200)).body).toHaveLength(1)
+    expect((await request(h.app).get('/plugins/tracks/recycle-bin').expect(200)).body).toHaveLength(1)
+
+    const res = await request(h.app).delete('/plugins/tracks/database?confirm=DELETE').expect(200)
+
+    expect(res.body).toEqual({ deleted: true })
+    await request(h.app).get(`${API}/self/track`).expect(404)
+    await request(h.app).get(`${API}/vessels/${OTHER_CONTEXT}/track`).expect(404)
+    expect((await request(h.app).get('/plugins/tracks/imports').expect(200)).body).toEqual([])
+    expect((await request(h.app).get('/plugins/tracks/recycle-bin').expect(200)).body).toEqual([])
+
+    h.emit(SELF_CONTEXT, [60.3, 24.7])
+    const after = await request(h.app).get(`${API}/self/track`).expect(200)
+    expect(after.body.coordinates).toEqual([[[24.7, 60.3]]])
   })
 })
 
