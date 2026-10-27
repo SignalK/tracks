@@ -188,6 +188,15 @@ const element = (tagName: string): StubElement => {
 /** A response, or a failure. */
 type Answer = { status?: number; ok?: boolean; body?: unknown } | Error | 'stall' | 'stall-body'
 
+/** What a server answers for the own vessel alone, given its answer for every vessel. */
+const ownPart = (response: Answer): Answer => {
+  if (typeof response !== 'object' || response instanceof Error) return response
+  const body = response.body as { type?: string; features?: { properties?: { isSelf?: boolean } }[] } | undefined
+  return body?.type === 'FeatureCollection' && Array.isArray(body.features)
+    ? { ...response, body: { ...body, features: body.features.filter((f) => f?.properties?.isSelf) } }
+    : response
+}
+
 async function render(
   response: Answer,
   /**
@@ -195,7 +204,15 @@ async function render(
    * `timeoutMs` sets every timeout the page starts; `speedUp` runs them that many times faster,
    * keeping how they compare.
    */
-  options: { timeoutMs?: number; speedUp?: number; imports?: unknown[]; byId?: boolean; own?: Answer } = {},
+  options: {
+    timeoutMs?: number
+    speedUp?: number
+    imports?: unknown[]
+    byId?: boolean
+    own?: Answer
+    /** What the plugin's settings route answers; by default it is missing, as on a server keeping it to administrators. */
+    settings?: unknown
+  } = {},
 ) {
   const status = element('p')
   // Every status the page showed, in order, since the last one overwrites the rest.
@@ -204,15 +221,40 @@ async function render(
     get: () => shown[shown.length - 1] ?? '',
     set: (text: string) => shown.push(text),
   })
-  const tbody = element('tbody')
-  const table = element('table')
-  table.hidden = true
+  const listOf = () => {
+    const table = element('table')
+    const tbody = element('tbody')
+    table.hidden = true
+    Object.assign(table, { querySelector: () => tbody })
+    return { table, tbody, note: element('p') }
+  }
+  const lists = { own: listOf(), others: listOf(), imported: listOf() }
+  const elements: Record<string, StubElement> = {
+    status,
+    'own-tracks': lists.own.table,
+    'other-tracks': lists.others.table,
+    'imported-tracks': lists.imported.table,
+    'own-note': lists.own.note,
+    'others-note': lists.others.note,
+    'imported-note': lists.imported.note,
+  }
+  // Every row of the three lists, own vessel first, for the tests that do not
+  // care which list a row is in; `table` is hidden while all three are.
+  const tbody = {
+    get children() {
+      return [...lists.own.tbody.children, ...lists.others.tbody.children, ...lists.imported.tbody.children]
+    },
+  }
+  const table = {
+    get hidden() {
+      return Object.values(lists).every(({ table }) => table.hidden)
+    },
+  }
 
   const document = {
-    getElementById: (id: string) => (id === 'status' ? status : table),
+    getElementById: (id: string) => elements[id],
     createElement: element,
   }
-  Object.assign(table, { querySelector: () => tbody })
 
   const source = readFileSync(new URL('../public/tracks.js', import.meta.url), 'utf8')
   // The page's own deadline is left alone; only the clock behind it is
@@ -241,6 +283,13 @@ async function render(
       if (init.signal?.aborted) {
         return Promise.reject(init.signal.reason)
       }
+      if (url.endsWith('/plugins/tracks/settings')) {
+        return Promise.resolve(
+          options.settings === undefined
+            ? { status: 404, ok: false, json: () => Promise.reject(new Error('not JSON')) }
+            : { status: 200, ok: true, json: () => Promise.resolve(options.settings) },
+        )
+      }
       // Every import, from the plugin's own route; a server without it answers 404.
       if (url.endsWith('/plugins/tracks/imports')) {
         return Promise.resolve(
@@ -261,7 +310,9 @@ async function render(
         events.push(`aborted ${kind}`)
         reject(new Error('aborted'))
       }
-      const answer = kind === 'own' && options.own !== undefined ? options.own : response
+      // The own vessel's request is answered from the list's answer, as the
+      // server answers it: with the own vessel's tracks alone.
+      const answer = kind === 'own' ? (options.own ?? ownPart(response)) : response
       if (answer === 'stall-body') {
         return Promise.resolve({
           status: 200,
@@ -294,7 +345,7 @@ async function render(
     abortSignal,
   )
 
-  return { status, tbody, table, requested, shown, events }
+  return { status, tbody, table, lists, requested, shown, events }
 }
 
 const feature = (properties: Record<string, unknown>) => ({ type: 'Feature', geometry: null, properties })
@@ -331,7 +382,26 @@ describe('the webapp asks the API for the right thing', () => {
     expect(pathname).toBe('/signalk/v2/api/tracks')
     expect(searchParams.get('contexts')).toBe('vessels.self')
     expect(searchParams.get('geometry')).toBe('false')
-    expect(searchParams.get('duration')).toBe('P30D')
+    // Its whole recording: one vessel needs no window.
+    expect(searchParams.has('duration')).toBe(false)
+  })
+
+  // The list reaches back as far as the plugin keeps other vessels, so it
+  // never says a month where it keeps a week.
+  it.each([
+    [7, 'P7D'],
+    [0, 'P30D'],
+    [undefined, 'P30D'],
+  ])('asks for other vessels as far back as the plugin keeps them (%s days)', async (days, duration) => {
+    const { requested } = await render(
+      { body: { type: 'FeatureCollection', features: [] } },
+      days === undefined ? {} : { settings: { aisRetentionDays: days } },
+    )
+    const list = requested
+      .map((url) => new URL(url, 'http://localhost/@signalk/tracks-plugin/index.html'))
+      .find(({ searchParams }) => !searchParams.has('contexts'))!
+
+    expect(list.searchParams.get('duration')).toBe(duration)
   })
 
   // The store answers one query at a time, so the own vessel's, asked beside
@@ -370,7 +440,7 @@ describe('the webapp asks the API for the right thing', () => {
     expect(events).toEqual(['asked own', 'aborted own', 'asked list', 'read list'])
     expect(shown.some((text) => text.startsWith('Loading the other vessels…'))).toBe(false)
     expect(tbody.children).toHaveLength(2)
-    expect(status.textContent).toContain('2 tracks')
+    expect(status.textContent).toBe('')
   })
 })
 
@@ -392,8 +462,8 @@ describe('the page references its assets relatively', () => {
 })
 
 describe('the webapp renders what the API returns', () => {
-  it('puts a row in the table for each track', async () => {
-    const { tbody, table, status } = await render({
+  it('puts each track in its list: the own vessel, other vessels, imports', async () => {
+    const { lists, table, status } = await render({
       body: {
         type: 'FeatureCollection',
         features: [
@@ -417,27 +487,32 @@ describe('the webapp renders what the API returns', () => {
     })
 
     expect(table.hidden).toBe(false)
-    expect(tbody.children).toHaveLength(2)
-    expect(status.textContent).toContain('2 tracks')
+    expect(lists.own.tbody.children.map((tr) => tr.children[0]!.textContent)).toEqual(['Own Ship'])
+    expect(lists.others.tbody.children.map((tr) => tr.children[0]!.textContent)).toEqual(['AIS Ariadne'])
+    expect(lists.imported.table.hidden).toBe(true)
+    // Done: the lists say what they hold, and the status has nothing to add.
+    expect(status.textContent).toBe('')
+    expect(status.hidden).toBe(true)
   })
 
   // Newest first: the track someone came to look at is the one that just
   // finished, and a list ordered by whatever the store returned buries it.
   it('sorts newest first', async () => {
-    const { tbody } = await render({
+    const { lists } = await render({
       body: {
         type: 'FeatureCollection',
         features: [
           feature({
-            context: SELF,
-            isSelf: true,
+            context: OTHER,
+            contextName: 'Ariadne',
+            isSelf: false,
             from: '2026-09-01T00:00:00Z',
             to: '2026-09-01T02:00:00Z',
             pointCount: 1,
           }),
           feature({
-            context: OTHER,
-            contextName: 'Ariadne',
+            context: 'vessels.urn:mrn:imo:mmsi:111111111',
+            contextName: 'Boreas',
             isSelf: false,
             from: '2026-09-05T00:00:00Z',
             to: '2026-09-05T01:00:00Z',
@@ -447,8 +522,7 @@ describe('the webapp renders what the API returns', () => {
       },
     })
 
-    expect(tbody.children[0]!.children[0]!.textContent).toBe('AIS Ariadne')
-    expect(tbody.children[1]!.children[0]!.textContent).toBe('Own Ship')
+    expect(lists.others.tbody.children.map((tr) => tr.children[0]!.textContent)).toEqual(['AIS Boreas', 'AIS Ariadne'])
   })
 
   it('renders the point count', async () => {
@@ -471,10 +545,33 @@ describe('the webapp renders what the API returns', () => {
   })
 
   it('says so when there is nothing recorded', async () => {
-    const { status, table } = await render({ body: { type: 'FeatureCollection', features: [] } })
+    const { lists, table } = await render({ body: { type: 'FeatureCollection', features: [] } })
 
     expect(table.hidden).toBe(true)
-    expect(status.textContent).toContain('No tracks')
+    expect(lists.own.note.textContent).toBe('Nothing recorded yet.')
+    expect(lists.others.note.textContent).toBe('None in the last 30 days.')
+    expect(lists.imported.note.textContent).toBe('No imported tracks.')
+  })
+
+  // The notes say how long other vessels are kept, as the plugin is set, so
+  // the list never reads as though it kept them longer.
+  it.each([
+    [{ aisRetentionDays: 7 }, true, 'In the last 7 days. The plugin keeps them 7 days.'],
+    [{ aisRetentionDays: 1 }, false, 'None in the last 1 day. The plugin keeps them 1 day.'],
+    [{ aisRetentionDays: 0 }, true, 'In the last 30 days. The plugin keeps them indefinitely.'],
+    [undefined, true, 'In the last 30 days.'],
+  ])('says how long other vessels are kept (%j)', async (settings, any, note) => {
+    const { lists } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: any ? [feature({ context: OTHER, isSelf: false, to: '2026-09-02T01:00:00Z', pointCount: 7 })] : [],
+        },
+      },
+      settings === undefined ? {} : { settings },
+    )
+
+    expect(lists.others.note.textContent).toBe(note)
   })
 
   // 501 is the server saying no provider is registered, which is a different
@@ -558,23 +655,82 @@ describe('the webapp renders what the API returns', () => {
     expect(status.textContent).toContain('in time')
   })
 
-  it('clears the own vessel’s rows when the whole list has none', async () => {
+  // The own vessel's request reads its whole recording, which reaches back
+  // further than the list's window.
+  it('keeps the own vessel’s whole recording when the list’s window has none of it', async () => {
     const own = feature({
       context: SELF,
       isSelf: true,
-      from: '2026-09-01T00:00:00Z',
-      to: '2026-09-01T02:00:00Z',
+      from: '2024-09-01T00:00:00Z',
+      to: '2024-09-01T02:00:00Z',
       pointCount: 12,
     })
-    const { tbody, table, status, shown } = await render(
+    const { lists, shown } = await render(
       { body: { type: 'FeatureCollection', features: [] } },
       { own: { body: { type: 'FeatureCollection', features: [own] } } },
     )
 
     expect(shown.some((text) => text.startsWith('Loading the other vessels…'))).toBe(true)
-    expect(table.hidden).toBe(true)
-    expect(tbody.children).toEqual([])
-    expect(status.textContent).toContain('No tracks')
+    expect(lists.own.tbody.children.map((tr) => tr.children[0]!.textContent)).toEqual(['Own Ship'])
+    expect(lists.own.note.textContent).toBe('Its whole recording.')
+  })
+
+  // The list's window of the own vessel is left out for its whole recording,
+  // not shown beside it.
+  it('shows the own vessel once', async () => {
+    const own = (from: string, pointCount: number) =>
+      feature({
+        id: 'tracks:recorded:self',
+        providerId: 'tracks',
+        context: SELF,
+        isSelf: true,
+        from,
+        to: '2026-09-01T02:00:00Z',
+        pointCount,
+      })
+    const { lists } = await render(
+      { body: { type: 'FeatureCollection', features: [own('2026-08-02T00:00:00Z', 12)] } },
+      { own: { body: { type: 'FeatureCollection', features: [own('2024-01-01T00:00:00Z', 4321)] } } },
+    )
+
+    expect(lists.own.tbody.children.map((tr) => tr.children[3]!.textContent)).toEqual(['4321'])
+  })
+
+  // Without its own request, the own vessel's row is the list's window of
+  // it, and the note says so rather than call it the whole recording.
+  it.each([
+    [true, 'In the last 30 days.'],
+    [false, 'None in the last 30 days.'],
+  ])('says the own vessel’s row is the list’s window when its own request fails (%s)', async (any, note) => {
+    const { lists } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: any ? [feature({ context: SELF, isSelf: true, to: '2026-09-01T02:00:00Z', pointCount: 12 })] : [],
+        },
+      },
+      { own: new Error('offline') },
+    )
+
+    expect(lists.own.note.textContent).toBe(note)
+  })
+
+  // Two providers can give a vessel's recording the same id after their prefix.
+  it('lists the same track id from two providers twice', async () => {
+    const recorded = (providerId: string) =>
+      feature({
+        id: `${providerId}:recorded:${OTHER}`,
+        providerId,
+        context: OTHER,
+        isSelf: false,
+        to: '2026-09-01T02:00:00Z',
+        pointCount: 3,
+      })
+    const { lists } = await render({
+      body: { type: 'FeatureCollection', features: [recorded('tracks'), recorded('history')] },
+    })
+
+    expect(lists.others.tbody.children).toHaveLength(2)
   })
 
   it('still lists every vessel when the own vessel’s request fails', async () => {
@@ -599,8 +755,9 @@ describe('the webapp renders what the API returns', () => {
 
     expect(shown.some((text) => text.startsWith('Loading the other vessels…'))).toBe(false)
     expect(table.hidden).toBe(false)
+    // The list's window of the own vessel stands in for its whole recording.
     expect(tbody.children).toHaveLength(2)
-    expect(status.textContent).toContain('2 tracks')
+    expect(status.textContent).toBe('')
   })
 
   it('counts the wait up rather than sitting on Loading…', async () => {
@@ -681,12 +838,14 @@ describe('the webapp renders what the API returns', () => {
   })
 
   it('shows the empty state when every feature is malformed', async () => {
-    const { status, table } = await render({
+    const { status, table, lists } = await render({
       body: { type: 'FeatureCollection', features: [null, { type: 'Feature' }] },
     })
 
     expect(table.hidden).toBe(true)
-    expect(status.textContent).toContain('No tracks')
+    expect(status.dataset.state).toBeUndefined()
+    expect(lists.own.note.textContent).toBe('Nothing recorded yet.')
+    expect(lists.others.note.textContent).toBe('None in the last 30 days.')
   })
 
   // An error object or a login page is a failure, not an empty list; saying
@@ -726,7 +885,9 @@ describe('the webapp offers a GPX download', () => {
   // The export link goes to the *v1* route, whose duration is a number with a
   // unit suffix -- not the ISO 8601 form the v2 listing takes. Sharing one
   // constant between them sent `P30D` here and made every download a 400.
-  it('asks the export route for a duration it can parse', async () => {
+  // Users are told to keep this export before deleting anything, so it is
+  // the whole recording, which the route writes a day at a time.
+  it('exports the own vessel’s whole recording', async () => {
     const { tbody } = await render({
       body: {
         type: 'FeatureCollection',
@@ -739,6 +900,18 @@ describe('the webapp offers a GPX download', () => {
             pointCount: 2,
           }),
         ],
+      },
+    })
+
+    const href = tbody.children[0]!.children[4]!.children[0]!.href!
+    expect(new URL(href, 'http://localhost/').searchParams.has('duration')).toBe(false)
+  })
+
+  it('asks the export route for a duration it can parse', async () => {
+    const { tbody } = await render({
+      body: {
+        type: 'FeatureCollection',
+        features: [feature({ context: OTHER, isSelf: false, to: '2026-09-01T02:00:00Z', pointCount: 2 })],
       },
     })
 
@@ -830,31 +1003,29 @@ describe('the webapp offers a GPX download', () => {
 
   // The list shows a bounded window, and the export must not quietly differ
   // from what the row says it contains.
-  it('exports the same window the list shows', async () => {
-    const { tbody } = await render({
-      body: {
-        type: 'FeatureCollection',
-        features: [
-          feature({
-            context: SELF,
-            isSelf: true,
-            from: '2026-09-01T00:00:00Z',
-            to: '2026-09-01T02:00:00Z',
-            pointCount: 2,
-          }),
-        ],
+  it('exports another vessel over the window its list shows', async () => {
+    const { tbody, requested } = await render(
+      {
+        body: {
+          type: 'FeatureCollection',
+          features: [feature({ context: OTHER, isSelf: false, to: '2026-09-01T02:00:00Z', pointCount: 2 })],
+        },
       },
-    })
+      { settings: { aisRetentionDays: 7 } },
+    )
 
     // Compared as a length of time rather than as a string: the two routes
     // spell a duration differently, and asserting the literal here is what
     // pinned the v2 spelling onto the v1 export route.
     const href = tbody.children[0]!.children[4]!.children[0]!.href!
     const exported = parseDuration(new URL(href, 'http://localhost/').searchParams.get('duration')!)
-    const listed = readFileSync('public/tracks.js', 'utf8').match(/WINDOW_V2 = '([^']+)'/)?.[1]
+    const listed = requested
+      .map((url) => new URL(url, 'http://localhost/').searchParams)
+      .find((params) => !params.has('contexts'))!
+      .get('duration')
 
-    expect(listed).toBe('P30D')
-    expect(exported).toBe(30 * 24 * 60 * 60 * 1000)
+    expect(listed).toBe('P7D')
+    expect(exported).toBe(7 * 24 * 60 * 60 * 1000)
   })
 })
 
@@ -871,7 +1042,7 @@ describe('the webapp lists every import', () => {
   }
 
   it('adds an import the window misses', async () => {
-    const { tbody, status } = await render(
+    const { lists } = await render(
       {
         body: {
           type: 'FeatureCollection',
@@ -880,19 +1051,18 @@ describe('the webapp lists every import', () => {
       },
       { imports: [old] },
     )
-    expect(tbody.children).toHaveLength(2)
-    expect(tbody.children[1]!.children[0]!.textContent).toBe('No vessel')
-    expect(status.textContent).toBe('2 tracks: the last 30 days, and every import.')
+    expect(lists.own.tbody.children).toHaveLength(1)
+    expect(lists.imported.tbody.children.map((tr) => tr.children[0]!.textContent)).toEqual(['No vessel'])
   })
 
   it('lists an import the window also returned once', async () => {
     const recent = { ...old, from: '2026-09-01T00:00:00Z', to: '2026-09-01T01:00:00Z' }
-    const { tbody, status } = await render(
+    const { tbody, lists } = await render(
       { body: { type: 'FeatureCollection', features: [feature(recent)] } },
       { imports: [recent] },
     )
     expect(tbody.children).toHaveLength(1)
-    expect(status.textContent).toBe('1 track in the last 30 days.')
+    expect(lists.imported.tbody.children).toHaveLength(1)
   })
 
   // A server without the Track API's write routes names a track without its

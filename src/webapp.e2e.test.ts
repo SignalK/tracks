@@ -46,20 +46,28 @@ describe('the webapp is served by a real server', () => {
     // out of the source, which would pin how the request happens to be
     // written rather than where it goes.
     const { requested } = await renderShippedPage(await (await fetchApp('tracks.js')).text())
-    expect(requested).toHaveLength(3)
-    // The own vessel's request is the list's with `contexts` added, so it sorts after it.
-    const [imports, tracks, own] = [...requested].sort()
+    expect(requested).toHaveLength(4)
+    const find = (test: (url: string) => boolean) => requested.find(test)!
+    const imports = find((url) => url.endsWith('/plugins/tracks/imports'))
+    const settings = find((url) => url.endsWith('/plugins/tracks/settings'))
+    const own = find((url) => url.includes('contexts=vessels.self'))
+    const tracks = find((url) => url.includes('/signalk/v2/api/tracks?') && !url.includes('contexts='))
 
-    for (const url of [tracks!, own!]) {
+    for (const url of [tracks, own]) {
       const listed = await fetch(new URL(url, page))
       expect(listed.status, url).toBe(200)
       expect(await listed.json(), url).toHaveProperty('features')
     }
 
     // Every import, from the plugin's own route.
-    const all = await fetch(new URL(imports!, page))
+    const all = await fetch(new URL(imports, page))
     expect(all.status).toBe(200)
     expect(Array.isArray(await all.json())).toBe(true)
+
+    // How long other vessels are kept, which the list reaches back to.
+    const kept = await fetch(new URL(settings, page))
+    expect(kept.status).toBe(200)
+    expect(((await kept.json()) as { aisRetentionDays?: unknown }).aisRetentionDays).toBeTypeOf('number')
   })
 })
 

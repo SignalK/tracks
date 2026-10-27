@@ -15,6 +15,13 @@ Requires Signal K server >= 2.33.0 for the v2 Track API; older servers get the v
 
 The plugin's configuration page shows the current defaults, and is the authority on them.
 
+The Tracks webapp lists the tracks in three parts, since each is kept for a different time:
+
+- **Own vessel**: its whole recording, which can be downloaded as one GPX file.
+- **Other vessels**: as far back as the plugin keeps them, so the list never reads as though
+  they were kept longer. When it keeps them indefinitely, the list goes back 30 days.
+- **Imported tracks**: every import, however old.
+
 The package also exports a client side `TrackAccumulator` class that manages the track for a single
 vessel, exposing the result as `Observable<LatLngTuple[]>`.
 
@@ -127,9 +134,9 @@ It needs administrator rights. `GET /plugins/tracks/history-import` says whether
 installed (`provider`) and how far the import got (`state`), and `POST` starts it, or resumes
 one that stopped.
 
-The webapp lists every imported track, however old and whether or not it has times, next to
-the last 30 days of recorded ones, so a passage imported from years ago can be found there. It
-can be deleted there on a Signal K server that deletes tracks by id.
+The webapp lists every imported track, however old and whether or not it has times, in a list of
+its own, so a passage imported from years ago can be found there. It can be deleted there on a
+Signal K server that deletes tracks by id.
 
 `GET /plugins/tracks/imports` returns every imported track, and no recorded ones, each with
 `imported`, the time it was stored.

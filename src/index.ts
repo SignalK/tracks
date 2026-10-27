@@ -462,6 +462,8 @@ export default function ThePlugin(app: App): Plugin {
   let segmentGap = 0
   let storageError: string | undefined
   let binRetentionMs = DEFAULT_RECYCLE_BIN_DAYS * DAY_MS
+  /** How long other vessels' positions are kept, as set; 0 keeps them. */
+  let aisRetentionDays = DEFAULT_AIS_RETENTION_DAYS
   /**
    * The deleted spans of recorded tracks by context, loaded once and dropped
    * whenever a delete, restore or purge changes them. Read for each day of a
@@ -707,7 +709,8 @@ export default function ThePlugin(app: App): Plugin {
       // Set in days, since it is about how long another vessel's track stays
       // interesting, and passed to prune() in milliseconds. 0 keeps every
       // position indefinitely.
-      const aisRetentionMs = (toNumber(config.aisRetentionDays) ?? DEFAULT_AIS_RETENTION_DAYS) * 24 * 60 * 60 * 1000
+      aisRetentionDays = Math.max(0, toNumber(config.aisRetentionDays) ?? DEFAULT_AIS_RETENTION_DAYS)
+      const aisRetentionMs = aisRetentionDays * DAY_MS
       // Runs even with `aisRetentionDays: 0`, since prune() also purges the
       // recycle bin. A maxAge of Infinity ages nothing out.
       const pruneInterval = setInterval(() => {
@@ -1264,9 +1267,10 @@ export default function ThePlugin(app: App): Plugin {
         res.status(500).json({ message: 'Track storage failed' })
       }
 
-      // Every import, whatever its time span: the webapp lists the last 30 days
-      // through the Track API, which an old passage or an untimed track never
-      // matches, so without this an imported file could not be found again.
+      // Every import, whatever its time span: the webapp lists other vessels
+      // over a window through the Track API, which an old passage or an
+      // untimed track never matches, so without this an imported file could
+      // not be found again.
       // Listing asks for read access, as reading the Track API does.
       const readable = (router as AccessRouter).access?.('readonly') ?? router
       readable.get('/imports', (_req: Request, res: Response) => {
@@ -1392,6 +1396,14 @@ export default function ThePlugin(app: App): Plugin {
               res.status(500).json({ message: `Could not export the track ${id}` })
             }
           })
+      })
+
+      // What the webapp tells its reader about the lists it shows: other
+      // vessels' tracks reach back as far as they are kept. Read access, as
+      // for the lists themselves. `aisRetentionDays` is the setting of that
+      // name, in days, with 0 for keeping them indefinitely.
+      readable.get('/settings', (_req: Request, res: Response) => {
+        res.json({ aisRetentionDays })
       })
 
       router.get('/recycle-bin', (_req: Request, res: Response) => {
