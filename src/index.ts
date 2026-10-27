@@ -1400,7 +1400,8 @@ export default function ThePlugin(app: App): Plugin {
 
       // What the webapp tells its reader about the lists it shows: other
       // vessels' tracks reach back as far as they are kept. Read access, as
-      // for the lists themselves.
+      // for the lists themselves. `aisRetentionDays` is the setting of that
+      // name, in days, with 0 for keeping them indefinitely.
       readable.get('/settings', (_req: Request, res: Response) => {
         res.json({ aisRetentionDays })
       })
