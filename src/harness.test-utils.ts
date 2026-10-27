@@ -254,6 +254,8 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
   plugin.start(startConfig)
 
   const expressApp = express()
+  // As the server does for every route: a GPX upload's slices and files are not JSON, and pass through.
+  expressApp.use(express.json())
   expressApp.use('/signalk/v1/api', plugin.signalKApiRoutes(express.Router()))
   expressApp.use('/plugins/tracks', plugin.registerWithRouter(express.Router()))
 

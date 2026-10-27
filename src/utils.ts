@@ -1,4 +1,13 @@
-import type { LatLngTuple, GeoBounds, Position, QueryParameters, TimedPosition, TrackParams, Debug } from './types.js'
+import type {
+  LatLngTuple,
+  GeoBounds,
+  Position,
+  QueryParameters,
+  TimedPosition,
+  TrackParams,
+  Debug,
+  Span,
+} from './types.js'
 
 const LAT = 0
 const LNG = 1
@@ -653,4 +662,42 @@ export function fillGaps(
     if (run.length > 0) runs.push(run)
   }
   return { runs, overlapping }
+}
+
+/** `spans`, sorted and apart, with `span` merged in: overlapping or touching spans become one. */
+export function mergeSpan(spans: readonly Span[], span: Span): Span[] {
+  const before = spans.filter(([, upper]) => upper + 1 < span[0])
+  const after = spans.filter(([lower]) => lower > span[1] + 1)
+  const joined = spans.slice(before.length, spans.length - after.length)
+  const from = Math.min(span[0], ...joined.map(([lower]) => lower))
+  const to = Math.max(span[1], ...joined.map(([, upper]) => upper))
+  return [...before, [from, to], ...after]
+}
+
+/** The parts of `span` outside `spans`, which are sorted and apart. */
+export function subtractSpans([from, to]: Span, spans: readonly Span[]): Span[] {
+  const left: Span[] = []
+  let start = from
+  for (const [lower, upper] of spans) {
+    if (upper < start) continue
+    if (lower > to) break
+    if (lower > start) left.push([start, lower - 1])
+    start = upper + 1
+    if (start > to) return left
+  }
+  left.push([start, to])
+  return left
+}
+
+/** Whether `time` lies within one of `spans`, which are sorted and apart. */
+export function withinSpans(spans: readonly Span[], time: number): boolean {
+  let low = 0
+  let high = spans.length
+  while (low < high) {
+    const mid = (low + high) >> 1
+    if (spans[mid]![1] < time) low = mid + 1
+    else high = mid
+  }
+  const span = spans[low]
+  return span !== undefined && span[0] <= time
 }

@@ -2,6 +2,7 @@ import type {
   BinEntry,
   Context,
   Debug,
+  GpxUploadState,
   HistoryImportState,
   ImportedTrack,
   StoredImport,
@@ -16,6 +17,7 @@ import type {
   TrackCollection,
   TrackParams,
   TrackSummary,
+  UploadPart,
 } from './types.js'
 import type { TrackQuery } from './timeWindow.js'
 
@@ -229,6 +231,15 @@ export interface TrackStore {
    */
   historyImport?(context: Context): HistoryImportState | undefined | Promise<HistoryImportState | undefined>
   saveHistoryImport?(state: HistoryImportState, runs: TimedPosition[][], since?: number): number | Promise<number>
+
+  /**
+   * A GPX file uploaded in slices into the own vessel's recording: the last
+   * one, as its last write left it, and the write of each slice's points with
+   * the state it brings the upload to, resolving once committed to that state
+   * with what was written counted in. Optional like the import methods.
+   */
+  gpxUpload?(): GpxUploadState | undefined | Promise<GpxUploadState | undefined>
+  saveGpxUpload?(state: GpxUploadState, parts: UploadPart[]): GpxUploadState | Promise<GpxUploadState>
 
   /**
    * Release any resources held by the store.

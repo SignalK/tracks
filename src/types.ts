@@ -110,6 +110,97 @@ export interface HistoryImportState {
   error?: string
 }
 
+/**
+ * What an import does where the vessel's recording already holds positions.
+ * `keep` leaves them alone and fills only the stretches with nothing; `replace`
+ * puts the import in their place, sending them to the recycle bin.
+ */
+export type OnOverlap = 'keep' | 'replace'
+
+/** A start tag as the file wrote it: its qualified name and attributes, namespace declarations included. */
+export interface OpenTag {
+  name: string
+  attributes: [string, string][]
+}
+
+/**
+ * Where reading an uploaded GPX file can start again: a byte between two
+ * elements of GPX's own structure, and what is open there.
+ */
+export interface UploadCheckpoint {
+  /** Byte of the file to read on from. */
+  offset: number
+  /** The `<gpx>`, `<trk>` and `<trkseg>` open there, outermost first. */
+  open: OpenTag[]
+  /** Inside a `<trk>`, its name, or null while it has none yet. */
+  track?: string | null
+  /** How many `<trkseg>` the file opened before the offset. */
+  segments: number
+}
+
+/**
+ * A GPX file uploaded in slices into the own vessel's recording; see
+ * gpxUpload.ts. Saved with each slice's points, so a restart goes on from
+ * `checkpoint`.
+ */
+/** From and to, both included, in milliseconds. */
+export type Span = [from: number, to: number]
+
+export interface GpxUploadState {
+  id: string
+  filename: string
+  /** The file's size in bytes, as the client announced it. */
+  size: number
+  context: Context
+  /** Names of the file's tracks to import, `''` for one without a name. */
+  tracks: string[]
+  onOverlap: OnOverlap
+  /** Whether a replaced span keeps its recycle bin entry where nothing was recorded; see `keepTrack`. */
+  keepEmpty: boolean
+  state: 'receiving' | 'finished' | 'aborted' | 'failed'
+  error?: string
+  checkpoint: UploadCheckpoint
+  /** The number of the last `<trkseg>` points were written from. */
+  lastSegment?: number
+  /**
+   * With `keep`, the spans of what that segment filled so far: the slices
+   * after judge it against the recording without them, as a whole upload
+   * judges a segment without its own points.
+   */
+  filled?: Span[]
+  /**
+   * With `replace`, the spans already replaced, merged: binning only outside
+   * them keeps a segment from binning what another segment of the upload wrote.
+   */
+  replaced?: Span[]
+  /** With `replace`, that segment's span so far, and its recycle bin entry when one was made. */
+  binned?: { id?: number; from: number; to: number }
+  /**
+   * The days the last slice wrote simplified (see `simplifyUnrecorded`), with
+   * how many positions the upload has written of each: a day the next slice
+   * goes on with is simplified as well while it holds no others.
+   */
+  simplifiedDays?: [day: number, positions: number][]
+  /** Points written into the recording. */
+  imported: number
+  /** Points left out because the recording already had positions there. */
+  overlapping: number
+  /** Points of the chosen tracks without a usable time, which a recording cannot place. */
+  untimed: number
+  startedAt: number
+  updatedAt: number
+}
+
+/**
+ * The points of one `<trkseg>` that a slice brought, sorted by time.
+ * `continues` says the segment's points began in an earlier slice.
+ */
+export interface UploadPart {
+  segment: number
+  points: TimedPosition[]
+  continues: boolean
+}
+
 /** A recorded vessel's deleted span, which the history import leaves out as well. */
 export interface RecordedSpan extends DeletedSpan {
   context: Context

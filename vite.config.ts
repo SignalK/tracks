@@ -19,7 +19,16 @@ export default defineConfig({
       fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
-      external: [/^node:/, 'rxjs', 'rxjs/operators', 'express', /^typebox/, '@js-temporal/polyfill', '@xmldom/xmldom'],
+      external: [
+        /^node:/,
+        'rxjs',
+        'rxjs/operators',
+        'express',
+        /^typebox/,
+        '@js-temporal/polyfill',
+        '@xmldom/xmldom',
+        'saxes',
+      ],
     },
     sourcemap: true,
     minify: false,

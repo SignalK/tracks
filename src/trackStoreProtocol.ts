@@ -26,6 +26,8 @@ export type StoreMethod =
   | 'deletedSpans'
   | 'historyImport'
   | 'saveHistoryImport'
+  | 'gpxUpload'
+  | 'saveGpxUpload'
   | 'close'
 export type Operation = {
   [K in StoreMethod]: { id: number; method: K; args: Parameters<SqliteTrackStore[K]> }

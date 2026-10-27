@@ -166,7 +166,7 @@ function text(lines: string[]): string {
 }
 
 /** GPX's own namespace, which structural elements must be in. */
-const GPX_NAMESPACE = 'http://www.topografix.com/GPX/1/1'
+export const GPX_NAMESPACE = 'http://www.topografix.com/GPX/1/1'
 
 /** Namespace for the one extension element this plugin writes. */
 const NAMESPACE = 'https://signalk.org/specification/1.7.0/'
@@ -368,7 +368,7 @@ function coordinate(value: number): string {
  * caller's fallback rather than arrive as a real -- and wrong -- position in
  * time.
  */
-function dateTime(value: string): number {
+export function dateTime(value: string): number {
   const match = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(value)
   if (!match) {
     return Number.NaN
@@ -402,13 +402,13 @@ function iso(timestamp: number): string {
 }
 
 /**
- * XML-escape a value for element content.
+ * XML-escape a value for element content or an attribute.
  *
  * Characters XML cannot express are dropped rather than escaped, because they
  * have no entity form: emitting one produces a document no conformant reader
  * will load, and losing the character beats losing the file.
  */
-function escapeXml(value: string): string {
+export function escapeXml(value: string): string {
   return (
     [...value]
       // Dropped rather than escaped: a NUL or a lone surrogate has no entity
@@ -455,7 +455,7 @@ function isXmlChar(value: number): boolean {
  * generous: it reads `0x10` as 16 and `1e1` as 10, so a file using either
  * imported a position it never expressed.
  */
-function decimal(value: string | undefined): number {
+export function decimal(value: string | undefined): number {
   return value !== undefined && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value) ? Number(value) : Number.NaN
 }
 
@@ -467,7 +467,7 @@ function decimal(value: string | undefined): number {
  * writing one produces a document a validating reader rejects — so it is
  * refused in both directions rather than trusted from a file or passed on.
  */
-function inRange(latitude: number, longitude: number): boolean {
+export function inRange(latitude: number, longitude: number): boolean {
   return (
     Number.isFinite(latitude) &&
     Number.isFinite(longitude) &&
