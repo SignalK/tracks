@@ -19,7 +19,7 @@ The Tracks webapp lists the tracks in three parts, since each is kept for a diff
 
 - **Own vessel**: its whole recording, which can be downloaded as one GPX file.
 - **Other vessels**: as far back as the plugin keeps them, so the list never reads as though
-  they were kept longer.
+  they were kept longer. When it keeps them indefinitely, the list goes back 30 days.
 - **Imported tracks**: every import, however old.
 
 The package also exports a client side `TrackAccumulator` class that manages the track for a single
