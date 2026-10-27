@@ -28,6 +28,9 @@ export function start() {
   const button = form.querySelector('button[value="reset"]')
   const error = document.getElementById('reset-error')
   const { confirm } = form.elements
+  // Once: a second click while the first is on its way would ask again, and
+  // its refusal would read as though the first had failed.
+  let pending = false
 
   open.addEventListener('click', () => {
     confirm.value = ''
@@ -36,7 +39,7 @@ export function start() {
     dialog.showModal()
   })
   confirm.addEventListener('input', () => {
-    button.disabled = !confirmed(confirm.value)
+    button.disabled = pending || !confirmed(confirm.value)
   })
 
   form.addEventListener('submit', async (event) => {
@@ -44,10 +47,10 @@ export function start() {
       return
     }
     event.preventDefault()
-    if (!confirmed(confirm.value) || button.disabled) {
+    if (pending || !confirmed(confirm.value)) {
       return
     }
-    // Once: a second click while the first is on its way would ask again.
+    pending = true
     button.disabled = true
     let response
     try {
@@ -67,6 +70,7 @@ export function start() {
   function fail(message) {
     error.textContent = message
     error.hidden = false
+    pending = false
     button.disabled = !confirmed(confirm.value)
   }
 }

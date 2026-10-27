@@ -1515,7 +1515,8 @@ describe('the danger zone', () => {
     expect(confirmed('')).toBe(false)
   })
 
-  it('deletes only once the word is typed, says why it was refused, and reloads once done', async () => {
+  /** The dialog's handlers, run against stand-ins for its elements, with `answer` as fetch. */
+  function mount(answer: () => Promise<unknown>) {
     const handlers: Record<string, (event?: unknown) => unknown> = {}
     const on = (name: string) => (_type: string, handler: (event?: unknown) => unknown) => {
       handlers[name] = handler
@@ -1530,16 +1531,24 @@ describe('the danger zone', () => {
       'reset-dialog': dialog,
       'reset-error': error,
     }
-    const answers = [
-      { ok: false, status: 403, json: () => Promise.reject(new Error('not JSON')) },
-      { ok: true, status: 200, json: () => Promise.resolve({ deleted: true }) },
-    ]
-    const fetch = vi.fn(() => Promise.resolve(answers.shift()))
+    const fetch = vi.fn(answer)
     const reload = vi.fn()
     vi.stubGlobal('document', { getElementById: (id: string) => elements[id] })
     vi.stubGlobal('fetch', fetch)
     vi.stubGlobal('location', { reload })
     startDanger()
+    const submit = () => handlers.submit!({ submitter: { value: 'reset' }, preventDefault: () => {} })
+    return { handlers, button, confirm, dialog, error, fetch, reload, submit }
+  }
+
+  it('deletes only once the word is typed, says why it was refused, and reloads once done', async () => {
+    const answers = [
+      { ok: false, status: 403, json: () => Promise.reject(new Error('not JSON')) },
+      { ok: true, status: 200, json: () => Promise.resolve({ deleted: true }) },
+    ]
+    const { handlers, button, confirm, dialog, error, fetch, reload, submit } = mount(() =>
+      Promise.resolve(answers.shift()),
+    )
 
     handlers.click!()
     expect(dialog.showModal).toHaveBeenCalled()
@@ -1552,7 +1561,6 @@ describe('the danger zone', () => {
     handlers.input!()
     expect(button.disabled).toBe(false)
 
-    const submit = () => handlers.submit!({ submitter: { value: 'reset' }, preventDefault: () => {} })
     await submit()
     expect(fetch).toHaveBeenCalledWith(
       '../../plugins/tracks/database?confirm=DELETE',
@@ -1565,6 +1573,29 @@ describe('the danger zone', () => {
 
     await submit()
     expect(dialog.close).toHaveBeenCalled()
+    expect(reload).toHaveBeenCalled()
+  })
+  it('asks once while a delete is on its way, however the word is typed again', async () => {
+    let answer!: (response: unknown) => void
+    const { handlers, button, confirm, error, fetch, reload, submit } = mount(
+      () => new Promise((resolve) => (answer = resolve)),
+    )
+    handlers.click!()
+    confirm.value = 'DELETE'
+    handlers.input!()
+
+    const first = submit()
+    for (const typed of ['DELET', 'DELETE']) {
+      confirm.value = typed
+      handlers.input!()
+      expect(button.disabled).toBe(true)
+    }
+    await submit()
+    expect(fetch).toHaveBeenCalledTimes(1)
+
+    answer({ ok: true, status: 200, json: () => Promise.resolve({ deleted: true }) })
+    await first
+    expect(error.hidden).toBe(true)
     expect(reload).toHaveBeenCalled()
   })
 })
