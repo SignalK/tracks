@@ -1450,11 +1450,15 @@ describe('storage simplification', () => {
       store.newPosition(context, [60 + i * 1e-5, 24], start + i * 1000)
     }
   }
-  /** refineLevels() until it has nothing left, returning its answers. */
+  /**
+   * refineLevels() until it has nothing left, returning its answers. Each call
+   * in a transaction of its own, as the worker runs it: on a file, deleting
+   * row by row in autocommit takes most of a minute on a Windows runner.
+   */
   const settle = (store: SqliteTrackStore, now = later): boolean[] => {
     const answers: boolean[] = []
     for (let i = 0; i < 1000 && answers.at(-1) !== false; i++) {
-      answers.push(store.refineLevels(now))
+      store.transaction(() => answers.push(store.refineLevels(now)))
     }
     return answers
   }
@@ -1560,7 +1564,7 @@ describe('storage simplification', () => {
     }
     try {
       const first = new SqliteTrackStore({ file, storageTolerance: 0.5 }, debug)
-      wander(first, day0)
+      first.transaction(() => wander(first, day0))
       first.close()
       const atHalf = await left(0.5)
       expect(atHalf).toBeLessThan(3600)
