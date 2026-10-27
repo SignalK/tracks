@@ -1524,7 +1524,7 @@ describe('the danger zone', () => {
     const button = { disabled: true }
     const confirm = { value: '', addEventListener: on('input') }
     const form = { elements: { confirm }, querySelector: () => button, addEventListener: on('submit') }
-    const dialog = { querySelector: () => form, showModal: vi.fn(), close: vi.fn() }
+    const dialog = { querySelector: () => form, showModal: vi.fn(), close: vi.fn(), addEventListener: on('cancel') }
     const error = { textContent: '', hidden: true }
     const elements: Record<string, unknown> = {
       'reset-open': { addEventListener: on('click') },
@@ -1538,7 +1538,13 @@ describe('the danger zone', () => {
     vi.stubGlobal('location', { reload })
     startDanger()
     const submit = () => handlers.submit!({ submitter: { value: 'reset' }, preventDefault: () => {} })
-    return { handlers, button, confirm, dialog, error, fetch, reload, submit }
+    /** Whether the dialog stays open when `name` would close it: Cancel, or Esc. */
+    const keptOpen = (name: 'submit' | 'cancel') => {
+      const preventDefault = vi.fn()
+      handlers[name]!({ submitter: { value: 'cancel' }, preventDefault })
+      return preventDefault.mock.calls.length > 0
+    }
+    return { handlers, button, confirm, dialog, error, fetch, reload, submit, keptOpen }
   }
 
   it('deletes only once the word is typed, says why it was refused, and reloads once done', async () => {
@@ -1546,7 +1552,7 @@ describe('the danger zone', () => {
       { ok: false, status: 403, json: () => Promise.reject(new Error('not JSON')) },
       { ok: true, status: 200, json: () => Promise.resolve({ deleted: true }) },
     ]
-    const { handlers, button, confirm, dialog, error, fetch, reload, submit } = mount(() =>
+    const { handlers, button, confirm, dialog, error, fetch, reload, submit, keptOpen } = mount(() =>
       Promise.resolve(answers.shift()),
     )
 
@@ -1570,21 +1576,27 @@ describe('the danger zone', () => {
     expect(error.hidden).toBe(false)
     expect(button.disabled).toBe(false)
     expect(reload).not.toHaveBeenCalled()
+    expect(keptOpen('submit')).toBe(false)
+    expect(keptOpen('cancel')).toBe(false)
 
     await submit()
     expect(dialog.close).toHaveBeenCalled()
     expect(reload).toHaveBeenCalled()
   })
-  it('asks once while a delete is on its way, however the word is typed again', async () => {
+  it('asks once and stays open while a delete is on its way', async () => {
     let answer!: (response: unknown) => void
-    const { handlers, button, confirm, error, fetch, reload, submit } = mount(
+    const { handlers, button, confirm, error, fetch, reload, submit, keptOpen } = mount(
       () => new Promise((resolve) => (answer = resolve)),
     )
     handlers.click!()
+    expect(keptOpen('submit')).toBe(false)
+    expect(keptOpen('cancel')).toBe(false)
     confirm.value = 'DELETE'
     handlers.input!()
 
     const first = submit()
+    expect(keptOpen('submit')).toBe(true)
+    expect(keptOpen('cancel')).toBe(true)
     for (const typed of ['DELET', 'DELETE']) {
       confirm.value = typed
       handlers.input!()

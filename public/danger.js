@@ -41,13 +41,24 @@ export function start() {
   confirm.addEventListener('input', () => {
     button.disabled = pending || !confirmed(confirm.value)
   })
+  // Open until the delete is answered: closed, the dialog would hide whether
+  // it went through, and a refusal would land where nobody sees it.
+  dialog.addEventListener('cancel', (event) => {
+    if (pending) {
+      event.preventDefault()
+    }
+  })
 
   form.addEventListener('submit', async (event) => {
+    if (pending) {
+      event.preventDefault()
+      return
+    }
     if (event.submitter?.value !== 'reset') {
       return
     }
     event.preventDefault()
-    if (pending || !confirmed(confirm.value)) {
+    if (!confirmed(confirm.value)) {
       return
     }
     pending = true
