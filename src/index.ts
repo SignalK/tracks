@@ -475,6 +475,12 @@ export default function ThePlugin(app: App): Plugin {
    */
   let lifecycle = 0
   /**
+   * Every store close a stop() has begun. A stop() waits for all of them, so
+   * a start() the server makes once its stop() is done does not open the file
+   * beside a store still draining into it.
+   */
+  let closed: Promise<void> = Promise.resolve()
+  /**
    * The deleted spans of recorded tracks by context, loaded once and dropped
    * whenever a delete, restore or purge changes them. Read for each day of a
    * history import, which would otherwise ask the store each time.
@@ -863,11 +869,17 @@ export default function ThePlugin(app: App): Plugin {
       // throw, because the server calls stop() on a config save.
       const closing = tracks
       tracks = undefined
-      try {
-        await closing?.close?.()
-      } catch (err) {
-        app.error(err)
+      if (closing) {
+        const closingNow = (async () => {
+          try {
+            await closing.close?.()
+          } catch (err) {
+            app.error(err)
+          }
+        })()
+        closed = Promise.all([closed, closingNow]).then(() => {})
       }
+      await closed
     },
 
     signalKApiRoutes: function (router: Router) {
@@ -1458,6 +1470,7 @@ export default function ThePlugin(app: App): Plugin {
               .json({ message: 'The plugin was restarted or stopped while the delete waited; nothing was deleted.' })
             return
           }
+          let restarted: number
           try {
             for (const suffix of ['', '-wal', '-shm']) {
               rmSync(join(dataDir, `tracks.db${suffix}`), { force: true })
@@ -1465,9 +1478,13 @@ export default function ThePlugin(app: App): Plugin {
           } finally {
             // Started again whatever the delete did, so a file that would not
             // go leaves the plugin recording to it rather than stopped.
-            await plugin.start(config)
+            const starting = plugin.start(config)
+            restarted = lifecycle
+            await starting
           }
-          if (!tracks) {
+          // A store the server stopped or replaced meanwhile is not one that
+          // failed to open.
+          if (!tracks && lifecycle === restarted) {
             app.error('Deleted the track database, but the new one did not open')
             res.status(500).json({
               message: 'The track database was deleted, but the plugin could not start again. The server log says why.',

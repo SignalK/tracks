@@ -14,8 +14,11 @@ const API = '/signalk/v1/api'
 const SELF_ID = SELF_CONTEXT.replace('vessels.', '')
 
 let harness: TestHarness | undefined
+/** Releases for closes a test held, so a test that fails holding one cannot hang the ones after it. */
+const heldCloses: (() => void)[] = []
 
 afterEach(async () => {
+  for (const release of heldCloses.splice(0)) release()
   await harness?.stop()
   harness = undefined
   vi.restoreAllMocks()
@@ -899,7 +902,8 @@ describe('DELETE /plugins/tracks/database', () => {
       await close.call(this)
       then()
     })
-    return { release, waiting: () => vi.waitFor(() => expect(spy).toHaveBeenCalled()) }
+    heldCloses.push(release)
+    return { release, waiting: () => vi.waitFor(() => expect(spy).toHaveBeenCalled(), { timeout: 10_000 }) }
   }
 
   it('deletes a database that will not open, and records on', async () => {
@@ -941,16 +945,70 @@ describe('DELETE /plugins/tracks/database', () => {
     await gate.waiting()
 
     // A configuration save: the server stops the plugin and starts it again.
-    await h.stop()
-    const restarted = h.restart()
+    // Its stop waits for the store the delete is closing, so that its start
+    // does not open the file beside it.
+    let stopped = false
+    const restarted = h
+      .stop()
+      .then(() => (stopped = true))
+      .then(() => h.restart())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(stopped).toBe(false)
     gate.release()
     await restarted
+    const serverStore = h.store()
+    expect(serverStore).toBeDefined()
 
     const res = await answer
     expect(res.status).toBe(409)
     expect(res.body.message).toBe('The plugin was restarted or stopped while the delete waited; nothing was deleted.')
+    expect(h.store()).toBe(serverStore)
     const kept = await request(h.app).get(`${API}/self/track`).expect(200)
     expect(kept.body.coordinates).toEqual([[[24.9, 60.1]]])
+  })
+
+  it('deletes nothing, and starts nothing, when the server stops the plugin while the delete waits', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    const gate = holdClose()
+    const answer = request(h.app)
+      .delete(DELETE_URL)
+      .then((res) => res)
+    await gate.waiting()
+
+    // The plugin disabled, which waits for the store the delete is closing.
+    let stopped = false
+    const stopping = h.stop().then(() => (stopped = true))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(stopped).toBe(false)
+    gate.release()
+    await stopping
+
+    const res = await answer
+    expect(res.status).toBe(409)
+    expect(h.store()).toBeUndefined()
+    await h.restart()
+    const kept = await request(h.app).get(`${API}/self/track`).expect(200)
+    expect(kept.body.coordinates).toEqual([[[24.9, 60.1]]])
+  })
+
+  it('reports the delete when the server stops the plugin as it starts again', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    // Once the old store is closed the delete runs on without waiting, up to
+    // the new store's start, which waits for its worker: the stop lands there.
+    let stopping: Promise<void> | undefined
+    const gate = holdClose(() => setImmediate(() => (stopping = h.stop())))
+    const answer = request(h.app)
+      .delete(DELETE_URL)
+      .then((res) => res)
+    await gate.waiting()
+    gate.release()
+
+    const res = await answer
+    await stopping
+    expect(stopping).toBeDefined()
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ deleted: true })
+    expect(h.store()).toBeUndefined()
   })
 
   it('says so when the plugin does not start again after the delete', async () => {

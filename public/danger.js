@@ -79,18 +79,22 @@ export function start() {
         signal: AbortSignal.timeout(DELETE_WAIT_MS),
       })
     } catch (failure) {
-      if (failure?.name === 'TimeoutError') {
-        // Not asked again, and not with one click either: the server may
-        // still finish the delete, and a second would take what it has
-        // recorded since.
-        confirm.value = ''
-        fail('The server did not answer. The database may still have been deleted: reload the page to see.')
-      } else {
-        fail('Could not reach the server.')
-      }
+      // Not asked again, and not with one click either: the request may have
+      // got through, the server may still finish the delete, and a second
+      // would take what it has recorded since.
+      confirm.value = ''
+      fail(
+        failure?.name === 'TimeoutError'
+          ? 'The server did not answer. The database may still have been deleted: reload the page to see.'
+          : 'The connection failed. The database may still have been deleted: reload the page to see.',
+      )
       return
     }
     if (!response.ok) {
+      // A proxy's answer, not the plugin's: the delete may have gone through.
+      if (response.status >= 502 && response.status <= 504) {
+        confirm.value = ''
+      }
       fail((await messageOf(response)) ?? refusal(response.status))
       return
     }

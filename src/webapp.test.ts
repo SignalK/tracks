@@ -1544,7 +1544,9 @@ describe('the danger zone', () => {
     vi.stubGlobal('fetch', fetch)
     vi.stubGlobal('location', { reload })
     startDanger()
-    const submit = () => handlers.submit!({ submitter: { value: 'reset' }, preventDefault: () => {} })
+    // Kept from the form, whose method="dialog" would close it on the spot.
+    const submitHeld = vi.fn()
+    const submit = () => handlers.submit!({ submitter: { value: 'reset' }, preventDefault: submitHeld })
     /** Whether the dialog stays open on Cancel, or on Esc. */
     const keptOpen = (how: 'Cancel' | 'Esc') => {
       if (how === 'Cancel') {
@@ -1556,7 +1558,7 @@ describe('the danger zone', () => {
       handlers.cancel!({ preventDefault })
       return preventDefault.mock.calls.length > 0
     }
-    return { handlers, button, confirm, dialog, error, fetch, reload, submit, keptOpen }
+    return { handlers, button, confirm, dialog, error, fetch, reload, submit, submitHeld, keptOpen }
   }
 
   it('deletes only once the word is typed, says why it was refused, and reloads once done', async () => {
@@ -1634,9 +1636,44 @@ describe('the danger zone', () => {
     expect(reload).not.toHaveBeenCalled()
   })
 
+  it('asks for the word again when the connection fails', async () => {
+    const { handlers, button, confirm, error, fetch, submit } = mount(() =>
+      Promise.reject(new TypeError('Failed to fetch')),
+    )
+    handlers.click!()
+    confirm.value = 'DELETE'
+    handlers.input!()
+
+    await submit()
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(error.textContent).toBe(
+      'The connection failed. The database may still have been deleted: reload the page to see.',
+    )
+    expect(confirm.value).toBe('')
+    expect(button.disabled).toBe(true)
+  })
+
+  it('asks for the word again after a proxy error, and not after the plugin refused', async () => {
+    for (const [status, cleared] of [
+      [502, true],
+      [504, true],
+      [409, false],
+    ] as const) {
+      const { handlers, confirm, submit } = mount(() =>
+        Promise.resolve({ ok: false, status, json: () => Promise.reject(new Error('not JSON')) }),
+      )
+      handlers.click!()
+      confirm.value = 'DELETE'
+      handlers.input!()
+
+      await submit()
+      expect(confirm.value).toBe(cleared ? '' : 'DELETE')
+    }
+  })
+
   it('asks once and stays open while a delete is on its way', async () => {
     let answer!: (response: unknown) => void
-    const { handlers, button, confirm, error, fetch, reload, submit, keptOpen } = mount(
+    const { handlers, button, confirm, error, fetch, reload, submit, submitHeld, keptOpen } = mount(
       () => new Promise((resolve) => (answer = resolve)),
     )
     handlers.click!()
@@ -1646,6 +1683,7 @@ describe('the danger zone', () => {
     handlers.input!()
 
     const first = submit()
+    expect(submitHeld).toHaveBeenCalledTimes(1)
     expect(keptOpen('Cancel')).toBe(true)
     expect(keptOpen('Esc')).toBe(true)
     for (const typed of ['DELET', 'DELETE']) {
@@ -1654,6 +1692,7 @@ describe('the danger zone', () => {
       expect(button.disabled).toBe(true)
     }
     await submit()
+    expect(submitHeld).toHaveBeenCalledTimes(2)
     expect(fetch).toHaveBeenCalledTimes(1)
 
     answer({ ok: true, status: 200, json: () => Promise.resolve({ deleted: true }) })
