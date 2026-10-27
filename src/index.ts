@@ -582,9 +582,8 @@ export default function ThePlugin(app: App): Plugin {
       // Rebuilt on every start so a changed ceiling takes effect, and so the
       // reference positions do not survive a restart the user made precisely
       // because the track looked wrong.
-      glitchFilter = new GlitchFilter({
-        maxSpeedKnots: toNumber(config.maxSpeedKnots) ?? DEFAULT_MAX_SPEED_KNOTS,
-      })
+      const maxSpeedKnots = toNumber(config.maxSpeedKnots) ?? DEFAULT_MAX_SPEED_KNOTS
+      glitchFilter = new GlitchFilter({ maxSpeedKnots })
       stateResolutions = new Map()
       for (const entry of Array.isArray(config.stateResolutions)
         ? config.stateResolutions
@@ -629,6 +628,7 @@ export default function ThePlugin(app: App): Plugin {
             retention: 0,
             binRetention: binRetentionMs,
             storageTolerance: Math.max(0, toNumber(config.storageTolerance) ?? DEFAULT_STORAGE_TOLERANCE),
+            maxSpeedKnots,
             segmentGap,
           },
           app.debug,
@@ -686,7 +686,9 @@ export default function ThePlugin(app: App): Plugin {
             return
           }
           // Filtered here rather than in each store: both would otherwise need
-          // the same check, and a rejected fix should reach neither.
+          // the same check, and a rejected fix should reach neither. A fix dated
+          // before the one the filter measures from, it cannot judge; the sqlite
+          // store measures that one from its stored positions either side.
           if (!glitchFilter.accept(update.context, position, timestamp ?? Date.now())) {
             return
           }

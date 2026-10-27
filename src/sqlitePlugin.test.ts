@@ -88,6 +88,35 @@ describe('source: sqlite', () => {
     await pluginB.stop()
   })
 
+  // The first fix after a restart can come from a clock not yet set: dated
+  // back into the stored track at a position the vessel reached since, it
+  // would draw a line out and back across the chart.
+  it('drops a fix dated back into the stored track after a restart', async () => {
+    const minute = 60_000
+    const t0 = 1_000_000
+    const self = SELF_CONTEXT as ContextPosition['context']
+    const first = createApp(dir)
+    const pluginA = ThePlugin(first.app)
+    await pluginA.start({ resolution: 0 })
+    first.emit(SELF_CONTEXT, [60, 24], t0)
+    first.emit(SELF_CONTEXT, [60, 24.0005], t0 + minute)
+    first.emit(SELF_CONTEXT, [60, 24.001], t0 + 2 * minute)
+    await pluginA.stop()
+
+    const second = createApp(dir)
+    const pluginB = ThePlugin(second.app)
+    await pluginB.start({ resolution: 0 })
+    second.emit(SELF_CONTEXT, [60, 24.13], t0 + 90_000)
+    second.emit(SELF_CONTEXT, [60, 24.13], t0 + 47 * minute)
+    await expect(pluginB.getTracks()?.get(self)).resolves.toEqual([
+      [60, 24],
+      [60, 24.0005],
+      [60, 24.001],
+      [60, 24.13],
+    ])
+    await pluginB.stop()
+  })
+
   // There is no in-memory fallback any more: a track recorder that forgets
   // everything on restart is not worth starting, so it says why and stops.
   // Every server that can load this plugin provides a data directory.

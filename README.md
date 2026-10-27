@@ -171,6 +171,12 @@ vessel, and glitches usually miss it by orders of magnitude rather than by a lit
 speed rather than distance, so a track resuming after a long gap — a passage with the plugin
 stopped, or an AIS target reappearing — is not filtered. Set it to 0 to record everything.
 
+A fix dated before positions already stored has no previous fix to be measured from. The first
+fix after a restart can be one: when the server's clock is not yet set, it is dated back into
+the stored track at a position the vessel only reached later, and draws a line out and back
+across the chart. Such a fix is measured from the stored positions either side of its time
+instead, and discarded the same way.
+
 Positions the history import brings from a provider are not filtered here — they are that
 provider's record, and it is the one that decides what to keep.
 

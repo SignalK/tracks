@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite'
 import type { StatementSync } from 'node:sqlite'
 import { s2, geojson } from 's2js'
+import { knotsBetween } from './glitchFilter.js'
+import type { Fix } from './glitchFilter.js'
 import { outsideSpans } from './recycleBin.js'
 import { significance } from './simplify.js'
 import { thin, Thinner } from './timeWindow.js'
@@ -205,6 +207,12 @@ export interface SqliteStoreConfig {
    * finer than the resolution is thinned by time instead (`thinOldDetail`).
    */
   storageTolerance?: number
+  /**
+   * Knots above which a fix dated inside the stored track is dropped, measured
+   * to the stored positions either side of it; see `newPosition()`. 0 checks
+   * none.
+   */
+  maxSpeedKnots?: number
   /** A gap longer than this ms starts a new track segment. */
   segmentGap?: number
 }
@@ -439,6 +447,9 @@ export class SqliteTrackStore implements TrackStore {
   private readonly debug: Debug
   /** Timestamp of the last position stored per context, for throttling. */
   private readonly lastStored = new Map<string, number>()
+  private readonly maxSpeedKnots: number
+  /** See contradictsStored(). */
+  private neighbourStatements: Record<'before' | 'after', StatementSync> | undefined
   /**
    * The stored name per context, dated by its newest report. A name arrives
    * with every position, so a repeat is answered here instead of committing a
@@ -487,6 +498,7 @@ export class SqliteTrackStore implements TrackStore {
     this.readProbeLimit = config.readProbeLimit ?? DEFAULT_READ_PROBE_LIMIT
     this.refineBudget = config.refineBudget ?? DEFAULT_REFINE_BUDGET
     this.storageTolerance = config.storageTolerance ?? 0
+    this.maxSpeedKnots = config.maxSpeedKnots ?? 0
     this.segmentGap = config.segmentGap ?? DEFAULT_SEGMENT_GAP
     this.retention = config.retention ?? 0
     this.binRetention = config.binRetention ?? 0
@@ -732,6 +744,16 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   newPosition(context: Context, position: LatLngTuple, timestamp: number = Date.now(), resolution?: number): void {
+    // The glitch filter measures a fix from the one before it, and cannot judge
+    // one dated before that, or the first fix after a restart. That one can come
+    // from a clock not yet set, dated back into the stored track at a position
+    // the vessel only reached since: a line out and back across the chart.
+    if (this.contradictsStored(context, position, timestamp)) {
+      this.debug(
+        `Dropped a fix of ${context} dated ${new Date(timestamp).toISOString()}: too far from the stored track`,
+      )
+      return
+    }
     // Leading-edge throttle per context, matching the in-memory accumulator's
     // throttleTime: the first position in a resolution window is stored and the
     // rest are dropped, not averaged. A vessel emitting at 8 Hz would otherwise
@@ -758,6 +780,39 @@ export class SqliteTrackStore implements TrackStore {
     if ((through !== undefined && day <= through) || (partial?.context === context && day <= partial.day)) {
       this.invalidateLevels(context, timestamp, timestamp)
     }
+  }
+
+  /**
+   * Whether a fix dated inside the stored track implies more than
+   * `maxSpeedKnots` from the stored position before it or to the one after it.
+   * A fix dated after every stored position, as nearly every live one is,
+   * takes one index seek and is the glitch filter's to judge, so one stored
+   * glitch cannot hold up the recording that follows it.
+   */
+  private contradictsStored(context: Context, position: LatLngTuple, timestamp: number): boolean {
+    if (!(this.maxSpeedKnots > 0)) {
+      return false
+    }
+    const statements = (this.neighbourStatements ??= {
+      before: this.db.prepare(
+        'SELECT timestamp, lat, lon FROM positions WHERE context = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT 1',
+      ),
+      after: this.db.prepare(
+        'SELECT timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
+      ),
+    })
+    const after = statements.after.get(context, timestamp) as PositionRow | undefined
+    if (after === undefined) {
+      return false
+    }
+    const before = statements.before.get(context, timestamp) as PositionRow | undefined
+    const fix: Fix = { position, timestamp }
+    const stored = (row: PositionRow): Fix => ({ position: [row.lat, row.lon], timestamp: row.timestamp })
+    // One stored at the same instant, from a second receiver say, is measured
+    // as a second away: a few metres from it is no glitch, a mile is.
+    const next = after.timestamp === timestamp ? { ...stored(after), timestamp: timestamp + 1000 } : stored(after)
+    const speeds = [knotsBetween(fix, next), before && knotsBetween(stored(before), fix)]
+    return speeds.some((knots) => knots !== undefined && knots > this.maxSpeedKnots)
   }
 
   /**
