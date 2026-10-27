@@ -234,6 +234,23 @@ export class QueryParameterError extends Error {}
  */
 export class SelfPositionUnavailableError extends Error {}
 
+/**
+ * A read of a context the store does not know: it never recorded one, its
+ * positions aged out, or the whole track was deleted. A single-track route
+ * answers it with 404. No other rejection of a read means "no track": the v1
+ * routes answer a failed read with 500, so a broken store does not read as a
+ * vessel without a track.
+ */
+export class UnknownContextError extends Error {}
+
+/** A read's catch: an unknown context resolves to `value`, any other failure rejects on. */
+export const unknownAs =
+  <T>(value: T) =>
+  (error: unknown): T => {
+    if (error instanceof UnknownContextError) return value
+    throw error
+  }
+
 export function validateParameters(params: QueryParameters, defaultMaxRadius: number | undefined): TrackParams {
   // Bounding box as west,south,east,north — GeoJSON coordinate order, the same
   // as the coordinates these endpoints return, the Resources API, and the v2

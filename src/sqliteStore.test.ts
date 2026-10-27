@@ -15,6 +15,7 @@ import {
   longitudeSpan,
   MIN_FILLED_GAP_MS,
   splitAtAntimeridian,
+  UnknownContextError,
 } from './utils.js'
 import type { Context, GeoBounds, ImportedTrack, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
 
@@ -1888,7 +1889,18 @@ describe('timeExtent', () => {
       last: 3000,
     })
     await expect(store.timeExtent(ctx, { from: 4000, to: 5000 })).resolves.toBeUndefined()
-    await expect(store.timeExtent(other)).rejects.toThrow()
+    store.close()
+  })
+
+  // What a route answers with 404, and only that: any other rejection is a
+  // read that failed.
+  it('rejects a context the store does not know, as getTimed() does, with UnknownContextError', async () => {
+    const store = newStore()
+    store.newPosition(ctx, [60, 24], 1000)
+
+    await expect(store.timeExtent(other)).rejects.toBeInstanceOf(UnknownContextError)
+    await expect(store.getTimed(other)).rejects.toBeInstanceOf(UnknownContextError)
+    await expect(store.getTimed(ctx, { from: 4000, to: 5000 })).resolves.toEqual([])
     store.close()
   })
 })

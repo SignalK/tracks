@@ -47,6 +47,7 @@ export type WorkerMessage =
         error?: string
         writeFailed?: boolean
         selfPositionUnavailable?: boolean
+        unknownContext?: boolean
         name?: { context: string; value: string | undefined }
         names?: string[]
       }[]

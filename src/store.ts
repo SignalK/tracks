@@ -58,9 +58,10 @@ export interface TrackStore {
   /**
    * Positions for a context, oldest first, optionally narrowed to a window.
    *
-   * Rejects when the context is unknown; the route handlers turn that into a
-   * 404. Resolving with `[]` would be indistinguishable from a vessel that is
-   * known but has not moved.
+   * Rejects with `UnknownContextError` when the context is unknown; the route
+   * handlers turn that into a 404, and any other rejection into a 500.
+   * Resolving with `[]` would be indistinguishable from a vessel that is known
+   * but has not moved.
    */
   get(context: Context, window?: TimeWindow): Promise<LatLngTuple[]>
 
@@ -154,8 +155,9 @@ export interface TrackStore {
 
   /**
    * The times of a context's first and last position in `window`, or undefined
-   * when it has none there, without reading the ones between; rejects for a
-   * context the store does not know, as `getTimed()` does. Optional: a caller
+   * when it has none there, without reading the ones between; rejects with
+   * `UnknownContextError` for a context the store does not know, as
+   * `getTimed()` does. Optional: a caller
    * without it reads the window in one piece.
    */
   timeExtent?(context: Context, window?: TimeWindow): Promise<TimeExtent | undefined>

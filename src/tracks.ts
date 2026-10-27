@@ -14,7 +14,7 @@ import type {
   TrackCollection,
   TrackParams,
 } from './types.js'
-import { createMatcher } from './utils.js'
+import { createMatcher, UnknownContextError } from './utils.js'
 
 interface TracksMap {
   [context: string]: TrackAccumulator
@@ -80,13 +80,12 @@ export class Tracks implements TrackStore {
   /**
    * Track points with their timestamps, optionally narrowed to a time window.
    *
-   * Rejects with EmptyError if the stream completes without emitting; the route
-   * handlers turn that into the same 404 as an unknown context.
+   * Rejects with UnknownContextError for a context with no accumulator.
    */
   getTimed(context: Context, window?: TimeWindow): Promise<TimedPosition[]> {
     const accumulator = this.getAccumulator(context, false)
     if (!accumulator) {
-      return Promise.reject(new Error(`No track accumulator for ${context}`))
+      return Promise.reject(new UnknownContextError(`No track accumulator for ${context}`))
     }
     return firstValueFrom(accumulator.timedTrack).then((points) =>
       window
