@@ -1737,6 +1737,149 @@ describe('persistence', () => {
   })
 })
 
+// The glitch filter measures a fix from the one before it, and has none for
+// the first fix after a restart. That fix can come from a clock not yet set:
+// dated back into the stored track at a position the vessel reached later.
+describe('fixes dated inside the stored track', () => {
+  const minute = 60_000
+  const t0 = 1_000_000
+  // A minute apart, a few metres each: a boat leaving an anchorage.
+  const leaving: [LatLngTuple, number][] = [
+    [[60, 24], t0],
+    [[60, 24.0005], t0 + minute],
+    [[60, 24.001], t0 + 2 * minute],
+  ]
+  // About 7 km east.
+  const later: LatLngTuple = [60, 24.13]
+
+  const withTrack = (run: (file: string) => Promise<void>) => async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-dated-'))
+    const file = join(dir, 'tracks.db')
+    try {
+      const first = new SqliteTrackStore({ file }, debug)
+      for (const [position, timestamp] of leaving) first.newPosition(ctx, position, timestamp)
+      first.close()
+      await run(file)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it(
+    'drops the first fix after a reopen dated into the stored track far from it, until the clock is set',
+    withTrack(async (file) => {
+      const store = new SqliteTrackStore({ file, maxSpeedKnots: 100 }, debug)
+      try {
+        store.newPosition(ctx, later, t0 + 90_000)
+        store.newPosition(ctx, later, t0 + 91_000)
+        await expect(store.get(ctx)).resolves.toEqual(leaving.map(([position]) => position))
+
+        store.newPosition(ctx, later, t0 + 47 * minute)
+        await expect(store.get(ctx)).resolves.toEqual([...leaving.map(([position]) => position), later])
+      } finally {
+        store.close()
+      }
+    }),
+  )
+
+  it(
+    'measures from the stored position before the fix, and to the one after it',
+    withTrack(async (file) => {
+      const store = new SqliteTrackStore({ file, maxSpeedKnots: 100 }, debug)
+      try {
+        // A passage after a gap of five hours. Each fix below agrees with the
+        // stored position on one side of it and is ruled out by the other.
+        store.newPosition(ctx, later, t0 + 5 * 60 * minute)
+        store.newPosition(ctx, later, t0 + 2 * minute + 30_000)
+        store.newPosition(ctx, [60, 24.001], t0 + 5 * 60 * minute - 30_000)
+        await expect(store.get(ctx)).resolves.toEqual([...leaving.map(([position]) => position), later])
+      } finally {
+        store.close()
+      }
+    }),
+  )
+
+  it(
+    'keeps a fix dated into the stored track that agrees with the positions either side',
+    withTrack(async (file) => {
+      const store = new SqliteTrackStore({ file, maxSpeedKnots: 100 }, debug)
+      try {
+        store.newPosition(ctx, [60, 24.00025], t0 + 30_000)
+        await expect(store.getTimed(ctx)).resolves.toHaveLength(4)
+      } finally {
+        store.close()
+      }
+    }),
+  )
+
+  it(
+    'goes on checking after the first fix of a restart is stored',
+    withTrack(async (file) => {
+      const store = new SqliteTrackStore({ file, maxSpeedKnots: 100 }, debug)
+      try {
+        store.newPosition(ctx, [60, 24.00025], t0 + 30_000)
+        store.newPosition(ctx, later, t0 + 90_000)
+        await expect(store.getTimed(ctx)).resolves.toHaveLength(4)
+        await expect(store.get(ctx)).resolves.not.toContainEqual(later)
+      } finally {
+        store.close()
+      }
+    }),
+  )
+
+  it(
+    'measures a fix at the time of a stored position as a second away from it',
+    withTrack(async (file) => {
+      const store = new SqliteTrackStore({ file, maxSpeedKnots: 100 }, debug)
+      try {
+        store.newPosition(ctx, later, t0 + 2 * minute)
+        // Ten metres from the stored one: a second receiver.
+        store.newPosition(ctx, [60, 24.00118], t0 + 2 * minute)
+        await expect(store.get(ctx)).resolves.toEqual([...leaving.map(([position]) => position), [60, 24.00118]])
+      } finally {
+        store.close()
+      }
+    }),
+  )
+
+  it(
+    'leaves a fix dated after the stored track to the glitch filter',
+    withTrack(async (file) => {
+      const store = new SqliteTrackStore({ file, maxSpeedKnots: 100 }, debug)
+      try {
+        store.newPosition(ctx, later, t0 + 2 * minute + 1000)
+        await expect(store.getTimed(ctx)).resolves.toHaveLength(4)
+      } finally {
+        store.close()
+      }
+    }),
+  )
+
+  it(
+    'checks nothing with no ceiling',
+    withTrack(async (file) => {
+      const store = new SqliteTrackStore({ file }, debug)
+      try {
+        store.newPosition(ctx, later, t0 + 90_000)
+        await expect(store.getTimed(ctx)).resolves.toHaveLength(4)
+      } finally {
+        store.close()
+      }
+    }),
+  )
+
+  it('drops a fix dated back past one stored in the same run', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', maxSpeedKnots: 100 }, debug)
+    try {
+      for (const [position, timestamp] of leaving) store.newPosition(ctx, position, timestamp)
+      store.newPosition(ctx, later, t0 + 90_000)
+      await expect(store.get(ctx)).resolves.toEqual(leaving.map(([position]) => position))
+    } finally {
+      store.close()
+    }
+  })
+})
+
 describe('retention', () => {
   it('drops rows older than the retention window', async () => {
     const store = new SqliteTrackStore({ file: ':memory:', retention: 1000 }, debug)

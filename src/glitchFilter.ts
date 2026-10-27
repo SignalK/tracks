@@ -30,9 +30,23 @@ export const DEFAULT_MAX_SPEED_KNOTS = 100
 
 const METRES_PER_NAUTICAL_MILE = 1852
 
-interface LastAccepted {
+export interface Fix {
   position: LatLngTuple
   timestamp: number
+}
+
+/**
+ * The speed in knots that going from one fix to a later one implies.
+ *
+ * Undefined for fixes at the same instant or out of order: dividing by a zero
+ * or negative interval says nothing about whether the jump is real.
+ */
+export function knotsBetween(from: Fix, to: Fix): number | undefined {
+  const seconds = (to.timestamp - from.timestamp) / 1000
+  if (seconds <= 0) {
+    return undefined
+  }
+  return createDistanceTo(from.position)(to.position) / seconds / (METRES_PER_NAUTICAL_MILE / 3600)
 }
 
 export interface GlitchFilterConfig {
@@ -41,7 +55,7 @@ export interface GlitchFilterConfig {
 }
 
 export class GlitchFilter {
-  private readonly last = new Map<Context, LastAccepted>()
+  private readonly last = new Map<Context, Fix>()
   private readonly maxSpeedKnots: number
   /** Rejections per context, for the plugin status line. */
   private readonly rejected = new Map<Context, number>()
@@ -67,16 +81,13 @@ export class GlitchFilter {
       return true
     }
 
-    // Out-of-order or same-instant fixes carry no usable speed: dividing by a
-    // zero or negative interval says nothing about whether the jump is real.
-    // Bootstrapped history arrives back-dated, so this is not hypothetical.
-    const seconds = (timestamp - previous.timestamp) / 1000
-    if (seconds <= 0) {
+    // A fix dated at or before the reference carries no usable speed against
+    // it. The sqlite store judges one dated inside its stored track against the
+    // positions either side of it instead (SqliteTrackStore.newPosition).
+    const knots = knotsBetween(previous, { position, timestamp })
+    if (knots === undefined) {
       return true
     }
-
-    const metres = createDistanceTo(previous.position)(position)
-    const knots = metres / seconds / (METRES_PER_NAUTICAL_MILE / 3600)
     if (knots > this.maxSpeedKnots) {
       this.rejected.set(context, (this.rejected.get(context) ?? 0) + 1)
       return false
