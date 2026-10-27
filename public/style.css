@@ -48,6 +48,32 @@ tbody tr:hover {
   font-weight: 600;
 }
 
+/* The three lists of tracks line up, column for column, where there is room;
+   a narrow screen leaves each column the width its contents need. */
+@media (min-width: 48rem) {
+  .tracks {
+    table-layout: fixed;
+  }
+
+  .tracks th:nth-child(1) {
+    width: 32%;
+  }
+
+  .tracks th:nth-child(2),
+  .tracks th:nth-child(3) {
+    width: 20%;
+  }
+
+  .tracks th:nth-child(4) {
+    width: 10%;
+  }
+
+  .tracks th:nth-child(5),
+  .tracks th:nth-child(6) {
+    width: 9%;
+  }
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -71,7 +97,8 @@ h2 {
 
 #bin-status,
 #import-status,
-#history-status {
+#history-status,
+.note {
   color: GrayText;
   margin: 0 0 1rem;
 }

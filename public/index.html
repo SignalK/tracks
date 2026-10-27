@@ -13,19 +13,57 @@
       <p id="status" role="status">Loading…</p>
     </header>
     <main>
-      <table id="tracks" hidden>
-        <thead>
-          <tr>
-            <th scope="col">Vessel</th>
-            <th scope="col">From</th>
-            <th scope="col">To</th>
-            <th scope="col" class="num">Points</th>
-            <th scope="col">Export</th>
-            <th scope="col"><span class="sr-only">Delete</span></th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
+      <section id="own" aria-labelledby="own-title">
+        <h2 id="own-title">Own vessel</h2>
+        <p id="own-note" class="note">Its whole recording.</p>
+        <table id="own-tracks" class="tracks" hidden>
+          <thead>
+            <tr>
+              <th scope="col">Vessel</th>
+              <th scope="col">From</th>
+              <th scope="col">To</th>
+              <th scope="col" class="num">Points</th>
+              <th scope="col">Export</th>
+              <th scope="col"><span class="sr-only">Delete</span></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+      <section id="others" aria-labelledby="others-title">
+        <h2 id="others-title">Other vessels</h2>
+        <p id="others-note" class="note"></p>
+        <table id="other-tracks" class="tracks" hidden>
+          <thead>
+            <tr>
+              <th scope="col">Vessel</th>
+              <th scope="col">From</th>
+              <th scope="col">To</th>
+              <th scope="col" class="num">Points</th>
+              <th scope="col">Export</th>
+              <th scope="col"><span class="sr-only">Delete</span></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+      <section id="imported" aria-labelledby="imported-title">
+        <h2 id="imported-title">Imported tracks</h2>
+        <p id="imported-note" class="note">Kept until deleted, however old.</p>
+        <table id="imported-tracks" class="tracks" hidden>
+          <thead>
+            <tr>
+              <th scope="col">Vessel</th>
+              <th scope="col">From</th>
+              <th scope="col">To</th>
+              <th scope="col" class="num">Points</th>
+              <th scope="col">Export</th>
+              <th scope="col"><span class="sr-only">Delete</span></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
       <section id="import" aria-labelledby="import-title">
         <h2 id="import-title">Import</h2>
         <p>

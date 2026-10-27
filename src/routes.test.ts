@@ -771,6 +771,21 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   })
 })
 
+// The webapp says how long other vessels are kept, and lists them that far back.
+describe('GET /plugins/tracks/settings', () => {
+  it.each([
+    [{}, 7],
+    [{ aisRetentionDays: 3 }, 3],
+    [{ aisRetentionDays: 0 }, 0],
+  ])('answers how many days other vessels are kept (%j)', async (config, days) => {
+    const h = (harness = createHarness({ selfPosition: [60, 24], config }))
+
+    const res = await request(h.app).get('/plugins/tracks/settings').expect(200)
+
+    expect(res.body).toEqual({ aisRetentionDays: days })
+  })
+})
+
 // Reads come from the store alone: what a provider holds reaches a track
 // through the history import, once, rather than on every query.
 describe('reads with a history provider installed', () => {

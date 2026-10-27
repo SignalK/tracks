@@ -11,7 +11,9 @@
  */
 
 /**
- * How far back the list reaches.
+ * How far back the list of other vessels reaches when the plugin does not say
+ * how long it keeps them, or keeps them indefinitely; otherwise it reaches
+ * back as far as they are kept.
  *
  * The API refuses an unbounded multi-context query — "a time window (from or
  * duration) is required unless a single context is given" — because listing
@@ -19,11 +21,13 @@
  * days covers the passage someone is looking for while keeping the query
  * something the store can serve.
  */
+const LIST_DAYS = 30
+
 // The two APIs spell a duration differently: v2 takes ISO 8601, v1 takes a
-// number with a unit suffix. One constant for both sent `P30D` to the v1
+// number with a unit suffix. One spelling for both sent `P30D` to the v1
 // export route, which rejected it and made every GPX download a 400.
-const WINDOW_V2 = 'P30D'
-const WINDOW_V1 = '30d'
+const v2Days = (days) => `P${days}D`
+const v1Days = (days) => `${days}d`
 
 /** This plugin's id, which the server stamps on its tracks as `providerId`. */
 const PROVIDER_ID = 'tracks'
@@ -45,21 +49,50 @@ const REQUEST_TIMEOUT_MS = 30_000
 const OWN_WAIT_MS = REQUEST_TIMEOUT_MS / 3
 
 /** Relative, because the server mounts this under /@signalk/tracks-plugin. */
-const TRACKS_URL = `../../signalk/v2/api/tracks?geometry=false&duration=${WINDOW_V2}`
+const tracksUrl = (days) => `../../signalk/v2/api/tracks?geometry=false&duration=${v2Days(days)}`
 /**
  * The own vessel's tracks alone, asked for before the whole list: one vessel
  * answers at once, while every AIS target a busy receiver heard in a month
- * can take the store many seconds.
+ * can take the store many seconds. With no window, since one vessel needs
+ * none: its whole recording.
  */
-const OWN_TRACKS_URL = `${TRACKS_URL}&contexts=vessels.self`
+const OWN_TRACKS_URL = '../../signalk/v2/api/tracks?geometry=false&contexts=vessels.self'
+/** How long the plugin keeps other vessels, from its settings. */
+const SETTINGS_URL = '../../plugins/tracks/settings'
 /** One track by its id, on a server that serves them so. */
 const TRACK_URL = '../../signalk/v2/api/tracks/'
 /** Every import, in the shape of the list's rows; the window above misses old and untimed ones. */
 const IMPORTS_URL = '../../plugins/tracks/imports'
 
 const status = document.getElementById('status')
-const table = document.getElementById('tracks')
-const tbody = table.querySelector('tbody')
+
+/** A list of tracks, and the note above it that says what it shows. */
+function listOf(tableId, noteId) {
+  const table = document.getElementById(tableId)
+  return { table, tbody: table.querySelector('tbody'), note: document.getElementById(noteId) }
+}
+
+/**
+ * The own vessel, other vessels and imports each in a list of their own: they
+ * are kept for different times, and one list under one window read as though
+ * all three were kept for it.
+ */
+const lists = {
+  own: listOf('own-tracks', 'own-note'),
+  others: listOf('other-tracks', 'others-note'),
+  imported: listOf('imported-tracks', 'imported-note'),
+}
+
+/** How far back the list of other vessels reaches, once the settings are read. */
+let listDays = LIST_DAYS
+
+function kindOf(properties) {
+  const id = localId(properties)
+  if (typeof id === 'string' && id.startsWith('imported:')) {
+    return 'imported'
+  }
+  return properties.isSelf ? 'own' : 'others'
+}
 
 /**
  * The label for a track, matching `trackLabel()` on the server.
@@ -157,9 +190,12 @@ function exportCell(properties) {
     link.href = `../../plugins/tracks/imports/${encodeURIComponent(trackId)}/track.gpx`
   } else if (typeof context === 'string') {
     // `self` resolves server-side; using it keeps the URL short and avoids
-    // guessing how the own vessel's context should be spelled.
-    const vessel = isSelf ? 'self/track.gpx' : `vessels/${encodeURIComponent(context)}/track.gpx`
-    link.href = `../../signalk/v1/api/${vessel}?duration=${WINDOW_V1}`
+    // guessing how the own vessel's context should be spelled. The own
+    // vessel's whole recording, which the route writes a day at a time; another
+    // vessel's as far back as its list reaches.
+    link.href = isSelf
+      ? '../../signalk/v1/api/self/track.gpx'
+      : `../../signalk/v1/api/vessels/${encodeURIComponent(context)}/track.gpx?duration=${v1Days(listDays)}`
   } else {
     return td
   }
@@ -256,28 +292,70 @@ function listable(properties) {
 }
 
 /**
- * Puts the entries that can be shown in the table, newest first: the track
+ * Puts the entries that can be shown in their lists, newest first: the track
  * someone came to look at is almost always the one that just finished.
  */
 function draw(entries) {
   const sorted = entries.filter(listable).sort((a, b) => String(b.to ?? '').localeCompare(String(a.to ?? '')))
-  // Replaced even with nothing, so the own vessel's rows shown while the list
-  // loaded do not outlive a list that has none.
-  tbody.replaceChildren(...sorted.map(row))
-  table.hidden = sorted.length === 0
+  for (const [kind, { table, tbody }] of Object.entries(lists)) {
+    const rows = sorted.filter((properties) => kindOf(properties) === kind)
+    // Replaced even with nothing, so the own vessel's rows shown while the
+    // list loaded do not outlive a list that has none.
+    tbody.replaceChildren(...rows.map(row))
+    table.hidden = rows.length === 0
+  }
   return sorted
 }
 
-/** The own vessel's listed tracks, or none when that request fails: the whole list reports it. */
+const daysText = (days) => `${days} day${days === 1 ? '' : 's'}`
+
+/**
+ * The notes over the lists, for what they turned out to hold. `own` says
+ * whether the own vessel's request answered, and with its recording: when it
+ * did not, its row is the list's window of it.
+ */
+function describe(sorted, retention, own) {
+  const has = (kind) => sorted.some((properties) => kindOf(properties) === kind)
+  const window = `the last ${daysText(listDays)}`
+  lists.own.note.textContent = own.whole
+    ? 'Its whole recording.'
+    : own.answered && !has('own')
+      ? 'Nothing recorded yet.'
+      : has('own')
+        ? `In ${window}.`
+        : `None in ${window}.`
+  const kept =
+    retention === undefined
+      ? ''
+      : retention > 0
+        ? ` The plugin keeps them ${daysText(retention)}.`
+        : ' The plugin keeps them indefinitely.'
+  lists.others.note.textContent = has('others') ? `In ${window}.${kept}` : `None in ${window}.${kept}`
+  lists.imported.note.textContent = has('imported') ? 'Kept until deleted, however old.' : 'No imported tracks.'
+}
+
+/** How many days the plugin keeps other vessels, 0 for indefinitely, or undefined when it does not say. */
+async function retention(signal) {
+  try {
+    const response = await fetch(SETTINGS_URL, { credentials: 'include', signal })
+    const body = response.ok ? await response.json() : undefined
+    const days = body?.aisRetentionDays
+    return Number.isFinite(days) && days >= 0 ? days : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The own vessel's listed tracks, or undefined when that request fails: the whole list reports it. */
 async function ownTracks(signal) {
   try {
     const response = await fetch(OWN_TRACKS_URL, { credentials: 'include', signal })
     const body = response.ok ? await response.json() : undefined
     return body?.type === 'FeatureCollection' && Array.isArray(body.features)
       ? body.features.map((feature) => feature?.properties)
-      : []
+      : undefined
   } catch {
-    return []
+    return undefined
   }
 }
 
@@ -297,6 +375,8 @@ async function load() {
   // The status is a live region: busy while it counts, so a screen reader
   // announces where the wait ended rather than every second of it.
   status.setAttribute('aria-busy', 'true')
+  // Beside the own vessel's tracks: it asks the plugin, not the store.
+  const kept = retention(AbortSignal.timeout(OWN_WAIT_MS))
   try {
     // The others are asked for once this settles, not beside it: the store
     // answers one query at a time, so asked together the own vessel's would
@@ -304,23 +384,25 @@ async function load() {
     // timer starts with the deadline, so it ends inside it, and a request
     // stalled on its way cannot take the list's time with it.
     const own = await ownTracks(AbortSignal.timeout(OWN_WAIT_MS))
-    if (own.filter(listable).length > 0) {
+    if (own?.some(listable)) {
       draw(own)
       waiting = 'Loading the other vessels…'
       tick()
     }
-    await list(deadline)
+    const days = await kept
+    listDays = days > 0 ? days : LIST_DAYS
+    await list(deadline, own, days)
   } finally {
     clearInterval(ticker)
     status.setAttribute('aria-busy', 'false')
   }
 }
 
-async function list(deadline) {
+async function list(deadline, own, retention) {
   const imports = allImports(deadline)
   let response
   try {
-    response = await fetch(TRACKS_URL, { credentials: 'include', signal: deadline })
+    response = await fetch(tracksUrl(listDays), { credentials: 'include', signal: deadline })
   } catch {
     show(deadline.aborted ? 'The server did not answer in time.' : 'Could not reach the server.', 'error')
     return
@@ -357,7 +439,25 @@ async function list(deadline) {
     show('The server sent a response this page could not read.', 'error')
     return
   }
-  const listed = body.features.map((feature) => feature?.properties)
+  // The own vessel's whole recording came with its own request, so the list's
+  // window of it is left out, unless that request found nothing.
+  const whole = (own ?? []).some((properties) => listable(properties) && kindOf(properties) === 'own')
+  const seen = new Set()
+  // An import of the own vessel can come with both requests; shown once. Told
+  // apart by provider too, since two providers can give a track the same id.
+  const listed = [
+    ...(own ?? []).filter(listable),
+    ...body.features
+      .map((feature) => feature?.properties)
+      .filter((properties) => !whole || !properties || kindOf(properties) !== 'own'),
+  ].filter((properties) => {
+    const id = localId(properties)
+    if (typeof id !== 'string') return true
+    const key = `${properties.providerId ?? ''}:${id}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
   const ids = new Set(listed.map(localId))
   const unlisted = (await imports).filter((properties) => !ids.has(localId(properties)))
   // A server older than the Track API's write routes names tracks without
@@ -366,17 +466,9 @@ async function list(deadline) {
   const older = (await namesByProvider(listed, unlisted, deadline))
     ? unlisted
     : unlisted.map((properties) => ({ ...properties, id: localId(properties), providerId: undefined }))
-  const sorted = draw([...listed, ...older])
-
-  // Checked after filtering, not before: a response of nothing but malformed
-  // features would otherwise draw an empty table reading "0 tracks".
-  if (sorted.length === 0) {
-    show('No tracks in the last 30 days.')
-    return
-  }
-
-  const tracks = `${sorted.length} track${sorted.length === 1 ? '' : 's'}`
-  show(older.length > 0 ? `${tracks}: the last 30 days, and every import.` : `${tracks} in the last 30 days.`)
+  describe(draw([...listed, ...older]), retention, { whole, answered: own !== undefined })
+  show('')
+  status.hidden = true
 }
 
 void load()
