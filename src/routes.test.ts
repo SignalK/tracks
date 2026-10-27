@@ -58,6 +58,18 @@ describe('GET /vessels/:vesselId/track', () => {
 
     expect(res.body.message).toMatch(/No track available/)
   })
+
+  // A broken store must not read as a vessel without a track: only an
+  // unknown context makes a 404.
+  it('answers 500, and logs why, when the store fails to read a vessel it holds', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    vi.spyOn(AsyncTrackStore.prototype, 'getTimed').mockRejectedValue(new Error('disk I/O error'))
+
+    const res = await request(h.app).get(`${API}/vessels/${SELF_ID}/track`).expect(500)
+
+    expect(res.body.message).toBe(`Could not read the track for ${SELF_CONTEXT}`)
+    expect(h.errors.flat().join(' ')).toContain('disk I/O error')
+  })
 })
 
 describe('GET /tracks', () => {
@@ -100,6 +112,20 @@ describe('GET /tracks', () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
 
     await request(h.app).get(`${API}/tracks/anything`).expect(200)
+  })
+
+  // A list that matches nothing is an empty 200, so a 404 for a failed read
+  // only hid the failure.
+  it('answers 500, and logs why, when the store fails to read the list', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    vi.spyOn(AsyncTrackStore.prototype, 'getFilteredTracks').mockRejectedValue(new Error('disk I/O error'))
+    vi.spyOn(AsyncTrackStore.prototype, 'getFilteredTimedTracks').mockRejectedValue(new Error('disk I/O error'))
+
+    for (const query of ['', '?times']) {
+      const res = await request(h.app).get(`${API}/tracks${query}`).expect(500)
+      expect(res.body.message).toBe('Could not read the tracks')
+    }
+    expect(h.errors.flat().join(' ')).toContain('disk I/O error')
   })
 })
 
@@ -705,6 +731,16 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
 
     await request(h.app).get(`${API}/vessels/urn:mrn:imo:mmsi:999999999/track.gpx`).expect(404)
+  })
+
+  it('answers 500, and logs why, when the store fails to find the days of a vessel it holds', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    vi.spyOn(AsyncTrackStore.prototype, 'timeExtent').mockRejectedValue(new Error('disk I/O error'))
+
+    const res = await request(h.app).get(`${API}/vessels/${SELF_ID}/track.gpx`).expect(500)
+
+    expect(res.body.message).toBe(`Could not export the track for ${SELF_CONTEXT}`)
+    expect(h.errors.flat().join(' ')).toContain('disk I/O error')
   })
 
   // The export reads a day at a time, stepping over days with nothing; the

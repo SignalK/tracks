@@ -16,6 +16,7 @@ import {
   longitudeSpanOf,
   MIN_FILLED_GAP_MS,
   splitAtAntimeridian,
+  UnknownContextError,
 } from './utils.js'
 import type { LongitudeExtremes } from './utils.js'
 import type {
@@ -906,7 +907,7 @@ export class SqliteTrackStore implements TrackStore {
     // points. Resolving [] for both would make the two indistinguishable and
     // the route could not answer 404.
     if (!this.knows(context)) {
-      return Promise.reject(new Error(`No track for ${context}`))
+      return Promise.reject(new UnknownContextError(`No track for ${context}`))
     }
     const range: TimeRange = {
       from: window?.from ?? Number.NEGATIVE_INFINITY,
@@ -927,7 +928,7 @@ export class SqliteTrackStore implements TrackStore {
 
   timeExtent(context: Context, window?: TimeWindow): Promise<TimeExtent | undefined> {
     if (!this.knows(context)) {
-      return Promise.reject(new Error(`No track for ${context}`))
+      return Promise.reject(new UnknownContextError(`No track for ${context}`))
     }
     // The end as getTimed() reads it, so the two agree on what lies inside.
     const end = !window || window.inclusiveEnd === true ? '<=' : '<'

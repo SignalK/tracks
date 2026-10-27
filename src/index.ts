@@ -61,6 +61,7 @@ import {
   unwrapString,
   QueryParameterError,
   SelfPositionUnavailableError,
+  unknownAs,
 } from './utils.js'
 
 export interface ContextPosition {
@@ -901,7 +902,8 @@ export default function ThePlugin(app: App): Plugin {
        * stepping over the days with nothing, and each day is handed to
        * `onPoints` once thinning has settled it, so a recording of years is
        * never held whole, until `cancelled` says the answer is no longer
-       * wanted. Resolves false for a vessel the store does not know.
+       * wanted. Resolves false for a vessel the store does not know, and
+       * rejects when the store fails to read one it does.
        */
       const readTrack = async (
         context: string,
@@ -913,11 +915,13 @@ export default function ThePlugin(app: App): Plugin {
         const store = tracks!
         const stream = new TrackStream(query.resolution, segmentGap)
         if (pieces === 'whole' || !store.timeExtent) {
-          const points = await store.getTimed(context, query.window).catch(() => undefined)
+          const points = await store.getTimed(context, query.window).catch(unknownAs(undefined))
           if (points === undefined) return false
           await onPoints(stream.push(points))
         } else {
-          let extent: TimeExtent | undefined | null = await store.timeExtent(context, query.window).catch(() => null)
+          let extent: TimeExtent | undefined | null = await store
+            .timeExtent(context, query.window)
+            .catch(unknownAs(null))
           if (extent === null) return false
           const last = extent?.last
           while (extent !== undefined && last !== undefined && !cancelled()) {
@@ -991,9 +995,13 @@ export default function ThePlugin(app: App): Plugin {
                 name: nameOf(context),
               })
             })
-            .catch(() => {
-              res.status(404)
-              res.json({ message: `No track available for ${context}` })
+            .catch((err: unknown) => {
+              // Not a 404: `readSegments` reported an unknown vessel already,
+              // so this is a read, or the answer, that failed, and a known
+              // track must not read as missing.
+              app.error(`Could not read the track for ${context}: ${errorDetail(err)}`)
+              res.status(500)
+              res.json({ message: `Could not read the track for ${context}` })
             })
         }
 
@@ -1200,8 +1208,11 @@ export default function ThePlugin(app: App): Plugin {
               res.json({ message: 'No position for the own vessel, so radius cannot be measured' })
               return
             }
-            res.status(404)
-            res.json({ message: `No track available for vessels.` })
+            // Nor is a store that failed. A list that matches nothing is an
+            // empty 200, so a 404 here only hid the failure.
+            app.error(`Could not read the tracks: ${errorDetail(err)}`)
+            res.status(500)
+            res.json({ message: 'Could not read the tracks' })
           })
       }
       router.get('/tracks', allTracksHandler)
@@ -1703,6 +1714,7 @@ export default function ThePlugin(app: App): Plugin {
 export { fromGpx, toGpx } from './gpx.js'
 export type { GpxExportTrack, GpxPoint, GpxTrack, GpxTrackIdentity } from './gpx.js'
 export { Tracks, TrackAccumulator } from './tracks.js'
+export { UnknownContextError } from './utils.js'
 export type { TracksConfig } from './tracks.js'
 export type { TrackStore } from './store.js'
 export type * from './types.js'

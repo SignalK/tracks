@@ -1,4 +1,4 @@
-import { SelfPositionUnavailableError } from './utils.js'
+import { SelfPositionUnavailableError, UnknownContextError } from './utils.js'
 import { Worker } from 'node:worker_threads'
 import type { TrackStore } from './store.js'
 import type { SqliteTrackStore, SqliteStoreConfig } from './sqliteStore.js'
@@ -280,7 +280,11 @@ export class AsyncTrackStore implements TrackStore {
           this.report(new Error(result.error))
         }
         item.reject?.(
-          result.selfPositionUnavailable ? new SelfPositionUnavailableError(result.error) : new Error(result.error),
+          result.selfPositionUnavailable
+            ? new SelfPositionUnavailableError(result.error)
+            : result.unknownContext
+              ? new UnknownContextError(result.error)
+              : new Error(result.error),
         )
       } else {
         if (item.operation.method === 'prune') {

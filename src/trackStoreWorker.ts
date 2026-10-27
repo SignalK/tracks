@@ -1,5 +1,5 @@
 import { parentPort, workerData } from 'node:worker_threads'
-import { SelfPositionUnavailableError } from './utils.js'
+import { SelfPositionUnavailableError, UnknownContextError } from './utils.js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
 import type { SqliteStoreConfig } from './sqliteStore.js'
 import type { Debug } from './types.js'
@@ -228,6 +228,7 @@ if (store) {
               id: operation.id,
               error: errorText(error),
               selfPositionUnavailable: error instanceof SelfPositionUnavailableError,
+              unknownContext: error instanceof UnknownContextError,
             })
           }
         }

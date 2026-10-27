@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Tracks, TrackAccumulator } from './tracks.js'
+import { UnknownContextError } from './utils.js'
 import type { Debug, LatLngTuple } from './types.js'
 
 const debug = Object.assign(() => undefined, { enabled: false }) as Debug
@@ -91,7 +92,7 @@ describe('TrackAccumulator', () => {
 describe('Tracks', () => {
   it('rejects get() for a context with no accumulator', async () => {
     const tracks = new Tracks({ resolution: 0, pointsToKeep: 10 }, debug)
-    await expect(tracks.get(CONTEXT)).rejects.toThrow()
+    await expect(tracks.get(CONTEXT)).rejects.toBeInstanceOf(UnknownContextError)
   })
 
   it('ignores contexts that are not vessels or aircraft', () => {

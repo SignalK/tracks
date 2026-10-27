@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AsyncTrackStore } from './asyncTrackStore.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import type { Debug, ImportedTrack, LatLngTuple } from './types.js'
+import { UnknownContextError } from './utils.js'
 
 const debug: Debug = Object.assign(() => undefined, { enabled: false })
 let dir: string
@@ -26,6 +27,20 @@ const create = (onError: (error: Error) => void = () => {}, limits = {}) => {
 }
 
 describe('worker-owned SQLite', () => {
+  it('passes a read that fails in SQLite on as a failure, not as an unknown context', async () => {
+    const store = create()
+    store.newPosition('self', [60, 24], 100)
+    expect(await store.get('self')).toEqual([[60, 24]])
+    // The file damaged under the worker: its positions are gone.
+    const other = new DatabaseSync(join(dir, 'tracks.db'))
+    other.exec('DROP TABLE positions')
+    other.close()
+
+    const failed = store.get('self')
+    await expect(failed).rejects.toThrow(/no such table/)
+    await expect(failed).rejects.not.toBeInstanceOf(UnknownContextError)
+  })
+
   it('preserves FIFO, copies coordinates, captures arrival time and drains on close', async () => {
     const store = create()
     const position: LatLngTuple = [60, 24]
@@ -79,7 +94,10 @@ describe('worker-owned SQLite', () => {
         }
         expect(await worker.getFilteredTimedTracks(params)).toEqual(await original.getFilteredTimedTracks(params))
       }
-      await expect(worker.get('unknown')).rejects.toThrow('No track')
+      // Its type survives the worker, so a route can still tell an unknown
+      // vessel from a read that failed.
+      await expect(worker.get('unknown')).rejects.toBeInstanceOf(UnknownContextError)
+      await expect(worker.timeExtent('unknown')).rejects.toBeInstanceOf(UnknownContextError)
       expect(await worker.get('replaced')).toEqual([[3, 4]])
     } finally {
       original.close()
@@ -167,7 +185,10 @@ describe('worker-owned SQLite', () => {
     const store = new AsyncTrackStore({ file: join(dir, 'missing', 'tracks.db') }, debug, (error) => errors.push(error))
     open.push(store)
     await expect(store.ready).rejects.toThrow()
+    // A store that never opened knows nothing, but that is a failure, not an
+    // unknown vessel.
     await expect(store.get('self')).rejects.toThrow()
+    await expect(store.get('self')).rejects.not.toBeInstanceOf(UnknownContextError)
     await expect(store.close()).rejects.toThrow()
     expect(errors).toHaveLength(1)
   })
