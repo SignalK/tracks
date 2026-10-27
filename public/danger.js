@@ -23,7 +23,7 @@ const DATABASE_URL = `../../plugins/tracks/database?confirm=${CONFIRMATION}`
  */
 const DELETE_WAIT_MS = 60_000
 
-/** Whether what was typed confirms the delete. */
+/** Spaces around the word are forgiven, its case is not. */
 export function confirmed(typed) {
   return typed.trim() === CONFIRMATION
 }
@@ -33,6 +33,9 @@ export function start() {
   const dialog = document.getElementById('reset-dialog')
   const form = dialog.querySelector('form')
   const button = form.querySelector('button[value="reset"]')
+  // Not a submit button: Enter in the field submits with the form's first
+  // one, and a Cancel there would close the dialog on the word just typed.
+  const cancel = form.querySelector('button[value="cancel"]')
   const error = document.getElementById('reset-error')
   const { confirm } = form.elements
   // Once: a second click while the first is on its way would ask again, and
@@ -55,17 +58,15 @@ export function start() {
       event.preventDefault()
     }
   })
+  cancel.addEventListener('click', () => {
+    if (!pending) {
+      dialog.close()
+    }
+  })
 
   form.addEventListener('submit', async (event) => {
-    if (pending) {
-      event.preventDefault()
-      return
-    }
-    if (event.submitter?.value !== 'reset') {
-      return
-    }
     event.preventDefault()
-    if (!confirmed(confirm.value)) {
+    if (pending || !confirmed(confirm.value)) {
       return
     }
     pending = true
@@ -78,12 +79,15 @@ export function start() {
         signal: AbortSignal.timeout(DELETE_WAIT_MS),
       })
     } catch (failure) {
-      // Not asked again: the server may still finish the delete.
-      fail(
-        failure?.name === 'TimeoutError'
-          ? 'The server did not answer. The database may still have been deleted: reload the page to see.'
-          : 'Could not reach the server.',
-      )
+      if (failure?.name === 'TimeoutError') {
+        // Not asked again, and not with one click either: the server may
+        // still finish the delete, and a second would take what it has
+        // recorded since.
+        confirm.value = ''
+        fail('The server did not answer. The database may still have been deleted: reload the page to see.')
+      } else {
+        fail('Could not reach the server.')
+      }
       return
     }
     if (!response.ok) {

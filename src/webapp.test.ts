@@ -1524,8 +1524,13 @@ describe('the danger zone', () => {
       handlers[name] = handler
     }
     const button = { disabled: true }
+    const cancelButton = { addEventListener: on('cancelClick') }
     const confirm = { value: '', addEventListener: on('input') }
-    const form = { elements: { confirm }, querySelector: () => button, addEventListener: on('submit') }
+    const form = {
+      elements: { confirm },
+      querySelector: (selector: string) => (selector.includes('cancel') ? cancelButton : button),
+      addEventListener: on('submit'),
+    }
     const dialog = { querySelector: () => form, showModal: vi.fn(), close: vi.fn(), addEventListener: on('cancel') }
     const error = { textContent: '', hidden: true }
     const elements: Record<string, unknown> = {
@@ -1540,10 +1545,15 @@ describe('the danger zone', () => {
     vi.stubGlobal('location', { reload })
     startDanger()
     const submit = () => handlers.submit!({ submitter: { value: 'reset' }, preventDefault: () => {} })
-    /** Whether the dialog stays open when `name` would close it: Cancel, or Esc. */
-    const keptOpen = (name: 'submit' | 'cancel') => {
+    /** Whether the dialog stays open on Cancel, or on Esc. */
+    const keptOpen = (how: 'Cancel' | 'Esc') => {
+      if (how === 'Cancel') {
+        const closes = dialog.close.mock.calls.length
+        handlers.cancelClick!()
+        return dialog.close.mock.calls.length === closes
+      }
       const preventDefault = vi.fn()
-      handlers[name]!({ submitter: { value: 'cancel' }, preventDefault })
+      handlers.cancel!({ preventDefault })
       return preventDefault.mock.calls.length > 0
     }
     return { handlers, button, confirm, dialog, error, fetch, reload, submit, keptOpen }
@@ -1578,13 +1588,15 @@ describe('the danger zone', () => {
     expect(error.hidden).toBe(false)
     expect(button.disabled).toBe(false)
     expect(reload).not.toHaveBeenCalled()
-    expect(keptOpen('submit')).toBe(false)
-    expect(keptOpen('cancel')).toBe(false)
+    expect(keptOpen('Cancel')).toBe(false)
+    expect(keptOpen('Esc')).toBe(false)
 
+    const closes = dialog.close.mock.calls.length
     await submit()
-    expect(dialog.close).toHaveBeenCalled()
+    expect(dialog.close).toHaveBeenCalledTimes(closes + 1)
     expect(reload).toHaveBeenCalled()
   })
+
   it('waits a minute for a delete, then stops and says it may have gone through', async () => {
     // AbortSignal.timeout runs on timers of Node's own, which fake timers do
     // not reach, so the deadline is rebuilt on setTimeout for the test.
@@ -1606,7 +1618,7 @@ describe('the danger zone', () => {
     await vi.advanceTimersByTimeAsync(59_999)
     expect(error.hidden).toBe(true)
     expect(button.disabled).toBe(true)
-    expect(keptOpen('cancel')).toBe(true)
+    expect(keptOpen('Esc')).toBe(true)
 
     await vi.advanceTimersByTimeAsync(1)
     await sent
@@ -1615,8 +1627,10 @@ describe('the danger zone', () => {
     expect(error.textContent).toBe(
       'The server did not answer. The database may still have been deleted: reload the page to see.',
     )
-    expect(button.disabled).toBe(false)
-    expect(keptOpen('cancel')).toBe(false)
+    // A second delete takes the word typed again, not one click.
+    expect(confirm.value).toBe('')
+    expect(button.disabled).toBe(true)
+    expect(keptOpen('Esc')).toBe(false)
     expect(reload).not.toHaveBeenCalled()
   })
 
@@ -1626,14 +1640,14 @@ describe('the danger zone', () => {
       () => new Promise((resolve) => (answer = resolve)),
     )
     handlers.click!()
-    expect(keptOpen('submit')).toBe(false)
-    expect(keptOpen('cancel')).toBe(false)
+    expect(keptOpen('Cancel')).toBe(false)
+    expect(keptOpen('Esc')).toBe(false)
     confirm.value = 'DELETE'
     handlers.input!()
 
     const first = submit()
-    expect(keptOpen('submit')).toBe(true)
-    expect(keptOpen('cancel')).toBe(true)
+    expect(keptOpen('Cancel')).toBe(true)
+    expect(keptOpen('Esc')).toBe(true)
     for (const typed of ['DELET', 'DELETE']) {
       confirm.value = typed
       handlers.input!()
@@ -1646,5 +1660,15 @@ describe('the danger zone', () => {
     await first
     expect(error.hidden).toBe(true)
     expect(reload).toHaveBeenCalled()
+  })
+  // Enter in the field submits with the form's first submit button: were that
+  // Cancel, typing the word and pressing Enter would close the dialog.
+  it('has Delete as its only submit button', () => {
+    const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8')
+    const form = /<dialog id="reset-dialog"[\s\S]*?<\/dialog>/.exec(html)![0]
+    const submits = [...form.matchAll(/<button\b([^>]*)>/g)]
+      .map(([, attributes]) => attributes!)
+      .filter((attributes) => !/type="button"/.test(attributes))
+    expect(submits).toEqual([' value="reset" class="danger" disabled'])
   })
 })
