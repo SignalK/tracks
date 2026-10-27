@@ -1506,6 +1506,8 @@ describe('the history import section', () => {
 describe('the danger zone', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    vi.useRealTimers()
   })
 
   it('takes DELETE, and nothing else, as confirming', () => {
@@ -1516,7 +1518,7 @@ describe('the danger zone', () => {
   })
 
   /** The dialog's handlers, run against stand-ins for its elements, with `answer` as fetch. */
-  function mount(answer: () => Promise<unknown>) {
+  function mount(answer: (url: string, init: { signal: AbortSignal }) => Promise<unknown>) {
     const handlers: Record<string, (event?: unknown) => unknown> = {}
     const on = (name: string) => (_type: string, handler: (event?: unknown) => unknown) => {
       handlers[name] = handler
@@ -1583,15 +1585,32 @@ describe('the danger zone', () => {
     expect(dialog.close).toHaveBeenCalled()
     expect(reload).toHaveBeenCalled()
   })
-  it('stops waiting for a delete that is not answered, and says it may have gone through', async () => {
-    const timedOut = Object.assign(new Error('signal timed out'), { name: 'TimeoutError' })
-    const { handlers, button, confirm, error, fetch, reload, submit, keptOpen } = mount(() => Promise.reject(timedOut))
+  it('waits a minute for a delete, then stops and says it may have gone through', async () => {
+    // AbortSignal.timeout runs on timers of Node's own, which fake timers do
+    // not reach, so the deadline is rebuilt on setTimeout for the test.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const deadline = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController()
+      setTimeout(() => controller.abort(new DOMException('signal timed out', 'TimeoutError')), ms)
+      return controller.signal
+    })
+    const { handlers, button, confirm, error, fetch, reload, submit, keptOpen } = mount(
+      (_url: string, { signal }: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason))),
+    )
     handlers.click!()
     confirm.value = 'DELETE'
     handlers.input!()
 
-    await submit()
-    expect(fetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    const sent = submit()
+    await vi.advanceTimersByTimeAsync(59_999)
+    expect(error.hidden).toBe(true)
+    expect(button.disabled).toBe(true)
+    expect(keptOpen('cancel')).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(1)
+    await sent
+    expect(deadline).toHaveBeenCalledWith(60_000)
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(error.textContent).toBe(
       'The server did not answer. The database may still have been deleted: reload the page to see.',
