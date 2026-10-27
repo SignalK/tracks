@@ -171,6 +171,13 @@ vessel, and glitches usually miss it by orders of magnitude rather than by a lit
 speed rather than distance, so a track resuming after a long gap — a passage with the plugin
 stopped, or an AIS target reappearing — is not filtered. Set it to 0 to record everything.
 
+The first fix after a start, and the first after more than ten minutes without one, has nothing
+checked before it. Were it a glitch, every real fix after it would look like a jump away from it,
+and be discarded for as long as that speed takes to cover the distance: hours, for a glitch whole
+degrees off. So when two fixes in a row agree with each other but not with it, the second is taken
+as the vessel's position instead, and only the first of them is lost. A fix that the next one
+agrees with is not given up that way, so a run of glitches after it is discarded.
+
 A fix dated before positions already stored has no previous fix to be measured from. The first
 fix after a restart can be one: when the server's clock is not yet set, it is dated back into
 the stored track at a position the vessel only reached later, and draws a line out and back
