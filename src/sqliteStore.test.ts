@@ -1720,6 +1720,23 @@ describe('segments', () => {
   })
 })
 
+describe('timeExtent', () => {
+  it('gives the first and last time in a window, read as getTimed() reads it', async () => {
+    const store = newStore()
+    for (const t of [1000, 2000, 3000]) store.newPosition(ctx, [60, 24], t)
+
+    await expect(store.timeExtent(ctx)).resolves.toEqual({ first: 1000, last: 3000 })
+    await expect(store.timeExtent(ctx, { from: 1500, to: 3000 })).resolves.toEqual({ first: 2000, last: 2000 })
+    await expect(store.timeExtent(ctx, { from: 1500, to: 3000, inclusiveEnd: true })).resolves.toEqual({
+      first: 2000,
+      last: 3000,
+    })
+    await expect(store.timeExtent(ctx, { from: 4000, to: 5000 })).resolves.toBeUndefined()
+    await expect(store.timeExtent(other)).rejects.toThrow()
+    store.close()
+  })
+})
+
 describe('persistence', () => {
   it('keeps positions across a reopen', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs')

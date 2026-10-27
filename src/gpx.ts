@@ -53,13 +53,7 @@ export interface GpxExportTrack extends GpxTrackIdentity {
  * anything else, since `<extensions>` is ignorable by specification.
  */
 export function toGpx(tracks: GpxExportTrack[], now: Date = new Date()): string {
-  const lines = [
-    '<?xml version="1.0" encoding="UTF-8"?>',
-    '<gpx version="1.1" creator="@signalk/tracks-plugin" xmlns="http://www.topografix.com/GPX/1/1">',
-    '  <metadata>',
-    `    <time>${iso(now.getTime())}</time>`,
-    '  </metadata>',
-  ]
+  const lines = header(now)
   for (const track of tracks) {
     const segments = track.segments
       .map((points) => points.filter((p) => inRange(p.position[LAT], p.position[LNG])))
@@ -69,34 +63,105 @@ export function toGpx(tracks: GpxExportTrack[], now: Date = new Date()): string 
     if (segments.length === 0) {
       continue
     }
-    lines.push('  <trk>')
-    lines.push(`    <name>${escapeXml(track.name)}</name>`)
-    if (track.context !== undefined) {
-      lines.push('    <extensions>')
-      lines.push(`      <signalk:context xmlns:signalk="${NAMESPACE}">${escapeXml(track.context)}</signalk:context>`)
-      lines.push('    </extensions>')
-    }
+    lines.push(...trackStart(track))
     for (const points of segments) {
       lines.push('    <trkseg>')
-      for (const { position, timestamp } of points) {
-        const at = `lat="${coordinate(position[LAT])}" lon="${coordinate(position[LNG])}"`
-        // An imported track can have no times; a made-up one would place it
-        // in 1970 for every reader that imports it back.
-        if (timestamp === undefined) {
-          lines.push(`      <trkpt ${at}/>`)
-          continue
-        }
-        lines.push(`      <trkpt ${at}>`)
-        // <time> is the only child, and GPX 1.1 fixes the order of trkpt's
-        // children — a schema-validating reader rejects them out of sequence.
-        lines.push(`        <time>${iso(timestamp)}</time>`)
-        lines.push('      </trkpt>')
+      for (const point of points) {
+        lines.push(...trackPoint(point))
       }
       lines.push('    </trkseg>')
     }
     lines.push('  </trk>')
   }
   lines.push('</gpx>')
+  return text(lines)
+}
+
+/**
+ * One track written as `toGpx()` writes it, a piece at a time: an export of a
+ * long recording is sent as it is read rather than built whole in memory.
+ * Every piece is text to send on; joined, they are what `toGpx()` returns for
+ * the same points, in the same segments.
+ */
+export class GpxTrackWriter {
+  private open: 'none' | 'track' | 'segment' = 'none'
+
+  constructor(
+    private readonly track: GpxTrackIdentity,
+    private readonly now: Date = new Date(),
+  ) {}
+
+  start(): string {
+    return text(header(this.now))
+  }
+
+  /** The next points, each saying whether it starts a segment, as `TrackStream` hands them on. */
+  write(points: { point: GpxPoint; starts: boolean }[]): string {
+    const lines: string[] = []
+    for (const { point, starts } of points) {
+      if (starts && this.open === 'segment') {
+        lines.push('    </trkseg>')
+        this.open = 'track'
+      }
+      // Opened at the first point that is written, so a track or a segment
+      // with none in range is left out, as toGpx() leaves it out.
+      if (!inRange(point.position[LAT], point.position[LNG])) {
+        continue
+      }
+      if (this.open === 'none') {
+        lines.push(...trackStart(this.track))
+        this.open = 'track'
+      }
+      if (this.open === 'track') {
+        lines.push('    <trkseg>')
+        this.open = 'segment'
+      }
+      lines.push(...trackPoint(point))
+    }
+    return lines.length > 0 ? text(lines) : ''
+  }
+
+  end(): string {
+    const lines = this.open === 'segment' ? ['    </trkseg>', '  </trk>'] : this.open === 'track' ? ['  </trk>'] : []
+    this.open = 'none'
+    return text([...lines, '</gpx>'])
+  }
+}
+
+function header(now: Date): string[] {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<gpx version="1.1" creator="@signalk/tracks-plugin" xmlns="http://www.topografix.com/GPX/1/1">',
+    '  <metadata>',
+    `    <time>${iso(now.getTime())}</time>`,
+    '  </metadata>',
+  ]
+}
+
+function trackStart(track: GpxTrackIdentity): string[] {
+  const lines = ['  <trk>', `    <name>${escapeXml(track.name)}</name>`]
+  if (track.context !== undefined) {
+    lines.push('    <extensions>')
+    lines.push(`      <signalk:context xmlns:signalk="${NAMESPACE}">${escapeXml(track.context)}</signalk:context>`)
+    lines.push('    </extensions>')
+  }
+  return lines
+}
+
+function trackPoint({ position, timestamp }: GpxPoint): string[] {
+  const at = `lat="${coordinate(position[LAT])}" lon="${coordinate(position[LNG])}"`
+  // An imported track can have no times; a made-up one would place it
+  // in 1970 for every reader that imports it back.
+  if (timestamp === undefined) {
+    return [`      <trkpt ${at}/>`]
+  }
+  // <time> is the only child, and GPX 1.1 fixes the order of trkpt's
+  // children — a schema-validating reader rejects them out of sequence.
+  return [`      <trkpt ${at}>`, `        <time>${iso(timestamp)}</time>`, '      </trkpt>']
+}
+
+/** Lines as the document's text, each ended by a newline. */
+function text(lines: string[]): string {
   return lines.join('\n') + '\n'
 }
 

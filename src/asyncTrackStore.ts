@@ -361,6 +361,9 @@ export class AsyncTrackStore implements TrackStore {
   summarize(contexts: Context[] | undefined, window?: TimeWindow) {
     return this.enqueue('summarize', [contexts, window])
   }
+  timeExtent(context: Context, window?: TimeWindow) {
+    return this.enqueue('timeExtent', [context, window])
+  }
   storeImport(track: ImportedTrack): Promise<void> {
     return this.enqueue('storeImport', [track], 'acknowledged')
   }

@@ -26,16 +26,16 @@ import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
 import { importStatus, runHistoryImport } from './historyImport.js'
 import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
-import { fromGpx, toGpx } from './gpx.js'
+import { fromGpx, GpxTrackWriter, toGpx } from './gpx.js'
 import { fromGpxTrack, isImportedId } from './importedTracks.js'
 import { readText, UploadTooLargeError, UploadTypeError } from './upload.js'
-import { parseTrackQuery, segment, thin, TimeWindowError } from './timeWindow.js'
-import type { TrackQuery } from './timeWindow.js'
+import { parseTrackQuery, segment, TimeWindowError, TrackStream } from './timeWindow.js'
+import type { StreamedPoint, TrackQuery } from './timeWindow.js'
 import type {
   BinEntry,
   Context,
-  DeletedSpan,
   Debug,
+  DeletedSpan,
   HistoryImportState,
   LatLngTuple,
   LngLatTuple,
@@ -43,6 +43,7 @@ import type {
   StoredImport,
   TimedPosition,
   TimedTrackCollection,
+  TimeExtent,
   TrackCollection,
   TrackParams,
 } from './types.js'
@@ -864,17 +865,66 @@ export default function ThePlugin(app: App): Plugin {
         )
 
       /**
-       * The points of one context, thinned and segmented.
-       *
-       * Shared by the JSON and GPX routes so the two cannot answer the same
-       * question differently.
-       *
-       * Resolves `undefined` for a vessel the store does not know at all; a
-       * known vessel with nothing inside the window is an empty track.
+       * A track as both single-track routes answer it: read, thinned to the
+       * query's resolution and split into segments, all through one
+       * TrackStream, so the same query cannot be answered two ways. `whole`
+       * reads the window in one piece; otherwise it is read a day at a time,
+       * stepping over the days with nothing, and each day is handed to
+       * `onPoints` once thinning has settled it, so a recording of years is
+       * never held whole. Resolves false for a vessel the store does not know.
+       */
+      const readTrack = async (
+        context: string,
+        query: TrackQuery,
+        pieces: 'whole' | 'days',
+        onPoints: (points: StreamedPoint[]) => void | Promise<void>,
+      ): Promise<boolean> => {
+        const store = tracks!
+        const stream = new TrackStream(query.resolution, segmentGap)
+        if (pieces === 'whole' || !store.timeExtent) {
+          const points = await store.getTimed(context, query.window).catch(() => undefined)
+          if (points === undefined) return false
+          await onPoints(stream.push(points))
+        } else {
+          let extent: TimeExtent | undefined | null = await store.timeExtent(context, query.window).catch(() => null)
+          if (extent === null) return false
+          const last = extent?.last
+          while (extent !== undefined && last !== undefined) {
+            const dayEnd: number = (Math.floor(extent.first / DAY_MS) + 1) * DAY_MS
+            const lastDay = dayEnd > last
+            await onPoints(
+              stream.push(
+                await store.getTimed(
+                  context,
+                  lastDay
+                    ? { from: extent.first, to: last, inclusiveEnd: true }
+                    : { from: extent.first, to: dayEnd, inclusiveEnd: false },
+                ),
+              ),
+            )
+            extent = lastDay
+              ? undefined
+              : await store.timeExtent(context, { from: dayEnd, to: last, inclusiveEnd: true })
+          }
+        }
+        await onPoints(stream.finish())
+        return true
+      }
+
+      /**
+       * The JSON route's track, thinned and segmented. Resolves `undefined`
+       * for a vessel the store does not know at all; a known vessel with
+       * nothing inside the window is an empty track.
        */
       const readSegments = async (context: string, query: TrackQuery): Promise<TimedPosition[][] | undefined> => {
-        const points = await tracks!.getTimed(context, query.window).catch(() => undefined)
-        return points && segment(thin(points, query.resolution), segmentGap)
+        const segments: TimedPosition[][] = []
+        const known = await readTrack(context, query, 'whole', (points) => {
+          for (const { point, starts } of points) {
+            if (starts) segments.push([])
+            segments.at(-1)!.push(point)
+          }
+        })
+        return known ? segments : undefined
       }
 
       const singleTrackHandler =
@@ -940,38 +990,78 @@ export default function ThePlugin(app: App): Plugin {
             res.json({ message: err instanceof TimeWindowError ? err.message : 'Invalid query parameters' })
             return
           }
-          readSegments(context, query)
-            .then((segments) => {
-              if (segments === undefined) {
+          const label = nameOf(context)
+          const writer = new GpxTrackWriter({ name: label, context })
+          // Written a day at a time as it is read, so exporting a recording of
+          // years holds a day of it rather than all of it, twice over, on the
+          // server's own thread.
+          let closed = false
+          res.on('close', () => {
+            closed = true
+          })
+          const send = (text: string): Promise<void> =>
+            new Promise((resolve) => {
+              // A response already closed takes nothing and says so by no event.
+              if (text === '' || closed || res.write(text)) {
+                resolve()
+                return
+              }
+              // Waits for the client to take what was sent, or to go away.
+              const done = () => {
+                res.off('drain', done)
+                res.off('close', done)
+                resolve()
+              }
+              res.on('drain', done)
+              res.on('close', done)
+            })
+          const begin = async () => {
+            if (res.headersSent) return
+            const filename = gpxFilename(label)
+            res.type('application/gpx+xml')
+            // Two forms, per RFC 5987. A header carries bytes, not text, so
+            // `setHeader` throws ERR_INVALID_CHAR on a name outside Latin-1
+            // -- which this route's catch would have reported as a 404, and
+            // a name inside it would arrive mojibaked instead. The quoted
+            // form is ASCII for readers that understand nothing else; the
+            // `filename*` form carries the real name.
+            res.setHeader(
+              'Content-Disposition',
+              `attachment; filename="${asciiFilename(filename)}"; filename*=UTF-8''${rfc8187(filename)}`,
+            )
+            await send(writer.start())
+          }
+          readTrack(context, query, 'days', async (points) => {
+            if (closed) throw new Error('The client went away')
+            await begin()
+            await send(writer.write(points))
+          })
+            .then(async (known) => {
+              if (closed) return
+              if (!known) {
                 res.status(404)
                 res.json({ message: `No track available for ${context}` })
                 return
               }
-              const label = nameOf(context)
-              const filename = gpxFilename(label)
-              res.type('application/gpx+xml')
-              // Two forms, per RFC 5987. A header carries bytes, not text, so
-              // `setHeader` throws ERR_INVALID_CHAR on a name outside Latin-1
-              // -- which this route's catch would have reported as a 404, and
-              // a name inside it would arrive mojibaked instead. The quoted
-              // form is ASCII for readers that understand nothing else; the
-              // `filename*` form carries the real name.
-              res.setHeader(
-                'Content-Disposition',
-                `attachment; filename="${asciiFilename(filename)}"; filename*=UTF-8''${rfc8187(filename)}`,
-              )
-              res.send(toGpx([{ name: label, context, segments }]))
+              // A known vessel with nothing in the window is still a document.
+              await begin()
+              res.end(writer.end())
             })
             .catch((err: unknown) => {
-              // Not a 404: `readSegments` already reported an unknown vessel by
-              // resolving undefined, so anything reaching here is this route
-              // failing -- serialisation, a header, a write. Reporting that as
-              // "no track available" is what disguised an ERR_INVALID_CHAR
-              // from a non-Latin-1 filename as a missing track.
+              if (closed) return
+              // Not a 404: `readTrack` already reported an unknown vessel by
+              // resolving false, so anything reaching here is this route
+              // failing -- a read, serialisation, a header, a write. Reporting
+              // that as "no track available" is what disguised an
+              // ERR_INVALID_CHAR from a non-Latin-1 filename as a missing track.
               app.error(`Could not export GPX for ${context}: ${errorDetail(err)}`)
               if (!res.headersSent) {
                 res.status(500)
                 res.json({ message: `Could not export the track for ${context}` })
+              } else {
+                // Part of the file is out: ending it would pass a cut-off
+                // export as a whole one.
+                res.destroy(err instanceof Error ? err : new Error(String(err)))
               }
             })
         }

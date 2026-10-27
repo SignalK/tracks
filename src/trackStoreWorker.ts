@@ -201,6 +201,9 @@ if (store) {
               case 'summarize':
                 value = target.summarize(...operation.args)
                 break
+              case 'timeExtent':
+                value = await target.timeExtent(...operation.args)
+                break
               case 'getImport':
                 value = target.getImport(...operation.args)
                 break
