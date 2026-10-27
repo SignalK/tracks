@@ -2628,7 +2628,7 @@ describe('an import filling the gaps in a recording', () => {
     }
   })
 
-  it('judges each run against the ones written before it in the same call', async () => {
+  it('judges each run against the ones before it in the same call', async () => {
     const store = newStore()
     try {
       const first = run(61, t0, 121, 10_000)
