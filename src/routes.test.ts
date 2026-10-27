@@ -1,3 +1,5 @@
+import { get } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AsyncTrackStore } from './asyncTrackStore.js'
@@ -753,6 +755,53 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     const windows = read.mock.calls.map(([, window]) => window)
     expect(windows).toHaveLength(3)
     for (const window of windows) expect(window!.to - window!.from).toBeLessThanOrEqual(24 * 60 * 60_000)
+  })
+
+  // A download the client gave up on is not read on to its end.
+  it('reads no day more once the client has gone', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+    const day = Date.UTC(2026, 6, 1)
+    const times = [0, 1, 2].map((i) => day + i * 24 * 60 * 60_000 + 1000)
+    h.seedTrack(
+      SELF_CONTEXT,
+      times.map(() => [60, 24]),
+      times,
+    )
+    // The step to the second day waits until the client has gone, so the
+    // route sees that before it could read on.
+    let release = () => {}
+    const gone = new Promise<void>((resolve) => (release = resolve))
+    const extent = AsyncTrackStore.prototype.timeExtent
+    let steps = 0
+    vi.spyOn(AsyncTrackStore.prototype, 'timeExtent').mockImplementation(async function (
+      this: AsyncTrackStore,
+      ...args
+    ) {
+      if (steps++ === 1) await gone
+      return extent.apply(this, args)
+    })
+    const read = vi.spyOn(AsyncTrackStore.prototype, 'getTimed')
+    const server = h.app.listen(0)
+    try {
+      const { port } = server.address() as AddressInfo
+      await new Promise<void>((resolve) => {
+        const req = get(`http://127.0.0.1:${port}${API}/self/track.gpx`, (res) => {
+          res.once('data', () => {
+            req.destroy()
+            setTimeout(() => {
+              release()
+              setTimeout(resolve, 100)
+            }, 100)
+          })
+        })
+        req.on('error', () => {})
+      })
+    } finally {
+      server.close()
+    }
+
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(h.errors).toEqual([])
   })
 
   // The GPX and JSON routes share one read pipeline, so a query answered by
