@@ -58,7 +58,9 @@ the default is chosen under **Data → Preferences**.
 [keep the own track past its retention](https://github.com/dirkwa/signalk-questdb#retention-and-the-archive),
 and it
 [imports a chartplotter's GPX export](https://github.com/dirkwa/signalk-questdb#importing-a-gpx-track)
-of any size, which the history import then brings into this plugin.
+of any size, which the history import then brings into this plugin. Without a provider, this
+plugin imports such an export into its own recording; see
+[Importing a large file](#importing-a-large-file).
 
 ## Imported tracks
 
@@ -106,8 +108,8 @@ as well (`onOverlap=replace`; the default is `keep`) replaces the recording rath
 it. What is written into the recording is simplified with the rest of it once it is a day old (see
 [Simplifying stored tracks](#simplifying-stored-tracks)), so keep the file if you want every point.
 
-The file can be at most 25 MiB. A larger export, such as years of a chartplotter's tracks, is
-better imported into a history provider; see [Keeping tracks for years](#keeping-tracks-for-years).
+The file can be at most 25 MiB here. The webapp sends a file of the own vessel in slices instead,
+whatever its size; see [Importing a large file](#importing-a-large-file).
 
 In a timed track, points without a time are skipped, and the answer says how many
 (`skippedPoints`), as it does for the points left out where the recording already has positions
@@ -115,6 +117,48 @@ In a timed track, points without a time are skipped, and the answer says how man
 always kept beside the recording this way, since that API has no such choice yet. The route
 needs write access on a Signal K server that lets a plugin say so, and administrator rights on
 an older one.
+
+### Importing a large file
+
+A chartplotter's export of several years runs past a gigabyte, more than one request can carry.
+With **Tracks of my own vessel** ticked, the Tracks webapp first reads the file in the browser and
+lists its tracks by name, with how many points each has and when they begin and end, to choose
+which are the vessel's: such an export mixes the own track with the AIS targets the plotter
+followed, which it names `AIS <name>` or by the MMSI and which are not ticked. A track without
+times cannot be placed in the recording and cannot be chosen. **Import** then sends the file a
+slice at a time, and the server writes each slice's points into the recording before it takes
+the next, so neither side holds more of the file than a slice.
+
+The points are written as above: into the gaps of the recording, or with **Replace** in place of
+what it holds, one recycle bin entry for each segment of the file. Points without a time are left
+out and counted. A file that is not well-formed GPX stops the import where it breaks; what came
+before it stays written. **Stop** ends the import, and what it wrote stays too: importing the same
+file again fills in the rest.
+
+A slice that does not get through, on a boat's Wi-Fi say, is sent again from where the server got
+to. A restart of the plugin breaks the import off only until the page sends again: the server goes
+on from the last point it saved. Reloading the page and importing the same file with the same
+choices goes on where it stopped. One file is imported at a time; one nobody has sent to for 15
+minutes gives way to the next.
+
+A file of another vessel stays at 25 MiB, since an imported track is read whole.
+
+A client does the same through these routes, which need write access:
+
+- `POST /plugins/tracks/imports/upload` with a JSON body of `filename` and `size`, the file's
+  name and size in bytes, `tracks`, the names of the tracks to import (`""` for a track without
+  one, the name it has before its first `<trkseg>`), and `onOverlap`, `keep` or `replace`. It
+  answers `201` with the `upload`.
+- `PUT /plugins/tracks/imports/upload/<id>?offset=<byte>` with the next slice of at most 8 MiB as
+  `application/octet-stream`, answered once its points are written. A slice that does not start at
+  the upload's `received` is answered `409`, with the upload, to go on from there. The slice that
+  brings the file to its size finishes the upload.
+- `GET /plugins/tracks/imports/upload` returns the last upload, and
+  `DELETE /plugins/tracks/imports/upload/<id>` stops it.
+
+An `upload` carries its `id`, `filename`, `size`, `tracks`, `onOverlap`, how many bytes it has
+`received`, its `state` (`receiving`, `finished`, `aborted` or `failed`, with an `error`), and
+how many points it `imported`, left out as `overlapping`, and left out as `untimed`.
 
 ### Importing from a history provider
 
