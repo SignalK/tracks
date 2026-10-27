@@ -7,6 +7,8 @@ import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { imported, importQuery, start as startImport } from '../public/import.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
+import { confirmed, start as startDanger } from '../public/danger.js'
+// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { historyView, POLL_MS, start as startHistory } from '../public/history.js'
 
 /**
@@ -1496,5 +1498,216 @@ describe('the history import section', () => {
       dataset: { state: 'error' },
     })
     expect(button.disabled).toBe(false)
+  })
+})
+
+// Nothing it deletes comes back, so the button waits for the word, and a
+// refusal says why rather than looking like nothing happened.
+describe('the danger zone', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  it('takes DELETE, and nothing else, as confirming', () => {
+    expect(confirmed('DELETE')).toBe(true)
+    expect(confirmed(' DELETE ')).toBe(true)
+    expect(confirmed('delete')).toBe(false)
+    expect(confirmed('')).toBe(false)
+  })
+
+  /** The dialog's handlers, run against stand-ins for its elements, with `answer` as fetch. */
+  function mount(answer: (url: string, init: { signal: AbortSignal }) => Promise<unknown>) {
+    const handlers: Record<string, (event?: unknown) => unknown> = {}
+    const on = (name: string) => (_type: string, handler: (event?: unknown) => unknown) => {
+      handlers[name] = handler
+    }
+    const button = { disabled: true }
+    const cancelButton = { addEventListener: on('cancelClick') }
+    const confirm = { value: '', addEventListener: on('input') }
+    const form = {
+      elements: { confirm },
+      querySelector: (selector: string) => (selector.includes('cancel') ? cancelButton : button),
+      addEventListener: on('submit'),
+    }
+    const dialog = { querySelector: () => form, showModal: vi.fn(), close: vi.fn(), addEventListener: on('cancel') }
+    const error = { textContent: '', hidden: true }
+    const elements: Record<string, unknown> = {
+      'reset-open': { addEventListener: on('click') },
+      'reset-dialog': dialog,
+      'reset-error': error,
+    }
+    const fetch = vi.fn(answer)
+    const reload = vi.fn()
+    vi.stubGlobal('document', { getElementById: (id: string) => elements[id] })
+    vi.stubGlobal('fetch', fetch)
+    vi.stubGlobal('location', { reload })
+    startDanger()
+    // Kept from the form, whose method="dialog" would close it on the spot.
+    const submitHeld = vi.fn()
+    const submit = () => handlers.submit!({ submitter: { value: 'reset' }, preventDefault: submitHeld })
+    /** Whether the dialog stays open on Cancel, or on Esc. */
+    const keptOpen = (how: 'Cancel' | 'Esc') => {
+      if (how === 'Cancel') {
+        const closes = dialog.close.mock.calls.length
+        handlers.cancelClick!()
+        return dialog.close.mock.calls.length === closes
+      }
+      const preventDefault = vi.fn()
+      handlers.cancel!({ preventDefault })
+      return preventDefault.mock.calls.length > 0
+    }
+    return { handlers, button, confirm, dialog, error, fetch, reload, submit, submitHeld, keptOpen }
+  }
+
+  it('deletes only once the word is typed, says why it was refused, and reloads once done', async () => {
+    const answers = [
+      { ok: false, status: 403, json: () => Promise.reject(new Error('not JSON')) },
+      { ok: true, status: 200, json: () => Promise.resolve({ deleted: true }) },
+    ]
+    const { handlers, button, confirm, dialog, error, fetch, reload, submit, keptOpen } = mount(() =>
+      Promise.resolve(answers.shift()),
+    )
+
+    handlers.click!()
+    expect(dialog.showModal).toHaveBeenCalled()
+    for (const typed of ['delete', 'DELET']) {
+      confirm.value = typed
+      handlers.input!()
+      expect(button.disabled).toBe(true)
+    }
+    confirm.value = 'DELETE'
+    handlers.input!()
+    expect(button.disabled).toBe(false)
+
+    await submit()
+    expect(fetch).toHaveBeenCalledWith(
+      '../../plugins/tracks/database?confirm=DELETE',
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    expect(error.textContent).toBe('This needs an administrator login.')
+    expect(error.hidden).toBe(false)
+    expect(button.disabled).toBe(false)
+    expect(reload).not.toHaveBeenCalled()
+    expect(keptOpen('Cancel')).toBe(false)
+    expect(keptOpen('Esc')).toBe(false)
+
+    const closes = dialog.close.mock.calls.length
+    await submit()
+    expect(dialog.close).toHaveBeenCalledTimes(closes + 1)
+    expect(reload).toHaveBeenCalled()
+  })
+
+  it('waits a minute for a delete, then stops and says it may have gone through', async () => {
+    // AbortSignal.timeout runs on timers of Node's own, which fake timers do
+    // not reach, so the deadline is rebuilt on setTimeout for the test.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const deadline = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController()
+      setTimeout(() => controller.abort(new DOMException('signal timed out', 'TimeoutError')), ms)
+      return controller.signal
+    })
+    const { handlers, button, confirm, error, fetch, reload, submit, keptOpen } = mount(
+      (_url: string, { signal }: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason))),
+    )
+    handlers.click!()
+    confirm.value = 'DELETE'
+    handlers.input!()
+
+    const sent = submit()
+    await vi.advanceTimersByTimeAsync(59_999)
+    expect(error.hidden).toBe(true)
+    expect(button.disabled).toBe(true)
+    expect(keptOpen('Esc')).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(1)
+    await sent
+    expect(deadline).toHaveBeenCalledWith(60_000)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(error.textContent).toBe(
+      'The server did not answer. The database may still have been deleted: reload the page to see.',
+    )
+    // A second delete takes the word typed again, not one click.
+    expect(confirm.value).toBe('')
+    expect(button.disabled).toBe(true)
+    expect(keptOpen('Esc')).toBe(false)
+    expect(reload).not.toHaveBeenCalled()
+  })
+
+  it('asks for the word again when the connection fails', async () => {
+    const { handlers, button, confirm, error, fetch, submit } = mount(() =>
+      Promise.reject(new TypeError('Failed to fetch')),
+    )
+    handlers.click!()
+    confirm.value = 'DELETE'
+    handlers.input!()
+
+    await submit()
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(error.textContent).toBe(
+      'The connection failed. The database may still have been deleted: reload the page to see.',
+    )
+    expect(confirm.value).toBe('')
+    expect(button.disabled).toBe(true)
+  })
+
+  it('asks for the word again after a proxy error, and not after the plugin refused', async () => {
+    for (const [status, cleared] of [
+      [502, true],
+      [504, true],
+      [409, false],
+    ] as const) {
+      const { handlers, confirm, submit } = mount(() =>
+        Promise.resolve({ ok: false, status, json: () => Promise.reject(new Error('not JSON')) }),
+      )
+      handlers.click!()
+      confirm.value = 'DELETE'
+      handlers.input!()
+
+      await submit()
+      expect(confirm.value).toBe(cleared ? '' : 'DELETE')
+    }
+  })
+
+  it('asks once and stays open while a delete is on its way', async () => {
+    let answer!: (response: unknown) => void
+    const { handlers, button, confirm, error, fetch, reload, submit, submitHeld, keptOpen } = mount(
+      () => new Promise((resolve) => (answer = resolve)),
+    )
+    handlers.click!()
+    expect(keptOpen('Cancel')).toBe(false)
+    expect(keptOpen('Esc')).toBe(false)
+    confirm.value = 'DELETE'
+    handlers.input!()
+
+    const first = submit()
+    expect(submitHeld).toHaveBeenCalledTimes(1)
+    expect(keptOpen('Cancel')).toBe(true)
+    expect(keptOpen('Esc')).toBe(true)
+    for (const typed of ['DELET', 'DELETE']) {
+      confirm.value = typed
+      handlers.input!()
+      expect(button.disabled).toBe(true)
+    }
+    await submit()
+    expect(submitHeld).toHaveBeenCalledTimes(2)
+    expect(fetch).toHaveBeenCalledTimes(1)
+
+    answer({ ok: true, status: 200, json: () => Promise.resolve({ deleted: true }) })
+    await first
+    expect(error.hidden).toBe(true)
+    expect(reload).toHaveBeenCalled()
+  })
+  // Enter in the field submits with the form's first submit button: were that
+  // Cancel, typing the word and pressing Enter would close the dialog.
+  it('has Delete as its only submit button', () => {
+    const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8')
+    const form = /<dialog id="reset-dialog"[\s\S]*?<\/dialog>/.exec(html)![0]
+    const submits = [...form.matchAll(/<button\b([^>]*)>/g)]
+      .map(([, attributes]) => attributes!)
+      .filter((attributes) => !/type="button"/.test(attributes))
+    expect(submits).toEqual([' value="reset" class="danger" disabled'])
   })
 })

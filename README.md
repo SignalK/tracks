@@ -165,6 +165,24 @@ they apply again to what is restored: an AIS vessel's positions restored after t
 past the retention are dropped at the next prune. Once a recorded span is purged its points are gone,
 but the history import keeps leaving it out for good.
 
+### Deleting the whole database
+
+For a store gone wrong past repair, the webapp's **Danger zone** deletes the whole database and
+starts the plugin again on an empty one, as if it had just been installed. It works on a database
+that no longer opens as well. That deletes:
+
+- the own vessel's whole recording;
+- every other vessel's track;
+- every imported track, and the recycle bin;
+- how far the history import got.
+
+Nothing of it can be brought back, and it skips the recycle bin. Keep a copy first: the own
+vessel's row exports its whole recording as GPX, and each import exports from its own row.
+
+Deleted parts of the own vessel's recording are forgotten as well, so a history import afterwards
+brings them back. It asks for `DELETE` to be typed before it goes ahead. The route,
+`DELETE /plugins/tracks/database?confirm=DELETE`, needs administrator rights and the same word.
+
 ## Glitch filtering
 
 A receiver occasionally reports a position far from the vessel — a bad almanac, a multipath

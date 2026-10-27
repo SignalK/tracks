@@ -88,7 +88,8 @@ function when(iso) {
   return Number.isNaN(at.getTime()) ? '—' : at.toLocaleString()
 }
 
-async function messageOf(response) {
+/** The message a refusing server sent with its answer, if it sent one. */
+export async function messageOf(response) {
   try {
     const body = await response.json()
     return body?.error ?? body?.message

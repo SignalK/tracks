@@ -154,3 +154,8 @@ dialog menu {
   padding: 0;
   margin: 0;
 }
+
+#reset-dialog label {
+  display: block;
+  margin: 0 0 1rem;
+}

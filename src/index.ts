@@ -15,6 +15,7 @@
 
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
+import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { createTrackProvider } from './trackProvider.js'
 import type { TrackProvider } from './trackProvider.js'
@@ -464,6 +465,21 @@ export default function ThePlugin(app: App): Plugin {
   let binRetentionMs = DEFAULT_RECYCLE_BIN_DAYS * DAY_MS
   /** How long other vessels' positions are kept, as set; 0 keeps them. */
   let aisRetentionDays = DEFAULT_AIS_RETENTION_DAYS
+  /** The configuration the plugin runs with, while it runs. */
+  let startedWith: TracksPluginConfig | undefined
+  let resetting = false
+  /**
+   * Counts start() and stop() calls. A delete of the whole database stops the
+   * plugin itself, and the server can stop or restart it meanwhile, on a
+   * configuration save or a disable; the count tells the delete it happened.
+   */
+  let lifecycle = 0
+  /**
+   * Every store close a stop() has begun. A stop() waits for all of them, so
+   * a start() the server makes once its stop() is done does not open the file
+   * beside a store still draining into it.
+   */
+  let closed: Promise<void> = Promise.resolve()
   /**
    * The deleted spans of recorded tracks by context, loaded once and dropped
    * whenever a delete, restore or purge changes them. Read for each day of a
@@ -572,8 +588,10 @@ export default function ThePlugin(app: App): Plugin {
     return undefined
   }
 
-  return {
+  const plugin: Plugin = {
     start: function (config: TracksPluginConfig) {
+      lifecycle++
+      startedWith = config
       storageError = undefined
       historyImport = undefined
       const { resolution } = config
@@ -825,6 +843,8 @@ export default function ThePlugin(app: App): Plugin {
     },
 
     stop: async function () {
+      lifecycle++
+      startedWith = undefined
       onStop.forEach((f) => {
         try {
           f()
@@ -849,11 +869,17 @@ export default function ThePlugin(app: App): Plugin {
       // throw, because the server calls stop() on a config save.
       const closing = tracks
       tracks = undefined
-      try {
-        await closing?.close?.()
-      } catch (err) {
-        app.error(err)
+      if (closing) {
+        const closingNow = (async () => {
+          try {
+            await closing.close?.()
+          } catch (err) {
+            app.error(err)
+          }
+        })()
+        closed = Promise.all([closed, closingNow]).then(() => {})
       }
+      await closed
     },
 
     signalKApiRoutes: function (router: Router) {
@@ -1406,6 +1432,77 @@ export default function ThePlugin(app: App): Plugin {
         res.json({ aisRetentionDays })
       })
 
+      // The webapp's danger zone: the whole database deleted, for a store gone
+      // wrong past repair. Admin-only, as it is registered on the router
+      // itself, and only with the word the webapp has the user type, so no
+      // stray request can do it. The plugin stops, the file goes, and the
+      // plugin starts again as it was set up, on an empty store.
+      router.delete('/database', (req: Request, res: Response) => {
+        if (req.query.confirm !== 'DELETE') {
+          res.status(400).json({ message: 'Deleting the whole track database needs confirm=DELETE.' })
+          return
+        }
+        // Before anything else: the delete's own stop() clears what the
+        // checks below read, so a second request would otherwise be told the
+        // plugin is not running.
+        if (resetting) {
+          res.status(409).json({ message: 'The track database is being deleted already.' })
+          return
+        }
+        const config = startedWith
+        const dataDir = app.getDataDirPath?.()
+        // Not `tracks`: a store that will not open is the case this is for.
+        if (!config || !dataDir) {
+          notAvailable(res)
+          return
+        }
+        resetting = true
+        void (async () => {
+          const stopping = plugin.stop()
+          const stopped = lifecycle
+          await stopping
+          if (lifecycle !== stopped) {
+            // The server's restart or stop wins: removing the file under a
+            // store it opened, or starting a plugin it stopped, would leave
+            // two instances or one it does not know about.
+            res
+              .status(409)
+              .json({ message: 'The plugin was restarted or stopped while the delete waited; nothing was deleted.' })
+            return
+          }
+          let restarted: number
+          try {
+            for (const suffix of ['', '-wal', '-shm']) {
+              rmSync(join(dataDir, `tracks.db${suffix}`), { force: true })
+            }
+          } finally {
+            // Started again whatever the delete did, so a file that would not
+            // go leaves the plugin recording to it rather than stopped.
+            const starting = plugin.start(config)
+            restarted = lifecycle
+            await starting
+          }
+          // A store the server stopped or replaced meanwhile is not one that
+          // failed to open.
+          if (!tracks && lifecycle === restarted) {
+            app.error('Deleted the track database, but the new one did not open')
+            res.status(500).json({
+              message: 'The track database was deleted, but the plugin could not start again. The server log says why.',
+            })
+            return
+          }
+          app.debug('Deleted the whole track database on request')
+          res.json({ deleted: true })
+        })()
+          .catch((err: unknown) => {
+            app.error(`Could not delete the track database: ${errorDetail(err)}`)
+            if (!res.headersSent) res.status(500).json({ message: 'Could not delete the track database' })
+          })
+          .finally(() => {
+            resetting = false
+          })
+      })
+
       router.get('/recycle-bin', (_req: Request, res: Response) => {
         const store = tracks
         if (!store?.binEntries) {
@@ -1600,6 +1697,7 @@ export default function ThePlugin(app: App): Plugin {
       },
     },
   }
+  return plugin
 }
 
 export { fromGpx, toGpx } from './gpx.js'

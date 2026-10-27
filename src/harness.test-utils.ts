@@ -52,7 +52,7 @@ export interface TestHarness {
    * A fresh harness would not do: what a restart has to show is the state the
    * instance drops on `stop()`, which a new instance never had.
    */
-  restart: () => void
+  restart: () => void | Promise<void>
   /**
    * How many positions the plugin's bus subscription has accepted.
    *
@@ -70,6 +70,8 @@ export interface TestHarness {
   registrations: () => number
   /** The plugin's store, read directly rather than through its routes. */
   store: () => TrackStore | undefined
+  /** The plugin's data directory, where its `tracks.db` lives. */
+  dataDir: string
 }
 
 export interface HarnessOptions {
@@ -290,5 +292,6 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     trackProvider: () => trackProvider,
     registrations: () => registrations,
     store: () => plugin.getTracks(),
+    dataDir,
   }
 }

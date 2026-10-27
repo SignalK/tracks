@@ -108,6 +108,14 @@
           <tbody></tbody>
         </table>
       </section>
+      <section id="danger" aria-labelledby="danger-title">
+        <h2 id="danger-title">Danger zone</h2>
+        <p>
+          Delete the whole track database and start again on an empty one, as if the plugin had just been installed.
+          Nothing it held can be brought back afterwards.
+        </p>
+        <button type="button" id="reset-open" class="danger">Delete the whole database…</button>
+      </section>
     </main>
     <dialog id="delete-dialog">
       <form method="dialog">
@@ -132,9 +140,37 @@
         </menu>
       </form>
     </dialog>
+    <dialog id="reset-dialog" aria-labelledby="reset-title">
+      <form method="dialog">
+        <h2 id="reset-title">Delete the whole database</h2>
+        <p>This deletes everything the plugin holds, and it cannot be undone:</p>
+        <ul>
+          <li>the own vessel's whole recording,</li>
+          <li>every other vessel's track,</li>
+          <li>every imported track, and the recycle bin,</li>
+          <li>how far the history import got.</li>
+        </ul>
+        <p>
+          Keep a copy first:
+          <a href="../../signalk/v1/api/self/track.gpx" rel="nofollow">download the own vessel's whole recording</a> as
+          GPX, and export any imported track you want to keep from its row.
+        </p>
+        <p>
+          Parts of the own vessel's recording you deleted are forgotten too, so an import from a history provider
+          afterwards brings them back.
+        </p>
+        <label>Type DELETE to confirm <input name="confirm" autocomplete="off" spellcheck="false" /></label>
+        <p id="reset-error" class="error" role="alert" hidden></p>
+        <menu>
+          <button type="button" value="cancel">Cancel</button>
+          <button value="reset" class="danger" disabled>Delete everything</button>
+        </menu>
+      </form>
+    </dialog>
     <script type="module" src="./tracks.js"></script>
     <script type="module" src="./bin.js"></script>
     <script type="module" src="./import.js"></script>
     <script type="module" src="./history.js"></script>
+    <script type="module" src="./danger.js"></script>
   </body>
 </html>
