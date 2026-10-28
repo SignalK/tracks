@@ -1941,9 +1941,11 @@ describe('a track too large to answer', () => {
         const brief: TracksRequest['bbox'] = [24.0049, 60.0007, 24.0056, 60.0013]
         const query: TracksRequest = { contexts: [SELF_CONTEXT], bbox: brief, maxPoints: 10 }
         const before = await providerFor(uncounted(store), { maxTrackPoints: 2000 }).getTracks(query)
+        const spy = vi.spyOn(store, 'getFilteredTimedTracks')
 
         const res = await providerFor(store, { maxTrackPoints: 2000 }).getTracks(query)
 
+        expect(await read(spy)).toBeLessThanOrEqual(2000)
         expect(before.features).toHaveLength(1)
         expect(res.features).toHaveLength(1)
         expect(self(res).properties.pointCount).toBeLessThanOrEqual(10)
