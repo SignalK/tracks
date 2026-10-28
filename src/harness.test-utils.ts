@@ -8,6 +8,7 @@ import type { ContextPosition } from './index.js'
 import type { TrackStore } from './store.js'
 import type { TrackApi } from './trackApi.js'
 import type { Debug, LatLngTuple, Position } from './types.js'
+import { removeAfterFile } from './testDirs.test-utils.js'
 
 /**
  * Test harness that stands the plugin up behind a real express app, mounted the
@@ -244,6 +245,7 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
   }
 
   const plugin = ThePlugin(app)
+  removeAfterFile(dataDir, () => plugin.stop())
   const startConfig = {
     // No minimum spacing, so a synchronous burst of fed positions is all kept.
     // The sqlite store enforces resolution on write rather than through rxjs
@@ -281,11 +283,9 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     setSelfState: (state) => {
       selfState = state
     },
-    // Only the plugin is stopped. The data directory stays: stop() leaves the
-    // routes mounted and keeps serving what was accumulated, which routes.test
-    // pins, and a test that queries after stopping needs the file to still be
-    // there. The directory is a mkdtemp under the OS temp dir, so leaving it is
-    // harmless.
+    // Only the plugin is stopped. The data directory stays until the file's
+    // tests are done (`removeAfterFile`), since a test restarts the plugin on
+    // it, after changing the file at times.
     stop: () => plugin.stop(),
     restart: () => plugin.start(startConfig),
     emitted: () => emitted,
