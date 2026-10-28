@@ -238,14 +238,33 @@ describe('significance levels', () => {
         .get(ctx, from / (60 * MINUTE), to / (60 * MINUTE)) as { n: number }
     ).n
   /** The levels `significant` holds the positions of a span at: none for one not refined. */
-  const levels = (store: SqliteTrackStore, from: number, to: number) =>
+  const levels = (store: SqliteTrackStore, from: number, to: number, context: Context = ctx) =>
     (
       store['db']
         .prepare(
           'SELECT DISTINCT level FROM significant WHERE context_id = (SELECT id FROM contexts WHERE context = ?) AND timestamp >= ? AND timestamp < ? ORDER BY level',
         )
-        .all(ctx, from, to) as { level: number }[]
+        .all(context, from, to) as { level: number }[]
     ).map(({ level }) => level)
+  /**
+   * The contexts a refineLevels() call goes over the days of to refine and to
+   * simplify them: none where the last passes still hold.
+   */
+  const goesOver = (store: SqliteTrackStore, now: number): { refining: Context[]; simplifying: Context[] } => {
+    const inner = store as unknown as Record<'refineContext' | 'simplifiedDay', (context: Context) => number>
+    const refining = vi.spyOn(inner, 'refineContext')
+    const simplifying = vi.spyOn(inner, 'simplifiedDay')
+    try {
+      store.refineLevels(now)
+      return {
+        refining: refining.mock.calls.map(([context]) => context),
+        simplifying: simplifying.mock.calls.map(([context]) => context),
+      }
+    } finally {
+      refining.mockRestore()
+      simplifying.mockRestore()
+    }
+  }
   /** Positions split where the recording stopped for more than 10 minutes, as the store refines them. */
   const pieces = (points: TimedPosition[]): TimedPosition[][] => {
     const result: TimedPosition[][] = []
@@ -379,13 +398,201 @@ describe('significance levels', () => {
     store.close()
   })
 
-  it('refines a day only once it ended more than a day ago', async () => {
+  it('refines a day only once it ended more than a day ago, without a storage tolerance', async () => {
     const store = newStore()
     seedHour(store, day0 + 60 * MINUTE)
     store.refineLevels(day0 + DAY + 60 * MINUTE)
     expect(levels(store, day0, day0 + DAY)).toEqual([])
     store.refineLevels(day0 + 2 * DAY + 1)
     expect(levels(store, day0, day0 + DAY).length).toBeGreaterThan(1)
+    store.close()
+  })
+
+  // With a storage tolerance nothing thins detail, and simplifying deletes
+  // only what lies below every level, so a read at a tolerance reads
+  // yesterday by level as well.
+  it('refines a day once it ended, with a storage tolerance', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5 }, debug)
+    seedHour(store, day0 + 60 * MINUTE)
+    store.newPosition(ctx, [60.01, 24.02], day0 + DAY + 61 * MINUTE)
+    const window: TimeWindow = { from: day0, to: day0 + DAY }
+    store.refineLevels(day0 + DAY + 30 * MINUTE)
+    expect(levels(store, day0, day0 + DAY)).toEqual([])
+    await expect(store.getTimed(ctx, window, undefined, 20)).resolves.toHaveLength(3600)
+    store.refineLevels(day0 + DAY + 70 * MINUTE)
+    expect(levels(store, day0, day0 + DAY).length).toBeGreaterThan(1)
+    expect((await store.getTimed(ctx, window, undefined, 20)).length).toBeLessThan(360)
+    await readsAsSimplified(store, window)
+    store.close()
+  })
+
+  // A source whose clock runs behind the server's dates its fixes into the
+  // day for a while after it ended. Refined meanwhile, the day would be sent
+  // back by every one of them.
+  it('waits to refine a day until the vessel recorded past it, or until it ended a day ago', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5 }, debug)
+    seedHour(store, day0 + 22 * 60 * MINUTE)
+    seedHour(store, day0 + 120 * MINUTE, other)
+    const now = day0 + DAY + 3 * 60 * MINUTE
+    store.refineLevels(now)
+    expect(levels(store, day0, day0 + DAY)).toEqual([])
+    // Dated hours behind the server's clock, into the day and then just past
+    // it, within the margin of its end: neither wakes it.
+    store.newPosition(ctx, [60.01, 24.02], day0 + 23 * 60 * MINUTE + 30 * MINUTE)
+    store.newPosition(ctx, [60.01, 24.03], day0 + DAY + 30 * MINUTE)
+    expect(goesOver(store, now + 1)).toEqual({ refining: [], simplifying: [] })
+    expect(levels(store, day0, day0 + DAY)).toEqual([])
+    // Past it, and it alone is refined, with nothing to simplify yet.
+    store.newPosition(ctx, [60.01, 24.04], day0 + DAY + 61 * MINUTE)
+    expect(goesOver(store, now + 2)).toEqual({ refining: [ctx], simplifying: [] })
+    expect(levels(store, day0, day0 + DAY).length).toBeGreaterThan(1)
+    // The other vessel recorded nothing since, and waits for the day to end a day ago.
+    expect(levels(store, day0, day0 + DAY, other)).toEqual([])
+    store.refineLevels(day0 + 2 * DAY + 1)
+    expect(levels(store, day0, day0 + DAY, other).length).toBeGreaterThan(1)
+    store.close()
+  })
+
+  it('refines a day a fix comes in for after the pass found nothing of it', async () => {
+    const store = newStore()
+    seedHour(store, day0 + 60 * MINUTE)
+    store.refineLevels(day0 + 2 * DAY + 1)
+    // A live fix leaves the pass alone.
+    store.newPosition(ctx, [60.01, 24.02], day0 + 2 * DAY + 1)
+    expect(goesOver(store, day0 + 2 * DAY + 1).refining).toEqual([])
+    seedHour(store, day0 + 120 * MINUTE, other)
+    expect(goesOver(store, day0 + 2 * DAY + 2).refining).toEqual([other])
+    expect(levels(store, day0, day0 + DAY, other).length).toBeGreaterThan(1)
+    store.close()
+  })
+
+  it('wakes a vessel for a late fix into a day the pass going on went past it in', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5, refineBudget: 500 }, debug)
+    const first = 'vessels.a' as Context
+    const second = 'vessels.b' as Context
+    // A pass the day before finds nothing to do.
+    store.refineLevels(day0 + 3 * 60 * MINUTE)
+    store.newPosition(first, [60.01, 24.02], day0 + DAY + 2 * 60 * MINUTE)
+    seedHour(store, day0 + 60 * MINUTE, second)
+    store.newPosition(second, [60.01, 24.02], day0 + DAY + 2 * 60 * MINUTE)
+    const now = day0 + DAY + 3 * 60 * MINUTE
+    // The next goes past the first, with nothing of the day, and runs out of budget on the second.
+    expect(store.refineLevels(now)).toBe(true)
+    seedHour(store, day0 + 10 * 60 * MINUTE, first)
+    for (let i = 0; i < 100 && store.refineLevels(now); i++) {
+      // until it has nothing left
+    }
+    expect(levels(store, day0, day0 + DAY, first).length).toBeGreaterThan(1)
+    store.close()
+  })
+
+  it('goes over the vessels again after a change the pass going on may have gone past', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5, refineBudget: 500 }, debug)
+    const first = 'vessels.a' as Context
+    const second = 'vessels.b' as Context
+    store.newPosition(first, [60.01, 24.02], day0 + DAY + 2 * 60 * MINUTE)
+    seedHour(store, day0 + 60 * MINUTE, second)
+    store.newPosition(second, [60.01, 24.02], day0 + DAY + 2 * 60 * MINUTE)
+    const now = day0 + DAY + 3 * 60 * MINUTE
+    expect(store.refineLevels(now)).toBe(true)
+    store.fillTrack(first, [
+      Array.from({ length: 3600 }, (_, i) => ({
+        position: [60 + Math.sin(i / 400) * 0.002 + noise(i) * 0.00002, 24 + i * 0.000005] as LatLngTuple,
+        timestamp: day0 + 10 * 60 * MINUTE + i * 1000,
+      })),
+    ])
+    for (let i = 0; i < 100 && store.refineLevels(now); i++) {
+      // until it has nothing left
+    }
+    expect(levels(store, day0, day0 + DAY, first).length).toBeGreaterThan(1)
+    store.close()
+  })
+
+  it('goes over the vessels again after a vessel the pass went past was replaced', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5, refineBudget: 500 }, debug)
+    const first = 'vessels.a' as Context
+    const second = 'vessels.b' as Context
+    store.newPosition(first, [60.01, 24.02], day0 + DAY + 2 * 60 * MINUTE)
+    seedHour(store, day0 + 60 * MINUTE, second)
+    store.newPosition(second, [60.01, 24.02], day0 + DAY + 2 * 60 * MINUTE)
+    const now = day0 + DAY + 3 * 60 * MINUTE
+    expect(store.refineLevels(now)).toBe(true)
+    const hour = Array.from({ length: 3600 }, (_, i) => i)
+    store.initialTrack(
+      first,
+      [
+        ...hour.map((i): LatLngTuple => [60 + Math.sin(i / 400) * 0.002 + noise(i) * 0.00002, 24 + i * 0.000005]),
+        [60.01, 24.02],
+      ],
+      [...hour.map((i) => day0 + 10 * 60 * MINUTE + i * 1000), day0 + DAY + 2 * 60 * MINUTE],
+    )
+    for (let i = 0; i < 100 && store.refineLevels(now); i++) {
+      // until it has nothing left
+    }
+    expect(levels(store, day0, day0 + DAY, first).length).toBeGreaterThan(1)
+    store.close()
+  })
+
+  // Out of time order, as with a resolution of 0, a fix can come in for a
+  // day before the one a vessel waits on, which the pass found nothing of.
+  it('wakes a waiting vessel for a fix dated into a day before the one it waits on', () => {
+    const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5 }, debug)
+    seedHour(store, day0 + 22 * 60 * MINUTE)
+    const now = day0 + DAY + 3 * 60 * MINUTE
+    store.refineLevels(now)
+    expect(store['refineWaiting'].has(ctx)).toBe(true)
+    seedHour(store, day0 - DAY + 60 * MINUTE)
+    expect(goesOver(store, now + 1).refining).toEqual([ctx])
+    expect(levels(store, day0 - DAY, day0).length).toBeGreaterThan(1)
+    // And waits on its day again.
+    expect(levels(store, day0, day0 + DAY)).toEqual([])
+    expect(store['refineWaiting'].has(ctx)).toBe(true)
+    store.close()
+  })
+
+  it('lets a vessel stop waiting once the recycle bin holds every position of it', () => {
+    const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5 }, debug)
+    seedHour(store, day0 + 60 * MINUTE)
+    store.refineLevels(day0 + DAY + 3 * 60 * MINUTE)
+    expect(store['refineWaiting'].has(ctx)).toBe(true)
+    store.binRecorded(ctx, undefined, day0 + DAY, day0 + DAY, false)
+    expect(store['refineWaiting'].has(ctx)).toBe(false)
+    store.close()
+  })
+
+  it('goes over the vessels again when a cutoff moved while the pass went on', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5, refineBudget: 500 }, debug)
+    const first = 'vessels.a' as Context
+    const second = 'vessels.b' as Context
+    seedHour(store, day0 + 60 * MINUTE, first)
+    store.newPosition(first, [60.01, 24.02], day0 + DAY + 61 * MINUTE)
+    seedHour(store, day0 - DAY + 60 * MINUTE, second)
+    // Within the margin of the day's end, the pass refines the second's day
+    // before and runs out of budget; an hour later it goes on.
+    expect(store.refineLevels(day0 + DAY + 30 * MINUTE)).toBe(true)
+    for (let i = 0; i < 100 && store.refineLevels(day0 + DAY + 3 * 60 * MINUTE); i++) {
+      // until it has nothing left
+    }
+    expect(levels(store, day0, day0 + DAY, first).length).toBeGreaterThan(1)
+    store.close()
+  })
+
+  it('refines a vessel a fix woke after the pass going on went past it', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5, refineBudget: 500 }, debug)
+    const first = 'vessels.a' as Context
+    const second = 'vessels.b' as Context
+    seedHour(store, day0 + 60 * MINUTE, first)
+    seedHour(store, day0 + 60 * MINUTE, second)
+    store.newPosition(second, [60.01, 24.02], day0 + DAY + 61 * MINUTE)
+    const now = day0 + DAY + 3 * 60 * MINUTE
+    // The pass goes past the first, which waits, and runs out of budget on the second.
+    expect(store.refineLevels(now)).toBe(true)
+    store.newPosition(first, [60.01, 24.02], day0 + DAY + 61 * MINUTE)
+    for (let i = 0; i < 100 && store.refineLevels(now); i++) {
+      // until it has nothing left
+    }
+    expect(levels(store, day0, day0 + DAY, first).length).toBeGreaterThan(1)
+    expect(levels(store, day0, day0 + DAY, second).length).toBeGreaterThan(1)
     store.close()
   })
 
@@ -1556,13 +1763,43 @@ describe('storage simplification', () => {
     store.close()
   })
 
-  it('leaves a day alone until it is refined', async () => {
+  // Refined once it ended, a day keeps its detail for an anchor alarm until
+  // it ended more than a day ago.
+  it('leaves a refined day alone until it ended a day ago', async () => {
     const store = tolerant(0.5)
     straight(store, day0)
-    settle(store, day0 + DAY + MINUTE)
-    await expect(store.getTimed(ctx)).resolves.toHaveLength(3600)
+    store.newPosition(ctx, [61, 24], day0 + DAY + 2 * 60 * MINUTE)
+    const window: TimeWindow = { from: day0, to: day0 + DAY }
+    settle(store, day0 + 2 * DAY - MINUTE)
+    expect(store['db'].prepare('SELECT count(*) AS n FROM significant').get()).not.toEqual({ n: 0 })
+    await expect(store.getTimed(ctx, window)).resolves.toHaveLength(3600)
+    settle(store, day0 + 2 * DAY + MINUTE)
+    await expect(store.getTimed(ctx, window)).resolves.toHaveLength(61)
+    store.close()
+  })
+
+  // Between refining a day and simplifying it, a fix can send it back.
+  it('simplifies a day a fix sent back after refining it as refined again', async () => {
+    const store = tolerant(0.5)
+    straight(store, day0)
+    store.newPosition(ctx, [61, 24], day0 + DAY + 2 * 60 * MINUTE)
+    const window: TimeWindow = { from: day0, to: day0 + DAY }
+    settle(store, day0 + DAY + 3 * 60 * MINUTE)
+    // Between two fixes half an hour in, about 20 m off the line.
+    const late = day0 + 1_800_500
+    store.newPosition(ctx, [60 + 1800.5e-5, 24.00036], late)
+    settle(store, day0 + DAY + 3 * 60 * MINUTE + 1)
+    const held = store['db'].prepare('SELECT count(*) AS n FROM significant WHERE timestamp = ?')
+    expect(held.get(late)).toEqual({ n: 1 })
+    const byLevel = await store.getTimed(ctx, window, undefined, 5)
+    expect(byLevel.map(({ timestamp }) => timestamp)).toContain(late)
+    expect(byLevel.length).toBeLessThan(10)
+    await expect(store.getTimed(ctx, window)).resolves.toHaveLength(3601)
     settle(store)
-    await expect(store.getTimed(ctx)).resolves.toHaveLength(61)
+    const left = await store.getTimed(ctx, window)
+    expect(left.map(({ timestamp }) => timestamp)).toContain(late)
+    expect(left.length).toBeLessThan(70)
+    expect(Math.max(...gaps(left))).toBeLessThanOrEqual(MINUTE)
     store.close()
   })
 
