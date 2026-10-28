@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { createHarness } from './harness.test-utils.js'
 import { removeAfterFile, removePending } from './testDirs.test-utils.js'
 
 const testDir = () => {
@@ -23,6 +24,16 @@ describe('directories left for the end of a test file', () => {
 
     expect(seen).toEqual([true])
     expect(existsSync(dir)).toBe(false)
+  })
+
+  it("include a harness's, whose plugin is stopped first", async () => {
+    const h = createHarness()
+    expect(existsSync(h.dataDir)).toBe(true)
+
+    await removePending()
+
+    expect(h.store()).toBeUndefined()
+    expect(existsSync(h.dataDir)).toBe(false)
   })
 
   it('are all removed when one fails to release, and the failure is thrown', async () => {
