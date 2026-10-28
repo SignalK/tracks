@@ -7,6 +7,7 @@ import { s2 } from 's2js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
 import { simplify } from './simplify.js'
 import { thin } from './timeWindow.js'
+import type { TrackQuery } from './timeWindow.js'
 import {
   clipToBounds,
   createInBounds,
@@ -1943,6 +1944,12 @@ describe('segments', () => {
 // to be what the read returns: at a tolerance, a refined day holds only the
 // positions its levels keep, and every other day all of them.
 describe('countTimed', () => {
+  /** The query a read without a box makes: what is given of window, tolerance and resolution. */
+  const query = (window: TimeWindow | undefined, tolerance?: number, resolution?: number): TrackQuery => ({
+    ...(window ? { window } : {}),
+    ...(tolerance === undefined ? {} : { tolerance }),
+    ...(resolution === undefined ? {} : { resolution }),
+  })
   const MINUTE = 60_000
   const DAY = 24 * 60 * MINUTE
   const day0 = Date.UTC(2026, 5, 1)
@@ -1983,14 +1990,16 @@ describe('countTimed', () => {
     for (const window of windows) {
       for (const tolerance of [undefined, 4, 5, 20, 100]) {
         const read = await store.getTimed(ctx, window, undefined, tolerance)
-        expect(store.countTimed([ctx], window, tolerance, 1_000_000)).toEqual({ [ctx]: read.length })
+        expect(store.countTimed([ctx], query(window, tolerance), 1_000_000)).toEqual({ [ctx]: read.length })
       }
     }
     // The levels leave most of a refined day out, and none of the others.
     const refinedDay = { from: day0, to: day0 + DAY }
-    expect(store.countTimed([ctx], refinedDay, 20, 1_000_000)[ctx]).toBeLessThan(100)
-    expect(store.countTimed([ctx], { from: day0 + DAY, to: day0 + 2 * DAY }, 20, 1_000_000)).toEqual({ [ctx]: 3600 })
-    expect(store.countTimed([ctx], { from: day0 + 3 * DAY, to: day0 + 4 * DAY }, 20, 1_000_000)).toEqual({
+    expect(store.countTimed([ctx], query(refinedDay, 20), 1_000_000)[ctx]).toBeLessThan(100)
+    expect(store.countTimed([ctx], query({ from: day0 + DAY, to: day0 + 2 * DAY }, 20), 1_000_000)).toEqual({
+      [ctx]: 3600,
+    })
+    expect(store.countTimed([ctx], query({ from: day0 + 3 * DAY, to: day0 + 4 * DAY }, 20), 1_000_000)).toEqual({
       [ctx]: 3600,
     })
     store.close()
@@ -2011,25 +2020,27 @@ describe('countTimed', () => {
       for (const tolerance of [undefined, 20]) {
         for (const resolution of [1000, 60_000, 600_000, DAY]) {
           const read = await store.getTimed(ctx, window, resolution, tolerance)
-          expect(store.countTimed([ctx], window, tolerance, 1_000_000, resolution)).toEqual({ [ctx]: read.length })
+          expect(store.countTimed([ctx], query(window, tolerance, resolution), 1_000_000)).toEqual({
+            [ctx]: read.length,
+          })
         }
       }
     }
-    expect(store.countTimed([ctx], undefined, undefined, 10, 60_000)).toEqual({ [ctx]: 10 })
+    expect(store.countTimed([ctx], { resolution: 60_000 }, 10)).toEqual({ [ctx]: 10 })
     store.close()
   })
 
   it('stops counting at the limit', async () => {
     const store = seeded()
 
-    expect(store.countTimed([ctx], undefined, undefined, 100)).toEqual({ [ctx]: 100 })
-    expect(store.countTimed([ctx], undefined, 20, 100)).toEqual({ [ctx]: 100 })
+    expect(store.countTimed([ctx], {}, 100)).toEqual({ [ctx]: 100 })
+    expect(store.countTimed([ctx], { tolerance: 20 }, 100)).toEqual({ [ctx]: 100 })
     // Inside a refined day, the window's own ends come on top of what the
     // levels keep, and still stop at the limit.
     const inside = { from: day0 + 9 * 60 * MINUTE + 1234_000, to: day0 + 9 * 60 * MINUTE + 2500_000 }
-    const all = store.countTimed([ctx], inside, 20, 1_000_000)[ctx]!
+    const all = store.countTimed([ctx], { window: inside, tolerance: 20 }, 1_000_000)[ctx]!
     expect(all).toBe((await store.getTimed(ctx, inside, undefined, 20)).length)
-    expect(store.countTimed([ctx], inside, 20, all - 1)).toEqual({ [ctx]: all - 1 })
+    expect(store.countTimed([ctx], { window: inside, tolerance: 20 }, all - 1)).toEqual({ [ctx]: all - 1 })
     store.close()
   })
 
@@ -2039,9 +2050,9 @@ describe('countTimed', () => {
     store.newPosition(ctx, [60.1, 24], 2000)
     store.newPosition(other, [61, 25], 1000)
 
-    expect(store.countTimed(undefined, undefined, undefined, 10)).toEqual({ [ctx]: 2, [other]: 1 })
-    expect(store.countTimed([other, 'vessels.unknown' as Context], undefined, undefined, 10)).toEqual({ [other]: 1 })
-    expect(store.countTimed([ctx], { from: 1500, to: 3000 }, undefined, 10)).toEqual({ [ctx]: 1 })
+    expect(store.countTimed(undefined, {}, 10)).toEqual({ [ctx]: 2, [other]: 1 })
+    expect(store.countTimed([other, 'vessels.unknown' as Context], {}, 10)).toEqual({ [other]: 1 })
+    expect(store.countTimed([ctx], { window: { from: 1500, to: 3000 } }, 10)).toEqual({ [ctx]: 1 })
     store.close()
   })
 })

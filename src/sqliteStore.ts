@@ -1026,24 +1026,17 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   /**
-   * How many positions getTimed() returns for each context at `tolerance`,
-   * each counted up to `limit` from the indexes, reading none of them: those
-   * of `contexts` the store holds, or every one. Days are counted as
-   * daysOf() reads them, at the levels the tolerance reads where
-   * `significant` holds the day and whole elsewhere, the window's first and
-   * last positions included.
-   *
-   * With `resolution`, how many a read thinned to it returns. That needs the
-   * times of the positions, so the rows are read, a day at a time, until the
-   * count reaches the limit.
+   * How many positions getTimed() returns for each context at the query's
+   * window, tolerance and resolution, each counted up to `limit`: those of
+   * `contexts` the store holds, or every one. Without a resolution they are
+   * counted from the indexes, reading none of them: days as daysOf() reads
+   * them, at the levels the tolerance reads where `significant` holds the
+   * day and whole elsewhere, the window's first and last positions included.
+   * With one, thinning needs the times of the positions, so the rows are
+   * read, a day at a time, until the count reaches the limit.
    */
-  countTimed(
-    contexts: Context[] | undefined,
-    window: TimeWindow | undefined,
-    tolerance: number | undefined,
-    limit: number,
-    resolution?: number,
-  ): Record<Context, number> {
+  countTimed(contexts: Context[] | undefined, query: TrackQuery, limit: number): Record<Context, number> {
+    const { window, tolerance, resolution } = query
     const range: TimeRange = {
       from: window?.from ?? Number.NEGATIVE_INFINITY,
       to: window?.to ?? Number.POSITIVE_INFINITY,

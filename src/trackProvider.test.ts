@@ -1498,7 +1498,7 @@ describe('a track too large to answer', () => {
     const store = refinedStore()
     try {
       // A budget that 8 m fits and 4 m does not, so the read climbs a level.
-      const count = (tolerance: number) => store.countTimed([SELF_CONTEXT], undefined, tolerance, 1e9)[SELF_CONTEXT]!
+      const count = (tolerance: number) => store.countTimed([SELF_CONTEXT], { tolerance }, 1e9)[SELF_CONTEXT]!
       const budget = count(8)
       expect(count(4)).toBeGreaterThan(budget)
       const read = vi.spyOn(store, 'getFilteredTimedTracks')

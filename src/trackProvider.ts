@@ -336,7 +336,14 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     }
     const count = store.countTimed.bind(store)
     const budget = deps.maxTrackPoints ?? MAX_TRACK_POINTS
-    const counts = await count(wanted, window, tolerance, budget + 1)
+    // A read as `read()` makes it without a box, at `at` and thinned to `spacing`.
+    const counted = async (contexts: string[] | undefined, at: number | undefined, spacing: number | undefined) =>
+      count(
+        contexts,
+        { ...(window ? { window } : {}), ...readAt(at), ...(spacing === undefined ? {} : { resolution: spacing }) },
+        budget + 1,
+      )
+    const counts = await counted(wanted, tolerance, undefined)
     for (const [context, total] of Object.entries(counts)) {
       if (total <= budget) {
         continue
@@ -350,7 +357,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
       // what the thinning keeps.
       const within = async (spacing: number | undefined, at = tolerance) =>
         (spacing !== undefined && Math.floor(span / spacing) + 2 <= budget) ||
-        ((await count([context], window, at, budget + 1, spacing))[context] ?? 0) <= budget
+        ((await counted([context], at, spacing))[context] ?? 0) <= budget
       if (resolution !== undefined && (await within(resolution))) {
         continue
       }

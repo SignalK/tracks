@@ -370,14 +370,8 @@ export class AsyncTrackStore implements TrackStore {
   timeExtent(context: Context, window?: TimeWindow) {
     return this.enqueue('timeExtent', [context, window])
   }
-  countTimed(
-    contexts: Context[] | undefined,
-    window: TimeWindow | undefined,
-    tolerance: number | undefined,
-    limit: number,
-    resolution?: number,
-  ) {
-    return this.enqueue('countTimed', [contexts, window, tolerance, limit, resolution])
+  countTimed(contexts: Context[] | undefined, query: TrackQuery, limit: number) {
+    return this.enqueue('countTimed', [contexts, query, limit])
   }
   storeImport(track: ImportedTrack): Promise<void> {
     return this.enqueue('storeImport', [track], 'acknowledged')
