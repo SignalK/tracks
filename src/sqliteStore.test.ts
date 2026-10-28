@@ -1939,6 +1939,113 @@ describe('segments', () => {
   })
 })
 
+// A track too large to answer is told by counting it first, so the count has
+// to be what the read returns: at a tolerance, a refined day holds only the
+// positions its levels keep, and every other day all of them.
+describe('countTimed', () => {
+  const MINUTE = 60_000
+  const DAY = 24 * 60 * MINUTE
+  const day0 = Date.UTC(2026, 5, 1)
+  const noise = (i: number) => (Math.sin(i * 12.9898) * 43758.5453) % 1
+  const seedHour = (store: SqliteTrackStore, start: number, context: Context = ctx): void => {
+    for (let i = 0; i < 3600; i++) {
+      store.newPosition(
+        context,
+        [60 + Math.sin(i / 400) * 0.002 + noise(i) * 0.00002, 24 + i * 0.000005 + noise(i + 1) * 0.00002],
+        start + i * 1000,
+      )
+    }
+  }
+  /** Two refined days, one sent back to be refined again, and a day not refined yet. */
+  const seeded = () => {
+    const store = newStore()
+    for (const day of [0, 1, 2]) {
+      seedHour(store, day0 + day * DAY + 9 * 60 * MINUTE)
+    }
+    while (store.refineLevels(day0 + 4 * DAY)) {
+      // until every finished day is refined
+    }
+    seedHour(store, day0 + 3 * DAY + 9 * 60 * MINUTE)
+    store['invalidateLevels'](ctx, day0 + DAY, day0 + 2 * DAY - 1)
+    return store
+  }
+
+  it('counts what a read at each tolerance returns, window edges included', async () => {
+    const store = seeded()
+    const windows: (TimeWindow | undefined)[] = [
+      undefined,
+      // Starting and ending inside refined days, where the read adds the
+      // window's first and last position to what the levels keep.
+      { from: day0 + 9 * 60 * MINUTE + 1234_000, to: day0 + 2 * DAY + 9 * 60 * MINUTE + 777_000 },
+      { from: day0 + 9 * 60 * MINUTE + 1234_000, to: day0 + 2 * DAY + 9 * 60 * MINUTE + 777_000, inclusiveEnd: true },
+      { from: day0 + 3 * DAY, to: day0 + 4 * DAY },
+    ]
+    for (const window of windows) {
+      for (const tolerance of [undefined, 4, 5, 20, 100]) {
+        const read = await store.getTimed(ctx, window, undefined, tolerance)
+        expect(store.countTimed([ctx], window, tolerance, 1_000_000)).toEqual({ [ctx]: read.length })
+      }
+    }
+    // The levels leave most of a refined day out, and none of the others.
+    const refinedDay = { from: day0, to: day0 + DAY }
+    expect(store.countTimed([ctx], refinedDay, 20, 1_000_000)[ctx]).toBeLessThan(100)
+    expect(store.countTimed([ctx], { from: day0 + DAY, to: day0 + 2 * DAY }, 20, 1_000_000)).toEqual({ [ctx]: 3600 })
+    expect(store.countTimed([ctx], { from: day0 + 3 * DAY, to: day0 + 4 * DAY }, 20, 1_000_000)).toEqual({
+      [ctx]: 3600,
+    })
+    store.close()
+  })
+
+  it('counts what a read thinned to a resolution returns', async () => {
+    const store = seeded()
+    // Two trips on a day as well: a spacing measured across the hours
+    // between them would count positions the read never keeps.
+    for (let i = 0; i < 1800; i++) {
+      store.newPosition(ctx, [61 + i * 0.00001, 24], day0 + 3 * DAY + 19 * 60 * MINUTE + i * 1000)
+    }
+    for (const window of [
+      undefined,
+      { from: day0 + 9 * 60 * MINUTE + 1234_000, to: day0 + 3 * DAY + 10 * 60 * MINUTE },
+      { from: day0 + 9 * 60 * MINUTE + 1234_000, to: day0 + 9 * 60 * MINUTE + 1236_000 },
+    ]) {
+      for (const tolerance of [undefined, 20]) {
+        for (const resolution of [1000, 60_000, 600_000, DAY]) {
+          const read = await store.getTimed(ctx, window, resolution, tolerance)
+          expect(store.countTimed([ctx], window, tolerance, 1_000_000, resolution)).toEqual({ [ctx]: read.length })
+        }
+      }
+    }
+    expect(store.countTimed([ctx], undefined, undefined, 10, 60_000)).toEqual({ [ctx]: 10 })
+    store.close()
+  })
+
+  it('stops counting at the limit', async () => {
+    const store = seeded()
+
+    expect(store.countTimed([ctx], undefined, undefined, 100)).toEqual({ [ctx]: 100 })
+    expect(store.countTimed([ctx], undefined, 20, 100)).toEqual({ [ctx]: 100 })
+    // Inside a refined day, the window's own ends come on top of what the
+    // levels keep, and still stop at the limit.
+    const inside = { from: day0 + 9 * 60 * MINUTE + 1234_000, to: day0 + 9 * 60 * MINUTE + 2500_000 }
+    const all = store.countTimed([ctx], inside, 20, 1_000_000)[ctx]!
+    expect(all).toBe((await store.getTimed(ctx, inside, undefined, 20)).length)
+    expect(store.countTimed([ctx], inside, 20, all - 1)).toEqual({ [ctx]: all - 1 })
+    store.close()
+  })
+
+  it('counts every context the store holds, or those of the ones asked for it holds', () => {
+    const store = newStore()
+    store.newPosition(ctx, [60, 24], 1000)
+    store.newPosition(ctx, [60.1, 24], 2000)
+    store.newPosition(other, [61, 25], 1000)
+
+    expect(store.countTimed(undefined, undefined, undefined, 10)).toEqual({ [ctx]: 2, [other]: 1 })
+    expect(store.countTimed([other, 'vessels.unknown' as Context], undefined, undefined, 10)).toEqual({ [other]: 1 })
+    expect(store.countTimed([ctx], { from: 1500, to: 3000 }, undefined, 10)).toEqual({ [ctx]: 1 })
+    store.close()
+  })
+})
+
 describe('timeExtent', () => {
   it('gives the first and last time in a window, read as getTimed() reads it', async () => {
     const store = newStore()

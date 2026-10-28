@@ -62,6 +62,16 @@ of any size, which the history import then brings into this plugin. Without a pr
 plugin imports such an export into its own recording; see
 [Importing a large file](#importing-a-large-file).
 
+Years of a track are more than one answer of the v2 Track API can carry. A recorded track that a
+query would read as more positions than the plugin's budget for one answer is read and answered
+simplified instead, to the smallest tolerance whose significance levels hold it within the budget.
+It is spaced in time to fit instead where the query sets `maxPoints`, which asks for spacing,
+where no tolerance holds it, or where tracks split at pauses (**Split a track after this many
+minutes without a fix**). The answer says which in `epsilon` or `resolution`. A track within the
+budget is answered as before. A query with a box is not counted: it reads what lies near the box,
+which for a box around the whole track is all of it. The webapp's GPX export of the own vessel
+still writes every position of the whole recording.
+
 ## Imported tracks
 
 A client can store a track of its own, a GPX from a friend or a passage logged by another

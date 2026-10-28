@@ -25,7 +25,7 @@ import type {
   TimeWindow,
   TrackSummary,
 } from './types.js'
-import { clipToBounds, createReachesBounds, longitudeSpan, toIsoTimes } from './utils.js'
+import { clipToBounds, createReachesBounds, longitudeSpan, toIsoTimes, unknownAs } from './utils.js'
 
 /**
  * Serves the v2 Track API from this plugin's store.
@@ -64,7 +64,38 @@ export interface TrackProviderDeps {
   importable: (context: string) => Promise<boolean>
   /** Called after a delete, so whatever caches the deleted spans reloads them. */
   deleted: () => void
+  /** The most positions a recorded track's answer holds; MAX_TRACK_POINTS unless set. */
+  maxTrackPoints?: number
 }
+
+/**
+ * The most positions the provider reads for one recorded track's answer.
+ *
+ * A query for one vessel that names no window is its whole recording, and
+ * with the history import that is years of positions: the 2 M of a boat's
+ * four years took a process past 900 MB, read in full and built into one
+ * answer before `maxPoints` or simplifying could shrink it. A track larger
+ * than this is read simplified instead, to the smallest tolerance whose
+ * levels hold it within the budget, or thinned in time where levels cannot
+ * be read; the answer reports which in `epsilon` or `resolution`.
+ */
+export const MAX_TRACK_POINTS = 250_000
+
+/**
+ * The tolerances a track too large for its answer is read at, smallest
+ * first: the levels `significant` keeps, 0.25 m times a power of two from
+ * the lowest a read uses. Past the last, the track is thinned in time.
+ */
+const FIT_TOLERANCES = [4, 8, 16, 32]
+
+/**
+ * How a recorded track too large for its answer is read instead: at, and
+ * simplified to at least, a tolerance in metres; or at least `resolution`
+ * milliseconds apart, then thinned to `maxPoints` where positions sharing the
+ * last time leave one over.
+ */
+type Fit =
+  { tolerance: number; resolution?: undefined } | { tolerance?: undefined; resolution: number; maxPoints: number }
 
 /** v2 sends `[west, south, east, north]`; a bounds here is `[lat, lng]` corners. */
 const toGeoBounds = (bbox: TracksRequest['bbox']): GeoBounds | null => {
@@ -151,6 +182,13 @@ const msToDuration = (ms: number): Temporal.Duration =>
 
 const toLngLat = ([lat, lng]: LatLngTuple): [number, number] => [lng, lat]
 
+/** A read's tolerance, where it has one. */
+const readAt = (tolerance: number | undefined): { tolerance?: number } => (tolerance === undefined ? {} : { tolerance })
+
+/** The spacing a read thins to: the wider of the client's and the one a fit adds. */
+const spacing = (requested: number | undefined, fitted: number | undefined): { resolution?: number } =>
+  requested === undefined && fitted === undefined ? {} : { resolution: Math.max(requested ?? 0, fitted ?? 0) }
+
 /** Bounding box of the returned geometry, in GeoJSON order. */
 const boundsOf = (points: TimedPosition[]): TracksRequest['bbox'] => {
   if (points.length === 0) {
@@ -177,10 +215,10 @@ export type TrackProvider = TrackApi & {
 export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
   const matching = async (
     query: TracksRequest,
-  ): Promise<{ tracks: Map<string, TimedPosition[]>; resolution: number | undefined }> => {
+  ): Promise<{ tracks: Map<string, TimedPosition[]>; resolution: number | undefined; fits: Map<string, Fit> }> => {
     const store = deps.store()
     if (!store) {
-      return { tracks: new Map(), resolution: undefined }
+      return { tracks: new Map(), resolution: undefined, fits: new Map() }
     }
     const window = toTimeWindow(query)
     const resolution = query.resolution ? totalMilliseconds(query.resolution) : undefined
@@ -190,6 +228,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     const bounds = toGeoBounds(query.bbox)
     // Without a box there is nothing to clip to, whatever `clip` says.
     const clipTo = query.clip === true ? bounds : null
+    const { tolerance } = readTolerance(query, deps.segmentGap())
 
     // Thinning is handed to the store rather than applied to the result: it is
     // the same `thin()` either way, and asking twice is both wasted work and a
@@ -198,34 +237,55 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     // The bbox path goes through the store's spatial filter, which the sqlite
     // store answers from its cell index rather than by reading every track,
     // and the requested contexts go with it so the store reads only those.
-    const collection = await store.getFilteredTimedTracks(
-      // intersects: the v2 contract matches a track on any position within the
-      // window, not on where the vessel ended up — "a vessel that crossed the
-      // box an hour ago and has since left still matches". The v1 routes keep
-      // the last-position rule, which is the right answer to their own
-      // question.
-      {
-        bbox: bounds,
-        radius: null,
-        intersects: true,
-        ...(wanted ? { contexts: wanted } : {}),
-        ...(clipTo ? { clip: true } : {}),
-      },
-      undefined,
-      undefined,
-      {
-        ...(window ? { window } : {}),
-        // A track matched against a box is thinned after matching, below, so
-        // thinning cannot drop the point inside it, and a clipped one keeps
-        // the points that carry it to the box edge.
-        ...(resolution === undefined || bounds ? {} : { resolution }),
-        ...readTolerance(query, deps.segmentGap()),
-      },
-    )
+    const read = (contexts: string[] | undefined, fit?: Fit) =>
+      store.getFilteredTimedTracks(
+        // intersects: the v2 contract matches a track on any position within the
+        // window, not on where the vessel ended up — "a vessel that crossed the
+        // box an hour ago and has since left still matches". The v1 routes keep
+        // the last-position rule, which is the right answer to their own
+        // question.
+        {
+          bbox: bounds,
+          radius: null,
+          intersects: true,
+          ...(contexts ? { contexts } : {}),
+          ...(clipTo ? { clip: true } : {}),
+        },
+        undefined,
+        undefined,
+        {
+          ...(window ? { window } : {}),
+          // A track matched against a box is thinned after matching, below, so
+          // thinning cannot drop the point inside it, and a clipped one keeps
+          // the points that carry it to the box edge.
+          ...(bounds ? {} : spacing(resolution, fit?.resolution)),
+          ...readAt(fit?.tolerance ?? tolerance),
+        },
+      )
+
+    // A box bounds a read by where the track went. Without one, each track
+    // is counted first, and one over the budget is read on its own to fit it.
+    // The contexts counted are read by name, so the store need not list
+    // them a second time, and the answer keeps the order it holds them in.
+    const { fits, counted } = bounds
+      ? { fits: new Map<string, Fit>(), counted: wanted }
+      : await fitted(store, wanted, window, resolution, tolerance, query)
+    const rest = counted?.filter((context) => !fits.has(context))
+    const pieces = await Promise.all([
+      rest === undefined || rest.length > 0 ? read(rest) : {},
+      ...[...fits].map(([context, fit]) => read([context], fit)),
+    ])
+    const byContext = new Map(pieces.flatMap((piece) => Object.entries(piece)))
+    const collection = counted
+      ? counted.flatMap((context) => {
+          const points = byContext.get(context)
+          return points ? [[context, points] as const] : []
+        })
+      : [...byContext]
 
     const reaches = bounds ? createReachesBounds(bounds) : undefined
     const result = new Map<string, TimedPosition[]>()
-    for (const [context, stored] of Object.entries(collection)) {
+    for (const [context, stored] of collection) {
       // The store matches a box on the stretches it reads near it, which the
       // match here decides on, with the lines between their points.
       if (reaches && !reaches(stored)) {
@@ -246,7 +306,81 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
       }
       result.set(context, points)
     }
-    return { tracks: result, resolution }
+    return { tracks: result, resolution, fits }
+  }
+
+  /**
+   * The recorded tracks a read without a box would hold more of than the
+   * budget, each with how it is read instead, and the contexts counted, in
+   * the order the store holds them. A track is counted as the read would
+   * return it, at its tolerance and thinned to a client's `resolution`. One
+   * over the budget is read at the smallest tolerance whose levels hold it
+   * within the budget; with `maxPoints`, which asks for spacing, no
+   * tolerance is tried, and it is spaced as `maxPoints` first spaces a
+   * track, where that holds it. Where neither does, or the read may pass no
+   * tolerance (tracks split at pauses), it is spaced in time to the budget.
+   * A track within the budget is read as before, and `maxPoints` thins it
+   * as it always did.
+   */
+  const fitted = async (
+    store: TrackStore,
+    wanted: string[] | undefined,
+    window: TimeWindow | undefined,
+    resolution: number | undefined,
+    tolerance: number | undefined,
+    query: TracksRequest,
+  ): Promise<{ fits: Map<string, Fit>; counted: string[] | undefined }> => {
+    const fits = new Map<string, Fit>()
+    if (!store.countTimed || !store.timeExtent) {
+      return { fits, counted: wanted }
+    }
+    const count = store.countTimed.bind(store)
+    const budget = deps.maxTrackPoints ?? MAX_TRACK_POINTS
+    const counts = await count(wanted, window, tolerance, budget + 1)
+    for (const [context, total] of Object.entries(counts)) {
+      if (total <= budget) {
+        continue
+      }
+      // Gone since it was counted: the read leaves it out.
+      const extent = await store.timeExtent(context, window).catch(unknownAs(undefined))
+      const span = extent ? extent.last - extent.first : 0
+      // Whether a read at `at`, thinned to `spacing`, holds no more than the
+      // budget: thinning keeps a position per spacing at most and the last,
+      // and where the track's extent leaves room for more, the store counts
+      // what the thinning keeps.
+      const within = async (spacing: number | undefined, at = tolerance) =>
+        (spacing !== undefined && Math.floor(span / spacing) + 2 <= budget) ||
+        ((await count([context], window, at, budget + 1, spacing))[context] ?? 0) <= budget
+      if (resolution !== undefined && (await within(resolution))) {
+        continue
+      }
+      let fit: Fit | undefined
+      if (query.maxPoints !== undefined) {
+        // thinToBudget's first spacing, which keeps no more than maxPoints.
+        // Read at it, a track of more positions than maxPoints gets the
+        // answer it always got, without a resolution; with one, thinToBudget
+        // spaced what was read at it.
+        const first = Math.max(resolution ?? 0, Math.ceil(span / Math.max(1, query.maxPoints - 1)), 1)
+        if (query.maxPoints <= budget || (await within(first))) {
+          fit = { resolution: first, maxPoints: query.maxPoints }
+        }
+      } else if (deps.segmentGap() === 0) {
+        for (const candidate of FIT_TOLERANCES.filter((t) => tolerance === undefined || t > tolerance)) {
+          if (await within(resolution, candidate)) {
+            fit = { tolerance: candidate }
+            break
+          }
+        }
+      }
+      fits.set(
+        context,
+        fit ?? {
+          resolution: Math.max(resolution ?? 0, Math.ceil(span / Math.max(1, budget - 1)), 1),
+          maxPoints: budget,
+        },
+      )
+    }
+    return { fits, counted: Object.keys(counts) }
   }
 
   /**
@@ -411,13 +545,17 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
   return {
     async getTracks(query: TracksRequest): Promise<TracksResponse> {
       const summaries = await listing(query)
-      const { tracks: matched, resolution: requested } = summaries
-        ? { tracks: new Map<string, TimedPosition[]>(), resolution: undefined }
+      const {
+        tracks: matched,
+        resolution: requested,
+        fits,
+      } = summaries
+        ? { tracks: new Map<string, TimedPosition[]>(), resolution: undefined, fits: new Map<string, Fit>() }
         : await matching(query)
       const gap = deps.segmentGap()
       const features: TrackFeature[] = []
       for (const [context, all] of matched) {
-        const feature = shapeFeature(all, gap, query, requested, recordedIdentity(context))
+        const feature = shapeFitted(all, gap, query, requested, recordedIdentity(context), fits.get(context))
         if (feature) {
           features.push(feature)
         }
@@ -474,9 +612,12 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         // returns it, with its times.
         const context = resolveSelf(deps.selfContext())(recorded)
         const query = { contexts: [context], times: true }
-        const { tracks } = await matching(query)
+        const { tracks, fits } = await matching(query)
         const points = tracks.get(context)
-        return points && shapeFeature(points, deps.segmentGap(), query, undefined, recordedIdentity(context))
+        return (
+          points &&
+          shapeFitted(points, deps.segmentGap(), query, undefined, recordedIdentity(context), fits.get(context))
+        )
       }
       if (!isImportedId(id)) {
         return undefined
@@ -537,6 +678,32 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
 }
 
 /**
+ * A recorded track as a Feature, shaped to the fit it was read with: simplified
+ * to at least the tolerance it was read at, or thinned to its budget at no
+ * less than the spacing it was read at. Without a fit, as `shapeFeature`
+ * shapes it.
+ */
+function shapeFitted(
+  all: TimedPosition[],
+  gap: number,
+  query: TracksRequest,
+  requested: number | undefined,
+  identity: Omit<TrackProperties, 'pointCount'>,
+  fit: Fit | undefined,
+): TrackFeature | undefined {
+  if (fit?.resolution !== undefined) {
+    return shapeFeature(
+      all,
+      gap,
+      { ...query, maxPoints: fit.maxPoints },
+      spacing(requested, fit.resolution).resolution,
+      identity,
+    )
+  }
+  return shapeFeature(all, gap, query, requested, identity, true, fit?.tolerance)
+}
+
+/**
  * One track as a Feature, or undefined when the budget leaves nothing to draw.
  *
  * `identity` is whatever names the track — context, vessel name — and comes
@@ -550,6 +717,7 @@ function shapeFeature(
   requested: number | undefined,
   identity: Omit<TrackProperties, 'pointCount'>,
   timed = true,
+  minEpsilon?: number,
 ): TrackFeature | undefined {
   // The budget is applied per track, after the store's own thinning: a
   // client that named both is asking for this spacing *and* no more than
@@ -578,7 +746,10 @@ function shapeFeature(
   // three hours apart reduce to a single line, and segmenting that
   // afterwards yields one-point segments, which are not drawable
   // geometry. Splitting first keeps every leg's own endpoints.
-  const chosenEpsilon = chooseEpsilon(points, query)
+  // A track read at a tolerance to fit its budget is simplified to at least
+  // that tolerance, so the answer reports what it was read at.
+  const asked = chooseEpsilon(points, query)
+  const chosenEpsilon = minEpsilon === undefined ? asked : Math.max(asked ?? 0, minEpsilon)
   const segments = segment(points, gap).map((s) => (chosenEpsilon === undefined ? s : simplify(s, chosenEpsilon)))
   const shaped = segments.flat()
   const bbox = boundsOf(shaped)
