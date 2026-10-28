@@ -1767,6 +1767,259 @@ describe('a track too large to answer', () => {
       }
     }
   })
+
+  // A server before 2.34 sends a box without `clip`, and the store reads a
+  // named vessel's whole track in the window to match it against the box.
+  describe('in a box without clip', () => {
+    const around: TracksRequest['bbox'] = [23.99, 59.99, 24.03, 60.01]
+    const away: TracksRequest['bbox'] = [30, 50, 31, 51]
+    const read = (spy: { mock: { results: { value: unknown }[] } }) =>
+      (spy.mock.results.at(-1)!.value as Promise<Record<string, TimedPosition[]>>).then(
+        (tracks) => tracks[SELF_CONTEXT]?.length ?? 0,
+      )
+
+    it('reads a named vessel over the budget fitted, and matches what that keeps', async () => {
+      const store = refinedStore()
+      try {
+        const spy = vi.spyOn(store, 'getFilteredTimedTracks')
+        const provider = providerFor(store, { maxTrackPoints: 200 })
+
+        const res = await provider.getTracks({ contexts: [SELF_CONTEXT], bbox: around, epsilon: 10 })
+
+        expect(spy.mock.calls.at(-1)?.[3]).toMatchObject({ tolerance: expect.any(Number) })
+        expect(await read(spy)).toBeLessThanOrEqual(200)
+        expect(self(res).properties.epsilon).toBeGreaterThanOrEqual(10)
+        expect((await provider.getTracks({ contexts: [SELF_CONTEXT], bbox: away })).features).toEqual([])
+        expect(spy.mock.calls.at(-1)?.[3]).toMatchObject({ tolerance: expect.any(Number) })
+      } finally {
+        store.close()
+      }
+    })
+
+    // Counted thinned to the resolution, a track read at a tolerance is
+    // thinned to it in the store as well, or the read would hold more.
+    it('reads a track fitted at a tolerance thinned to the resolution asked for', async () => {
+      const store = refinedStore()
+      try {
+        const spy = vi.spyOn(store, 'getFilteredTimedTracks')
+        const thinned = (tolerance?: number) =>
+          store.countTimed([SELF_CONTEXT], { resolution: 10_000, ...(tolerance ? { tolerance } : {}) }, 1e9)[
+            SELF_CONTEXT
+          ]!
+        const budget = thinned(8)
+        expect(thinned()).toBeGreaterThan(budget)
+
+        await providerFor(store, { maxTrackPoints: budget }).getTracks({
+          contexts: [SELF_CONTEXT],
+          bbox: around,
+          resolution: Temporal.Duration.from('PT10S'),
+        })
+
+        expect(spy.mock.calls.at(-1)?.[3]).toMatchObject({ resolution: 10_000, tolerance: expect.any(Number) })
+        expect(await read(spy)).toBeLessThanOrEqual(budget)
+      } finally {
+        store.close()
+      }
+    })
+
+    it('reads a track over the budget at the tolerance its box asks for, where that holds it', async () => {
+      const store = refinedStore()
+      try {
+        const spy = vi.spyOn(store, 'getFilteredTimedTracks')
+        const budget = store.countTimed([SELF_CONTEXT], { tolerance: 10 }, 1e9)[SELF_CONTEXT]!
+
+        const res = await providerFor(store, { maxTrackPoints: budget }).getTracks({
+          contexts: [SELF_CONTEXT],
+          bbox: around,
+          epsilon: 10,
+        })
+
+        expect(spy.mock.calls.at(-1)?.[3]).toMatchObject({ tolerance: 10 })
+        expect(self(res).properties.epsilon).toBe(10)
+      } finally {
+        store.close()
+      }
+    })
+
+    it('reads a track over the budget at a tolerance its box asks for above 32 m', async () => {
+      const store = refinedStore()
+      try {
+        const spy = vi.spyOn(store, 'getFilteredTimedTracks')
+        const budget = store.countTimed([SELF_CONTEXT], { tolerance: 100 }, 1e9)[SELF_CONTEXT]!
+        expect(store.countTimed([SELF_CONTEXT], { tolerance: 32 }, 1e9)[SELF_CONTEXT]).toBeGreaterThan(budget)
+
+        const res = await providerFor(store, { maxTrackPoints: budget }).getTracks({
+          contexts: [SELF_CONTEXT],
+          bbox: around,
+          epsilon: 100,
+        })
+
+        expect(spy.mock.calls.at(-1)?.[3]).toMatchObject({ tolerance: 100 })
+        expect(self(res).properties.epsilon).toBe(100)
+      } finally {
+        store.close()
+      }
+    })
+
+    // As without a box: with tracks split at pauses no level is read, and
+    // a maxPoints above the budget leaves the budget to bind.
+    it('spaces a track over the budget in time where no level is read, or maxPoints exceeds the budget', async () => {
+      const store = refinedStore()
+      try {
+        const spy = vi.spyOn(store, 'getFilteredTimedTracks')
+        const cases: [Partial<TrackProviderDeps>, TracksRequest][] = [
+          [
+            { maxTrackPoints: 200, segmentGap: () => 5 * MINUTE },
+            { contexts: [SELF_CONTEXT], bbox: around, epsilon: 10 },
+          ],
+          [{ maxTrackPoints: 200 }, { contexts: [SELF_CONTEXT], bbox: around, maxPoints: 500 }],
+        ]
+        for (const [deps, query] of cases) {
+          const res = await providerFor(store, deps).getTracks(query)
+
+          expect(spy.mock.calls.at(-1)?.[3]).not.toHaveProperty('tolerance')
+          expect(await read(spy)).toBeLessThanOrEqual(200)
+          expect(self(res).properties.resolution).toBeDefined()
+          expect(self(res).properties.pointCount).toBeLessThanOrEqual(200)
+        }
+      } finally {
+        store.close()
+      }
+    })
+
+    // A spaced read keeps the last of positions sharing a time as well, one
+    // more than the budget: a maxPoints above the budget does not keep it.
+    it('thins a spaced read to the budget where maxPoints exceeds it', async () => {
+      const store = new SqliteTrackStore({ file: ':memory:' }, debug)
+      try {
+        store.initialTrack(
+          SELF_CONTEXT,
+          [
+            [60, 24],
+            [60.0001, 24],
+            [60.0002, 24],
+            [60.0003, 24],
+          ],
+          [day0, day0 + 1000, day0 + 2000, day0 + 2000],
+        )
+        const res = await providerFor(store, { maxTrackPoints: 3 }).getTracks({
+          contexts: [SELF_CONTEXT],
+          bbox: around,
+          maxPoints: 5,
+        })
+
+        expect(self(res).properties.pointCount).toBeLessThanOrEqual(3)
+      } finally {
+        store.close()
+      }
+    })
+
+    // Below the lowest level a read at the box's tolerance reads every
+    // position, which the first count counted already.
+    it('counts no tolerance below the lowest level a second time', async () => {
+      const store = refinedStore()
+      try {
+        const count = vi.spyOn(store, 'countTimed')
+
+        await providerFor(store, { maxTrackPoints: 200 }).getTracks({
+          contexts: [SELF_CONTEXT],
+          bbox: around,
+          epsilon: 2,
+        })
+
+        expect(count.mock.calls.map(([, query]) => query.tolerance)).not.toContain(2)
+      } finally {
+        store.close()
+      }
+    })
+
+    // Read spaced to maxPoints, ten points over three days, the track would
+    // no longer reach a box it passed through for a minute and a half.
+    it('reads a track with maxPoints as densely as the budget allows, and thins what matched', async () => {
+      const store = refinedStore()
+      try {
+        const brief: TracksRequest['bbox'] = [24.0049, 60.0007, 24.0056, 60.0013]
+        const query: TracksRequest = { contexts: [SELF_CONTEXT], bbox: brief, maxPoints: 10 }
+        const before = await providerFor(uncounted(store), { maxTrackPoints: 2000 }).getTracks(query)
+
+        const res = await providerFor(store, { maxTrackPoints: 2000 }).getTracks(query)
+
+        expect(before.features).toHaveLength(1)
+        expect(res.features).toHaveLength(1)
+        expect(self(res).properties.pointCount).toBeLessThanOrEqual(10)
+      } finally {
+        store.close()
+      }
+    })
+
+    it('fits only the named vessels over the budget, keeping their order', async () => {
+      const store = refinedStore()
+      try {
+        // Asked for in the other order than the store holds them.
+        const both: TracksRequest = { contexts: [OTHER_CONTEXT, SELF_CONTEXT], bbox: [23.9, 59.9, 25.1, 61.1] }
+
+        const res = await providerFor(store, { maxTrackPoints: 200 }).getTracks(both)
+        const before = await providerFor(uncounted(store), { maxTrackPoints: 200 }).getTracks(both)
+        const other = res.features.find((f) => f.properties.context === OTHER_CONTEXT)!
+
+        expect(res.features.map((f) => f.properties.context)).toEqual([OTHER_CONTEXT, SELF_CONTEXT])
+        expect(before.features.map((f) => f.properties.context)).toEqual([OTHER_CONTEXT, SELF_CONTEXT])
+        expect(self(res).properties.epsilon ?? self(res).properties.resolution).toBeDefined()
+        expect(self(res).properties.pointCount).toBeLessThanOrEqual(200)
+        expect(other).toEqual(before.features.find((f) => f.properties.context === OTHER_CONTEXT))
+      } finally {
+        store.close()
+      }
+    })
+
+    // A box read is thinned after it is matched. One the resolution holds
+    // within the budget is read thinned to it instead, and for a box it runs
+    // through, answered as before.
+    it('reads a track the resolution holds within the budget thinned to it', async () => {
+      const store = refinedStore()
+      try {
+        const spy = vi.spyOn(store, 'getFilteredTimedTracks')
+        const before = providerFor(uncounted(store), { maxTrackPoints: 200 })
+        const after = providerFor(store, { maxTrackPoints: 200 })
+        const queries: TracksRequest[] = [
+          { contexts: [SELF_CONTEXT], bbox: around, resolution: Temporal.Duration.from('PT10M') },
+          { contexts: [SELF_CONTEXT], bbox: around, resolution: Temporal.Duration.from('PT10M'), maxPoints: 150 },
+          { contexts: [SELF_CONTEXT], bbox: around, resolution: Temporal.Duration.from('PT1M'), maxPoints: 150 },
+        ]
+        for (const query of queries) {
+          const answer = await after.getTracks(query)
+          const positions = await read(spy)
+
+          expect(answer).toEqual(await before.getTracks(query))
+          expect(positions).toBeLessThanOrEqual(200)
+        }
+      } finally {
+        store.close()
+      }
+    })
+
+    it('reads a track within the budget whole, and a clipped box or one of every vessel as before', async () => {
+      const store = refinedStore()
+      try {
+        const spy = vi.spyOn(store, 'getFilteredTimedTracks')
+        const before = providerFor(uncounted(store), { maxTrackPoints: 200 })
+        const queries: [TracksRequest, number][] = [
+          [{ contexts: [SELF_CONTEXT], bbox: around, resolution: Temporal.Duration.from('PT1M') }, 1_000_000],
+          [{ bbox: around, resolution: Temporal.Duration.from('PT1M') }, 200],
+          [{ contexts: [SELF_CONTEXT], bbox: around, clip: true, resolution: Temporal.Duration.from('PT1M') }, 200],
+        ]
+        for (const [query, budget] of queries) {
+          const answer = await providerFor(store, { maxTrackPoints: budget }).getTracks(query)
+
+          expect(spy.mock.calls.at(-1)?.[3]).not.toHaveProperty('resolution')
+          expect(await read(spy)).toBe(3 * 3600)
+          expect(answer).toEqual(await before.getTracks(query))
+        }
+      } finally {
+        store.close()
+      }
+    })
+  })
 })
 
 // #133 through the v2 provider, where maxPoints can also widen the spacing.

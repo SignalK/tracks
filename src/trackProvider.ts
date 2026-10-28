@@ -64,16 +64,16 @@ export interface TrackProviderDeps {
   importable: (context: string) => Promise<boolean>
   /** Called after a delete, so whatever caches the deleted spans reloads them. */
   deleted: () => void
-  /** The most positions read for a recorded track's answer without a box; MAX_TRACK_POINTS unless set. */
+  /** The most positions read for a recorded track's answer to a counted query; MAX_TRACK_POINTS unless set. */
   maxTrackPoints?: number
 }
 
 /**
  * The most positions the provider reads for one recorded track's answer to
- * a query without a box, as it counts them before the read: fixes recorded
- * in between can add a few. A read thinned in time to fit can hold one
- * more, where positions share the last time; its answer is thinned to the
- * budget.
+ * a query without a box, or one that names its vessels with a box but no
+ * `clip`, as it counts them before the read: fixes recorded in between can
+ * add a few. A read thinned in time to fit can hold one more, where
+ * positions share the last time; its answer is thinned to the budget.
  *
  * A query for one vessel that names no window is its whole recording, and
  * with the history import that is years of positions: the 2 M of a boat's
@@ -83,7 +83,8 @@ export interface TrackProviderDeps {
  * 32 m whose levels hold it within the budget, or thinned in time where
  * `maxPoints` asks for spacing, where levels cannot be read, or where none
  * up to 32 m holds it; the answer reports which in `epsilon` or
- * `resolution`.
+ * `resolution`. Matched against a box without `clip`, it is read at the
+ * tolerance the box asks for first, which can be larger.
  */
 export const MAX_TRACK_POINTS = 250_000
 
@@ -263,21 +264,25 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
           ...(window ? { window } : {}),
           // A track matched against a box is thinned after matching, below, so
           // thinning cannot drop the point inside it, and a clipped one keeps
-          // the points that carry it to the box edge.
-          ...(bounds ? {} : spacing(resolution, fit?.resolution)),
+          // the points that carry it to the box edge. One too large to read
+          // whole is read as without a box, and matched on what that keeps.
+          ...(bounds && !fit ? {} : spacing(resolution, fit?.resolution)),
           ...readAt(fit?.tolerance ?? tolerance),
         },
       )
 
-    // A read with a box is not counted: with `clip` it holds the stretches
-    // near the box, and without it a named vessel's whole track. Without a
-    // box, each track is counted first, and one over the budget is read on
-    // its own to fit it.
+    // A read that holds each vessel's whole track in the window is counted
+    // first, and a track over the budget is read on its own to fit it: one
+    // without a box, and one with a box but no `clip`, as every server
+    // before 2.34 sends it, that names its vessels. A clipped read holds the
+    // stretches near the box. One of every vessel is not counted, since read
+    // by name it would read every vessel, not those with a position inside.
     // The contexts counted are read by name, so the store need not list
     // them a second time, and the answer keeps the order it holds them in.
-    const { fits, counted } = bounds
-      ? { fits: new Map<string, Fit>(), counted: wanted }
-      : await fitted(store, wanted, window, resolution, tolerance, query)
+    const { fits, counted } =
+      bounds && (clipTo || !wanted)
+        ? { fits: new Map<string, Fit>(), counted: wanted }
+        : await fitted(store, wanted, window, resolution, tolerance, query, bounds !== null)
     const rest = counted?.filter((context) => !fits.has(context))
     const pieces = await Promise.all([
       rest === undefined || rest.length > 0 ? read(rest) : {},
@@ -318,9 +323,9 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
   }
 
   /**
-   * The recorded tracks a read without a box would hold more of than the
-   * budget, each with how it is read instead, and the contexts counted, in
-   * the order the store holds them. A track is counted as the read would
+   * The recorded tracks a read of each whole track would hold more of than
+   * the budget, each with how it is read instead, and the contexts counted,
+   * in the order the store holds them. A track is counted as the read would
    * return it, at its tolerance and thinned to a client's `resolution`. One
    * over the budget is read at the smallest of `FIT_TOLERANCES` above the
    * query's tolerance whose levels hold it within the budget; with
@@ -330,6 +335,13 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
    * (tracks split at pauses), it is spaced in time to the budget.
    * A track within the budget is read as before, and `maxPoints` thins it
    * as it always did.
+   *
+   * A read `boxed`, matched against a box afterwards, is not thinned to
+   * `resolution` before the match, so a track the resolution holds within
+   * the budget is spaced to it. One over the budget is tried at the
+   * tolerance the box asks for first, and with `maxPoints` spaced to the
+   * budget rather than to what `maxPoints` keeps, which would match it as
+   * coarsely.
    */
   const fitted = async (
     store: TrackStore,
@@ -338,6 +350,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     resolution: number | undefined,
     tolerance: number | undefined,
     query: TracksRequest,
+    boxed: boolean,
   ): Promise<{ fits: Map<string, Fit>; counted: string[] | undefined }> => {
     const fits = new Map<string, Fit>()
     if (!store.countTimed || !store.timeExtent) {
@@ -368,6 +381,9 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         (spacing !== undefined && Math.floor(span / spacing) + 2 <= budget) ||
         ((await counted([context], at, spacing))[context] ?? 0) <= budget
       if (resolution !== undefined && (await within(resolution))) {
+        if (boxed) {
+          fits.set(context, { resolution, maxPoints: Math.min(query.maxPoints ?? budget, budget) })
+        }
         continue
       }
       let fit: Fit | undefined
@@ -379,13 +395,24 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         // thinToBudget then widens the spacing over what was read rather
         // than over every position, or keeps the first position and
         // reports the spacing read at. With a resolution, thinToBudget
-        // spaced what was read at it.
-        const first = Math.max(resolution ?? 0, Math.ceil(span / Math.max(1, query.maxPoints - 1)), 1)
-        if (query.maxPoints <= budget || (await within(first))) {
-          fit = { resolution: first, maxPoints: query.maxPoints }
+        // spaced what was read at it. A track matched against a box is not
+        // read at it, which would match it as coarsely: it is spaced to the
+        // budget, below, and thinToBudget thins what matched.
+        if (!boxed) {
+          const first = Math.max(resolution ?? 0, Math.ceil(span / Math.max(1, query.maxPoints - 1)), 1)
+          if (query.maxPoints <= budget || (await within(first))) {
+            fit = { resolution: first, maxPoints: query.maxPoints }
+          }
         }
       } else if (deps.segmentGap() === 0) {
-        for (const candidate of FIT_TOLERANCES.filter((t) => tolerance === undefined || t > tolerance)) {
+        // Matched against a box, first at the tolerance a clipped read of it
+        // would read at, which the count above did not, unless that is below
+        // the lowest level, where the count above stands for it.
+        const own = boxed ? readTolerance({ ...query, clip: true }, 0).tolerance : undefined
+        const floor = tolerance ?? own
+        const candidates = FIT_TOLERANCES.filter((t) => floor === undefined || t > floor)
+        const levelled = own !== undefined && own >= FIT_TOLERANCES[0]!
+        for (const candidate of levelled ? [own, ...candidates] : candidates) {
           if (await within(resolution, candidate)) {
             fit = { tolerance: candidate }
             break
@@ -396,7 +423,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         context,
         fit ?? {
           resolution: Math.max(resolution ?? 0, Math.ceil(span / Math.max(1, budget - 1)), 1),
-          maxPoints: budget,
+          maxPoints: Math.min(query.maxPoints ?? budget, budget),
         },
       )
     }
@@ -819,7 +846,8 @@ function shapeFeature(
  * given, since what a tolerance leaves out lies between them:
  * - tracks split at pauses: `segment()` would read a straight leg as a stop;
  * - a box without `clip`: a track matches on its points inside, and those a
- *   level leaves out can be all it had there.
+ *   level leaves out can be all it had there; but for a track too large to
+ *   read whole, which `fitted()` may read at a tolerance all the same.
  */
 function readTolerance(query: TracksRequest, gap: number): { tolerance?: number } {
   if (gap > 0 || (query.bbox && query.clip !== true)) {
