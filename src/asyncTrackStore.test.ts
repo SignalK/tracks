@@ -94,6 +94,7 @@ describe('worker-owned SQLite', () => {
         }
         expect(await worker.getFilteredTimedTracks(params)).toEqual(await original.getFilteredTimedTracks(params))
       }
+      expect(await worker.countTimed(undefined, {}, 10)).toEqual(original.countTimed(undefined, {}, 10))
       // Its type survives the worker, so a route can still tell an unknown
       // vessel from a read that failed.
       await expect(worker.get('unknown')).rejects.toBeInstanceOf(UnknownContextError)

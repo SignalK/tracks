@@ -2,7 +2,7 @@ import { Temporal } from '@js-temporal/polyfill'
 import { describe, expect, it, vi } from 'vitest'
 import { createHarness, OTHER_CONTEXT, SELF_CONTEXT } from './harness.test-utils.js'
 import type { TestHarness } from './harness.test-utils.js'
-import type { TrackApi } from './trackApi.js'
+import type { TrackApi, TracksRequest } from './trackApi.js'
 import { SqliteTrackStore } from './sqliteStore.js'
 import { createTrackProvider } from './trackProvider.js'
 import type { TimedPosition } from './types.js'
@@ -1447,6 +1447,325 @@ describe('simplify in v2', () => {
 
     expect(cut.features[0]!.properties.from).toBe(full.features[0]!.properties.from)
     expect(cut.features[0]!.properties.to).toBe(full.features[0]!.properties.to)
+  })
+})
+
+// Without a window, a query for one vessel is its whole recording, years of
+// it once the history import has run. A track over the budget is read to fit
+// it rather than read whole and shrunk afterwards.
+describe('a track too large to answer', () => {
+  const debug = Object.assign(() => {}, { enabled: false })
+  const MINUTE = 60_000
+  const DAY = 24 * 60 * MINUTE
+  const day0 = Date.UTC(2026, 5, 1)
+  const noise = (i: number) => (Math.sin(i * 12.9898) * 43758.5453) % 1
+
+  /** Three hours of wandering at a fix a second, on days refined since. */
+  const refinedStore = (refine = true) => {
+    const store = new SqliteTrackStore({ file: ':memory:' }, debug)
+    for (const day of [0, 1, 2]) {
+      for (let i = 0; i < 3600; i++) {
+        store.newPosition(
+          SELF_CONTEXT,
+          [60 + Math.sin(i / 400) * 0.002 + noise(i) * 0.00002, 24 + i * 0.000005 + noise(i + 1) * 0.00002],
+          day0 + day * DAY + 9 * 60 * MINUTE + i * 1000,
+        )
+      }
+    }
+    store.newPosition(OTHER_CONTEXT, [61, 25], day0 + 9 * 60 * MINUTE)
+    while (refine && store.refineLevels(day0 + 4 * DAY)) {
+      // until every finished day is refined
+    }
+    return store
+  }
+  const providerFor = (store: SqliteTrackStore, deps: Partial<TrackProviderDeps> = {}) =>
+    createTrackProvider({
+      store: () => store,
+      selfContext: () => SELF_CONTEXT,
+      segmentGap: () => 0,
+      contextName: () => undefined,
+      importable: async () => false,
+      deleted: () => undefined,
+      ...deps,
+    })
+  const self = (res: Awaited<ReturnType<TrackApi['getTracks']>>) =>
+    res.features.find((f) => f.properties.context === SELF_CONTEXT)!
+  const coordinates = (feature: { geometry: { coordinates: unknown[][] } | null }) =>
+    feature.geometry!.coordinates.flat()
+
+  it('reads a track over the budget at the smallest tolerance whose levels hold it, and says so', async () => {
+    const store = refinedStore()
+    try {
+      // A budget that 8 m fits and 4 m does not, so the read climbs a level.
+      const count = (tolerance: number) => store.countTimed([SELF_CONTEXT], { tolerance }, 1e9)[SELF_CONTEXT]!
+      const budget = count(8)
+      expect(count(4)).toBeGreaterThan(budget)
+      const read = vi.spyOn(store, 'getFilteredTimedTracks')
+
+      const res = await providerFor(store, { maxTrackPoints: budget }).getTracks({
+        contexts: [SELF_CONTEXT],
+        times: true,
+      })
+
+      expect(self(res).properties.epsilon).toBe(8)
+      expect(read.mock.calls.at(-1)?.[3]).toMatchObject({ tolerance: 8 })
+      const positionsRead = ((await read.mock.results.at(-1)!.value) as Record<string, TimedPosition[]>)[SELF_CONTEXT]!
+      expect(positionsRead.length).toBeLessThanOrEqual(budget)
+      expect(coordinates(self(res)).length).toBe(self(res).properties.pointCount)
+      expect(self(res).properties.coordTimes!.flat()).toHaveLength(self(res).properties.pointCount)
+    } finally {
+      store.close()
+    }
+  })
+
+  // A store without countTimed is read as the provider read every store
+  // before it: whole, then thinned and simplified.
+  const uncounted = (store: SqliteTrackStore): SqliteTrackStore =>
+    new Proxy(store, {
+      get: (target, key) => {
+        if (key === 'countTimed') {
+          return undefined
+        }
+        const value: unknown = Reflect.get(target, key)
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value
+      },
+    })
+
+  it('answers a track within the budget as before, including what resolution or maxPoints keep of it', async () => {
+    const store = refinedStore()
+    try {
+      // A budget above a day of the track and below all three.
+      const before = providerFor(uncounted(store), { maxTrackPoints: 5000 })
+      const after = providerFor(store, { maxTrackPoints: 5000 })
+      for (const query of [
+        { contexts: [SELF_CONTEXT], times: true, from: Temporal.Instant.fromEpochMilliseconds(day0 + 2 * DAY) },
+        // Over the budget as counted, within it as the read thins it.
+        { contexts: [SELF_CONTEXT], times: true, resolution: Temporal.Duration.from('PT10M') },
+        // Within the budget as the read thins it, so maxPoints thins it
+        // afterwards as it always did: the gaps between the days leave it
+        // fewer points than maxPoints at that spacing.
+        {
+          contexts: [SELF_CONTEXT],
+          times: true,
+          resolution: Temporal.Duration.from('PT1M'),
+          maxPoints: 500,
+        },
+        // Within the budget, so maxPoints thins it afterwards as it always did.
+        {
+          contexts: [SELF_CONTEXT],
+          times: true,
+          from: Temporal.Instant.fromEpochMilliseconds(day0 + 2 * DAY),
+          resolution: Temporal.Duration.from('PT1S'),
+          maxPoints: 500,
+        },
+      ]) {
+        const answer = await after.getTracks(query)
+
+        expect(answer).toEqual(await before.getTracks(query))
+        expect(self(answer).properties.epsilon).toBeUndefined()
+      }
+    } finally {
+      store.close()
+    }
+  })
+
+  // A spacing the read thins to keeps a position per spacing at most; counted
+  // over the whole track, it would count the nights between the days too.
+  it('answers as before where the spacing a read thins to keeps it within the budget', async () => {
+    const store = refinedStore()
+    try {
+      const before = providerFor(uncounted(store), { maxTrackPoints: 200 })
+      const after = providerFor(store, { maxTrackPoints: 200 })
+      const queries: TracksRequest[] = [
+        { contexts: [SELF_CONTEXT], resolution: Temporal.Duration.from('PT10M') },
+        { contexts: [SELF_CONTEXT], resolution: Temporal.Duration.from('PT10M'), maxPoints: 150 },
+        { contexts: [SELF_CONTEXT], resolution: Temporal.Duration.from('PT1M'), maxPoints: 150 },
+        // More than the budget, but the spacing it asks for first keeps fewer.
+        { contexts: [SELF_CONTEXT], maxPoints: 1000 },
+      ]
+      for (const query of queries) {
+        const answer = await after.getTracks(query)
+
+        expect(answer).toEqual(await before.getTracks(query))
+        expect(self(answer).properties.epsilon).toBeUndefined()
+      }
+    } finally {
+      store.close()
+    }
+  })
+
+  // Two short trips a day: the hours between them are no spacing the read
+  // keeps a position in, so they must not count against the budget.
+  it('answers as before where two trips a day keep a spaced read within the budget', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:' }, debug)
+    try {
+      for (let day = 0; day < 10; day++) {
+        for (const hour of [7, 19]) {
+          for (let i = 0; i < 1800; i++) {
+            store.newPosition(
+              SELF_CONTEXT,
+              [60 + Math.sin(i / 300) * 0.002 + noise(i) * 0.00002, 24 + i * 0.000005],
+              day0 + day * DAY + hour * 60 * MINUTE + i * 1000,
+            )
+          }
+        }
+      }
+      while (store.refineLevels(day0 + 12 * DAY)) {
+        // until every finished day is refined
+      }
+      const before = providerFor(uncounted(store), { maxTrackPoints: 2000 })
+      const after = providerFor(store, { maxTrackPoints: 2000 })
+      for (const extra of [{}, { maxPoints: 1500 }, { maxPoints: 500 }]) {
+        const query = { contexts: [SELF_CONTEXT], resolution: Temporal.Duration.from('PT1M'), ...extra }
+        const answer = await after.getTracks(query)
+
+        expect(answer).toEqual(await before.getTracks(query))
+        expect(self(answer).properties.epsilon).toBeUndefined()
+      }
+    } finally {
+      store.close()
+    }
+  })
+
+  it('keeps the order the store holds the tracks in', async () => {
+    const store = refinedStore()
+    try {
+      const query = { from: Temporal.Instant.fromEpochMilliseconds(day0) }
+      const order = (res: Awaited<ReturnType<TrackApi['getTracks']>>) => res.features.map((f) => f.properties.context)
+
+      expect(order(await providerFor(store, { maxTrackPoints: 200 }).getTracks(query))).toEqual(
+        order(await providerFor(uncounted(store)).getTracks(query)),
+      )
+    } finally {
+      store.close()
+    }
+  })
+
+  it('fits only the tracks over the budget', async () => {
+    const store = refinedStore()
+    try {
+      const res = await providerFor(store, { maxTrackPoints: 200 }).getTracks({
+        from: Temporal.Instant.fromEpochMilliseconds(day0),
+      })
+      const other = res.features.find((f) => f.properties.context === OTHER_CONTEXT)!
+
+      expect(self(res).properties.epsilon).toBeGreaterThan(0)
+      expect(other.properties.epsilon).toBeUndefined()
+      expect(other.properties.pointCount).toBe(1)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('fits the whole recording asked for by id', async () => {
+    const store = refinedStore()
+    try {
+      const provider = providerFor(store, { maxTrackPoints: 200 })
+      const byQuery = self(await provider.getTracks({ contexts: [SELF_CONTEXT], times: true }))
+
+      const byId = await provider.getTrack!(byQuery.properties.id!)
+
+      expect(byId).toEqual(byQuery)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('simplifies at least to the tolerance it read at when asked to simplify', async () => {
+    const store = refinedStore()
+    try {
+      const provider = providerFor(store, { maxTrackPoints: 200 })
+      const fitted = self(await provider.getTracks({ contexts: [SELF_CONTEXT] }))
+      const finer = self(await provider.getTracks({ contexts: [SELF_CONTEXT], epsilon: 1 }))
+
+      expect(finer.properties.epsilon).toBe(fitted.properties.epsilon)
+    } finally {
+      store.close()
+    }
+  })
+
+  // The levels leave out what lies between the points they keep, which a
+  // track split at pauses would read as stops; a client's maxPoints asks for
+  // spacing. Either way a track over the budget is read spaced in time, to the
+  // budget or to a maxPoints below it.
+  it('spaces the track in time where levels cannot be read, or the client set maxPoints', async () => {
+    const store = refinedStore()
+    try {
+      const read = vi.spyOn(store, 'getFilteredTimedTracks')
+      const hour = {
+        from: Temporal.Instant.fromEpochMilliseconds(day0 + 9 * 60 * MINUTE),
+        to: Temporal.Instant.fromEpochMilliseconds(day0 + 10 * 60 * MINUTE),
+      }
+      const pausing = { maxTrackPoints: 200, segmentGap: () => 5 * MINUTE }
+      const cases: [Partial<TrackProviderDeps>, TracksRequest, number][] = [
+        [pausing, { contexts: [SELF_CONTEXT], times: true }, 200],
+        // An hour at a fix a second, read about as densely as the budget allows.
+        [pausing, { contexts: [SELF_CONTEXT], ...hour }, 200],
+        [{ maxTrackPoints: 200 }, { contexts: [SELF_CONTEXT], ...hour, maxPoints: 100 }, 100],
+      ]
+      for (const [deps, query, most] of cases) {
+        const res = await providerFor(store, deps).getTracks(query)
+
+        expect(self(res).properties.epsilon).toBeUndefined()
+        expect(self(res).properties.resolution).toBeDefined()
+        expect(self(res).properties.pointCount).toBeLessThanOrEqual(most)
+        expect(read.mock.calls.at(-1)?.[3]).not.toHaveProperty('tolerance')
+        expect((read.mock.calls.at(-1)?.[3] as { resolution?: number }).resolution).toBeGreaterThan(1000)
+        const positionsRead = ((await read.mock.results.at(-1)!.value) as Record<string, TimedPosition[]>)[
+          SELF_CONTEXT
+        ]!
+        expect(positionsRead.length).toBeLessThanOrEqual(most)
+      }
+      expect(
+        self(await providerFor(store, pausing).getTracks({ contexts: [SELF_CONTEXT], ...hour })).properties.pointCount,
+      ).toBeGreaterThan(150)
+    } finally {
+      store.close()
+    }
+  })
+
+  // Spaced at the span over the budget less one, a read keeps no more than the
+  // budget, but for positions that share the last time: thinning keeps the
+  // last of them too.
+  it('thins a spaced read to the budget where its last positions share a time', async () => {
+    const store = new SqliteTrackStore({ file: ':memory:' }, debug)
+    try {
+      store.initialTrack(
+        SELF_CONTEXT,
+        [
+          [60, 24],
+          [60.0001, 24],
+          [60.0002, 24],
+          [60.0003, 24],
+        ],
+        [day0, day0 + 1000, day0 + 2000, day0 + 2000],
+      )
+      const res = await providerFor(store, { maxTrackPoints: 3, segmentGap: () => 5 * MINUTE }).getTracks({
+        contexts: [SELF_CONTEXT],
+      })
+
+      expect(self(res).properties.pointCount).toBeLessThanOrEqual(3)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('spaces the track in time when no level holds it within the budget', async () => {
+    for (const [refine, budget] of [
+      [false, 200],
+      [true, 3],
+    ] as const) {
+      const store = refinedStore(refine)
+      try {
+        const res = await providerFor(store, { maxTrackPoints: budget }).getTracks({ contexts: [SELF_CONTEXT] })
+
+        expect(self(res).properties.epsilon).toBeUndefined()
+        expect(self(res).properties.resolution).toBeDefined()
+        expect(self(res).properties.pointCount).toBeLessThanOrEqual(budget)
+      } finally {
+        store.close()
+      }
+    }
   })
 })
 

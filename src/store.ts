@@ -165,6 +165,21 @@ export interface TrackStore {
   timeExtent?(context: Context, window?: TimeWindow): Promise<TimeExtent | undefined>
 
   /**
+   * How many positions the read of `query` returns for each context, the
+   * one `getFilteredTimedTracks()` makes without a box: its window, at its
+   * tolerance, thinned to its resolution. Each is counted only up to
+   * `limit`, for those of `contexts` the store holds, or every one. A store
+   * that keeps no significance levels reads every position whatever the
+   * tolerance, and counts them so. Optional: a caller without it cannot tell
+   * a track too large to answer before reading it.
+   */
+  countTimed?(
+    contexts: Context[] | undefined,
+    query: TrackQuery,
+    limit: number,
+  ): Record<Context, number> | Promise<Record<Context, number>>
+
+  /**
    * Keep a track a client imported. Optional: a store that only records what
    * it observes leaves the four import methods out, and the Track API then
    * answers that storing tracks is not supported.

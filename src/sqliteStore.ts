@@ -5,7 +5,7 @@ import { knotsBetween } from './glitchFilter.js'
 import type { Fix } from './glitchFilter.js'
 import { outsideSpans } from './recycleBin.js'
 import { significance } from './simplify.js'
-import { thin, Thinner } from './timeWindow.js'
+import { keeps, thin, Thinner } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
 import {
@@ -1023,6 +1023,127 @@ export class SqliteTrackStore implements TrackStore {
     const first = at('ASC')
     const last = at('DESC')
     return Promise.resolve(first && last ? { first: first.timestamp, last: last.timestamp } : undefined)
+  }
+
+  /**
+   * How many positions getTimed() returns for each context at the query's
+   * window, tolerance and resolution, each counted up to `limit`: those of
+   * `contexts` the store holds, or every one. Without a resolution they are
+   * counted from the indexes, reading none of them: days as daysOf() reads
+   * them, at the levels the tolerance reads where `significant` holds the
+   * day and whole elsewhere, the window's first and last positions included.
+   * With one, thinning needs the times of the positions, so the rows are
+   * read, a day at a time, until the count reaches the limit.
+   */
+  countTimed(contexts: Context[] | undefined, query: TrackQuery, limit: number): Record<Context, number> {
+    const { window, tolerance, resolution } = query
+    const range: TimeRange = {
+      from: window?.from ?? Number.NEGATIVE_INFINITY,
+      to: window?.to ?? Number.POSITIVE_INFINITY,
+      inclusiveEnd: !window || window.inclusiveEnd === true,
+    }
+    const levels = this.levelsFrom(tolerance)
+    const counts: Record<Context, number> = {}
+    for (const context of contexts ? this.stored(contexts) : this.contexts()) {
+      counts[context] = resolution
+        ? this.countThinned(context, range, levels, limit, resolution)
+        : this.countDays(context, range, levels, limit)
+    }
+    return counts
+  }
+
+  /** daysOf() counted rather than read, up to `limit`. */
+  private countDays(context: Context, range: TimeRange, levels: number[] | undefined, limit: number): number {
+    const counted = (statement: StatementSync, ...params: (number | string)[]) =>
+      (statement.get(context, ...params) as { n: number }).n
+    const positions = (where: string) =>
+      this.db.prepare(`SELECT count(*) AS n FROM (SELECT 1 FROM positions WHERE context = ?${where} LIMIT ?)`)
+    const refined = levels ? this.refinedDays(context) : undefined
+    if (!levels || !refined) {
+      return counted(positions(inRange(range)), range.from, range.to, limit)
+    }
+    const next = this.db.prepare(
+      `SELECT timestamp FROM positions WHERE context = ?${inRange(range)} ORDER BY timestamp LIMIT 1`,
+    )
+    const day = ' AND timestamp >= ? AND timestamp < ?'
+    const whole = { day: positions(day), last: positions(inRange(range)) }
+    const significant = (where: string) =>
+      this.db.prepare(
+        `SELECT count(*) AS n FROM (SELECT 1 FROM significant INDEXED BY idx_significant_time WHERE context = ? AND level IN (${levels.join(', ')})${where} LIMIT ?)`,
+      )
+    const byLevel = { day: significant(day), last: significant(inRange(range)) }
+    // The window's first and last position, which getTimed() adds to a
+    // refined day where the levels leave them out.
+    const kept = this.db.prepare(
+      `SELECT 1 AS found FROM significant INDEXED BY idx_significant_time WHERE context = ? AND level IN (${levels.join(', ')}) AND timestamp = ? AND position = ?`,
+    )
+    const edge = (order: string) =>
+      this.db
+        .prepare(
+          `SELECT rowid AS id, timestamp FROM positions WHERE context = ?${inRange(range)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`,
+        )
+        .get(context, range.from, range.to) as unknown as { id: number; timestamp: number } | undefined
+    const edges = [edge('ASC'), edge('DESC')].filter(
+      (found, i, both): found is { id: number; timestamp: number } =>
+        found !== undefined && (i === 0 || found.id !== both[0]?.id),
+    )
+    let n = 0
+    for (let from = range.from; n < limit;) {
+      const row = next.get(context, from, range.to) as { timestamp: number } | undefined
+      if (!row) {
+        break
+      }
+      const start = row.timestamp
+      const end = (dayOf(start) + 1) * LEVEL_DAY_MS
+      const last = end > range.to
+      const left = limit - n
+      if (isRefined(refined, dayOf(start))) {
+        n += last ? counted(byLevel.last, start, range.to, left) : counted(byLevel.day, start, end, left)
+        for (const { id, timestamp } of edges) {
+          if (dayOf(timestamp) === dayOf(start) && kept.get(context, timestamp, id) === undefined) {
+            n++
+          }
+        }
+      } else {
+        n += last ? counted(whole.last, start, range.to, left) : counted(whole.day, start, end, left)
+      }
+      if (last) {
+        break
+      }
+      from = end
+    }
+    return Math.min(n, limit)
+  }
+
+  /**
+   * daysOf() thinned to `resolution` as getTimed() thins it, counted rather
+   * than kept, up to `limit`: a day of rows at a time is read, and none is
+   * held past it.
+   */
+  private countThinned(
+    context: Context,
+    range: TimeRange,
+    levels: number[] | undefined,
+    limit: number,
+    resolution: number,
+  ): number {
+    let seen = 0
+    let kept = 0
+    let lastKept = Number.NEGATIVE_INFINITY
+    let keptLast = false
+    for (const { timestamp } of this.daysOf(context, range, levels)) {
+      seen++
+      keptLast = keeps(lastKept, timestamp, resolution)
+      if (keptLast) {
+        lastKept = timestamp
+        if (++kept >= limit) {
+          return limit
+        }
+      }
+    }
+    // As Thinner.finish(): two positions or fewer as they are, and the last
+    // one kept whether or not its spacing allowed it.
+    return seen <= 2 ? seen : Math.min(kept + (keptLast ? 0 : 1), limit)
   }
 
   /**

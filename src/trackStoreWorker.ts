@@ -207,6 +207,9 @@ if (store) {
               case 'timeExtent':
                 value = await target.timeExtent(...operation.args)
                 break
+              case 'countTimed':
+                value = target.countTimed(...operation.args)
+                break
               case 'getImport':
                 value = target.getImport(...operation.args)
                 break
