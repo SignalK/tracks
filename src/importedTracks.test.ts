@@ -332,7 +332,9 @@ describe('imported tracks through the Track API', () => {
     const h = createHarness()
     try {
       await providerOf(h).storeTrack(passage())
-      const res = await request(h.app).get('/signalk/v1/api/tracks?bbox=24,59,26,61').expect(200)
+      const res = await request(h.app)
+        .get('/signalk/v1/api/tracks?bbox=24,59,26,61&from=2026-05-01T00:00:00Z')
+        .expect(200)
       expect(res.body).toEqual({})
       await request(h.app).get('/signalk/v1/api/vessels/urn:mrn:imo:mmsi:987654321/track').expect(404)
     } finally {

@@ -39,7 +39,7 @@ import {
   UploadFormatError,
 } from './gpxUpload.js'
 import type { SliceReservation } from './gpxUpload.js'
-import { parseTrackQuery, segment, TimeWindowError, TrackStream } from './timeWindow.js'
+import { DEFAULT_WINDOW_MS, parseTrackQuery, segment, TimeWindowError, TrackStream } from './timeWindow.js'
 import type { StreamedPoint, TrackQuery } from './timeWindow.js'
 import type {
   BinEntry,
@@ -72,6 +72,7 @@ import {
   QueryParameterError,
   SelfPositionUnavailableError,
   unknownAs,
+  withPoints,
 } from './utils.js'
 
 export interface ContextPosition {
@@ -941,7 +942,7 @@ export default function ThePlugin(app: App): Plugin {
       /**
        * A track as both single-track routes answer it: read, thinned to the
        * query's resolution and split into segments, all through one
-       * TrackStream, so the same query cannot be answered two ways. `whole`
+       * TrackStream, so the same window cannot be answered two ways. `whole`
        * reads the window in one piece; otherwise it is read a day at a time,
        * stepping over the days with nothing, and each day is handed to
        * `onPoints` once thinning has settled it, so a recording of years is
@@ -1017,7 +1018,7 @@ export default function ThePlugin(app: App): Plugin {
           const context = contextOf(req)
           let query: TrackQuery
           try {
-            query = parseTrackQuery(req.query)
+            query = parseTrackQuery(req.query, Date.now(), [], DEFAULT_WINDOW_MS)
           } catch (err) {
             res.status(400)
             res.json({ message: err instanceof TimeWindowError ? err.message : 'Invalid query parameters' })
@@ -1190,7 +1191,7 @@ export default function ThePlugin(app: App): Plugin {
         let query: TrackQuery
         let params: TrackParams
         try {
-          query = parseTrackQuery(req.query, Date.now(), SPATIAL_PARAMS)
+          query = parseTrackQuery(req.query, Date.now(), SPATIAL_PARAMS, DEFAULT_WINDOW_MS)
           // Inside the try on purpose: a malformed bbox used to reach the
           // matcher, throw there, and be caught by the result handler's
           // `.catch()`, which answers 404 -- reporting a bad query as an empty
@@ -1210,12 +1211,16 @@ export default function ThePlugin(app: App): Plugin {
 
         // Two paths on purpose. Without `times` the response keeps its
         // long-standing shape exactly — one un-segmented line per vessel — so
-        // existing clients are unaffected. With `times` the track is segmented
+        // existing clients read it as before. With `times` the track is segmented
         // like the single-vessel route, because a times array can only line up
         // with coordinates if both are split the same way.
+        //
+        // A vessel with nothing in the window is left out. Without a window the
+        // list reads the last day, and every vessel the store keeps would
+        // otherwise come back, most of them as an empty line.
         const result = query.times
           ? tracks.getFilteredTimedTracks(params, selfPosition, app.debug, query).then((tc: TimedTrackCollection) =>
-              Object.entries(tc).reduce<AllTracksResult>((acc, [context, points]) => {
+              withPoints(tc).reduce<AllTracksResult>((acc, [context, points]) => {
                 const segments = segment(points, segmentGap)
                 acc[context] = {
                   type: 'MultiLineString',
@@ -1228,7 +1233,7 @@ export default function ThePlugin(app: App): Plugin {
               }, {}),
             )
           : tracks.getFilteredTracks(params, selfPosition, app.debug, query).then((tc: TrackCollection) =>
-              Object.entries(tc).reduce<AllTracksResult>((acc, [context, track]) => {
+              withPoints(tc).reduce<AllTracksResult>((acc, [context, track]) => {
                 acc[context] = {
                   type: 'MultiLineString',
                   coordinates: [track.map(toLngLat)],

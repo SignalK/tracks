@@ -25,6 +25,10 @@ export function toIsoTimes(segment: TimedPosition[]): string[] {
   return segment.map(({ timestamp }) => new Date(timestamp).toISOString())
 }
 
+export function withPoints<T>(tracks: Record<string, T[]>): [string, T[]][] {
+  return Object.entries(tracks).filter(([, points]) => points.length > 0)
+}
+
 export function createInBounds(bounds: GeoBounds): (position: LatLngTuple | null) => boolean {
   const minLat = bounds.sw[LAT]
   const maxLat = bounds.ne[LAT]

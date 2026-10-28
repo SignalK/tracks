@@ -43,13 +43,14 @@ function selfTrackOverTime() {
 const pointCount = (body: { coordinates: unknown[][] }) => body.coordinates[0]?.length ?? 0
 
 describe('GET /self/track', () => {
-  it('serves the own vessel track', async () => {
+  it('serves the last day of the own vessel track', async () => {
     const { h } = selfTrackOverTime()
 
     const res = await request(h.app).get(`${API}/self/track`).expect(200)
 
     expect(res.body.type).toBe('MultiLineString')
-    expect(pointCount(res.body)).toBe(73)
+    // Hourly points over three days; a query naming no window reads the last 24.
+    expect(pointCount(res.body)).toBe(24)
   })
 
   it('404s when the own vessel has no track', async () => {
@@ -136,8 +137,8 @@ describe('resolution', () => {
   it('thins the track to the requested spacing', async () => {
     const { h } = selfTrackOverTime()
 
-    const full = await request(h.app).get(`${API}/self/track`).expect(200)
-    const thinned = await request(h.app).get(`${API}/self/track?resolution=6h`).expect(200)
+    const full = await request(h.app).get(`${API}/self/track?duration=4d`).expect(200)
+    const thinned = await request(h.app).get(`${API}/self/track?duration=4d&resolution=6h`).expect(200)
 
     expect(pointCount(full.body)).toBe(73)
     // 72 hours at 6-hour spacing, plus the retained final point

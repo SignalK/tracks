@@ -30,6 +30,18 @@ const QUERY_KEYS: readonly string[] = Object.keys(QuerySchema.properties)
 
 export class TimeWindowError extends Error {}
 
+/**
+ * The window the v1 JSON routes read when a query names none: the last day.
+ *
+ * They used to return the whole retained track, which was short when tracks
+ * were kept in memory. The store now keeps the own vessel indefinitely, and the
+ * history import fills in years of it, so the whole track can be millions of
+ * positions built into one answer, enough to run a server out of memory. A
+ * client that wants more names a window. `track.gpx` still exports the whole
+ * recording, since it writes a day at a time.
+ */
+export const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000
+
 /** `30`, `30s`, `5m`, `2h`, `7d` — seconds unless suffixed. Returns milliseconds. */
 const DURATION_PATTERN = /^(\d+(?:\.\d+)?)\s*([smhd])?$/
 
@@ -116,13 +128,15 @@ export interface TrackQuery {
  * Resolve the time-window parameters into an absolute `[from, to)` window.
  *
  * Precedence: explicit `from`/`to` win; then `duration`; then the Freeboard
- * `timespan`/`timespanOffset` pair. Absent all of them, no window is applied
- * and the whole retained track is returned, as before.
+ * `timespan`/`timespanOffset` pair. Absent all of them, the window is the
+ * `defaultWindow` milliseconds ending now, or, without one, no window is
+ * applied and the whole retained track is returned.
  */
 export function parseTrackQuery(
   query: Record<string, unknown>,
   now: number = Date.now(),
   alsoAllowed: readonly string[] = [],
+  defaultWindow?: number,
 ): TrackQuery {
   // A parameter the route cannot honour is a question it is not answering, and
   // answering 200 says it did. Unknown keys were silently dropped, so `?bbox=`
@@ -187,7 +201,9 @@ export function parseTrackQuery(
     return { ...result, window: { from: to - span, to, inclusiveEnd: offset === 0 } }
   }
 
-  return result
+  return defaultWindow === undefined
+    ? result
+    : { ...result, window: { from: now - defaultWindow, to: now, inclusiveEnd: true } }
 }
 
 /**

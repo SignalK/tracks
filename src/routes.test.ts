@@ -182,6 +182,8 @@ describe('Freeboard-SK compatibility', () => {
 describe('per-point timestamps', () => {
   const T0 = Date.UTC(2026, 7, 14, 9, 0, 0)
   const MINUTE = 60_000
+  // The seeds are older than the day these routes read by default.
+  const SINCE = 'from=2026-08-14T00:00:00Z'
 
   const seeded = () => {
     harness = createHarness({ selfPosition: [60, 24] })
@@ -197,27 +199,27 @@ describe('per-point timestamps', () => {
   }
 
   it('omits times unless asked', async () => {
-    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track`).expect(200)
+    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track?${SINCE}`).expect(200)
 
     expect(res.body.times).toBeUndefined()
     expect(res.body.coordinates[0]).toHaveLength(2)
   })
 
   it('serves ISO-8601 UTC times aligned with the coordinates', async () => {
-    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track?times=true`).expect(200)
+    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track?${SINCE}&times=true`).expect(200)
 
     expect(res.body.times).toEqual([['2026-08-14T09:00:00.000Z', '2026-08-14T09:01:00.000Z']])
     expect(res.body.times[0]).toHaveLength(res.body.coordinates[0].length)
   })
 
   it('treats a valueless ?times as true', async () => {
-    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track?times`).expect(200)
+    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track?${SINCE}&times`).expect(200)
 
     expect(res.body.times[0][0]).toBe('2026-08-14T09:00:00.000Z')
   })
 
   it('honours times=false', async () => {
-    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track?times=false`).expect(200)
+    const res = await request(seeded().app).get(`${API}/vessels/${SELF_ID}/track?${SINCE}&times=false`).expect(200)
 
     expect(res.body.times).toBeUndefined()
   })
@@ -227,9 +229,79 @@ describe('per-point timestamps', () => {
   })
 
   it('serves times on /self/track too', async () => {
-    const res = await request(seeded().app).get(`${API}/self/track?times`).expect(200)
+    const res = await request(seeded().app).get(`${API}/self/track?${SINCE}&times`).expect(200)
 
     expect(res.body.times[0]).toHaveLength(2)
+  })
+})
+
+// The whole retained track can be years of positions once the history import
+// has run, too many to build into one answer. The JSON routes read the last
+// day unless the query names a window; the export still writes everything.
+describe('a query naming no window', () => {
+  const DAY = 24 * 60 * 60 * 1000
+
+  const seeded = () => {
+    const now = Date.now()
+    harness = createHarness({ selfPosition: [60, 24] })
+    harness.seedTrack(
+      SELF_CONTEXT,
+      [
+        [60.1, 24.9],
+        [60.2, 25.0],
+      ],
+      [now - 2 * DAY, now - 60_000],
+    )
+    harness.seedTrack(OTHER_CONTEXT, [[60.3, 24.7]], [now - 2 * DAY])
+    return harness
+  }
+
+  it('reads the last day of a single track', async () => {
+    const res = await request(seeded().app).get(`${API}/self/track`).expect(200)
+
+    expect(res.body.coordinates.flat()).toEqual([[25.0, 60.2]])
+  })
+
+  it('reads the window a single-track query names', async () => {
+    const res = await request(seeded().app).get(`${API}/self/track?duration=3d`).expect(200)
+
+    expect(res.body.coordinates.flat()).toEqual([
+      [24.9, 60.1],
+      [25.0, 60.2],
+    ])
+  })
+
+  // Without a filter every vessel the store keeps matches; the ones with
+  // nothing in the last day are left out rather than listed as empty lines.
+  it('lists only the vessels with a track in the last day', async () => {
+    const h = seeded()
+
+    for (const query of ['', '?times']) {
+      const res = await request(h.app).get(`${API}/tracks${query}`).expect(200)
+
+      expect(Object.keys(res.body)).toEqual([SELF_CONTEXT])
+      expect(res.body[SELF_CONTEXT].coordinates.flat()).toEqual([[25.0, 60.2]])
+    }
+  })
+
+  it('lists the vessels nearby by their last day', async () => {
+    const res = await request(seeded().app).get(`${API}/tracks?radius=100000`).expect(200)
+
+    expect(Object.keys(res.body)).toEqual([SELF_CONTEXT])
+    expect(res.body[SELF_CONTEXT].coordinates.flat()).toEqual([[25.0, 60.2]])
+  })
+
+  it('lists the window a list query names', async () => {
+    const res = await request(seeded().app).get(`${API}/tracks?radius=100000&duration=3d`).expect(200)
+
+    expect(Object.keys(res.body).sort()).toEqual([OTHER_CONTEXT, SELF_CONTEXT].sort())
+    expect(res.body[SELF_CONTEXT].coordinates.flat()).toHaveLength(2)
+  })
+
+  it('still exports the whole recording', async () => {
+    const res = await request(seeded().app).get(`${API}/self/track.gpx`).expect(200)
+
+    expect(fromGpx(res.text)[0]!.segments.flat()).toHaveLength(2)
   })
 })
 
@@ -290,6 +362,8 @@ describe('isSelf', () => {
 describe('GET /tracks?times', () => {
   const T0 = Date.UTC(2026, 7, 14, 9, 0, 0)
   const MINUTE = 60_000
+  // The seeds are older than the day this route reads by default.
+  const SINCE = 'from=2026-08-14T00:00:00Z'
 
   const seeded = () => {
     harness = createHarness({ selfPosition: [60, 24] })
@@ -306,7 +380,7 @@ describe('GET /tracks?times', () => {
   }
 
   it('omits times unless asked', async () => {
-    const res = await request(seeded().app).get(`${API}/tracks`).expect(200)
+    const res = await request(seeded().app).get(`${API}/tracks?${SINCE}`).expect(200)
 
     expect(res.body[SELF_CONTEXT].times).toBeUndefined()
     expect(res.body[SELF_CONTEXT].coordinates).toEqual([
@@ -318,7 +392,7 @@ describe('GET /tracks?times', () => {
   })
 
   it('serves times aligned with coordinates for every vessel', async () => {
-    const res = await request(seeded().app).get(`${API}/tracks?times`).expect(200)
+    const res = await request(seeded().app).get(`${API}/tracks?${SINCE}&times`).expect(200)
 
     expect(res.body[SELF_CONTEXT].times).toEqual([['2026-08-14T09:00:00.000Z', '2026-08-14T09:01:00.000Z']])
     expect(res.body[OTHER_CONTEXT].times).toEqual([['2026-08-14T09:02:00.000Z']])
@@ -330,7 +404,7 @@ describe('GET /tracks?times', () => {
   })
 
   it('keeps isSelf alongside the times', async () => {
-    const res = await request(seeded().app).get(`${API}/tracks?times`).expect(200)
+    const res = await request(seeded().app).get(`${API}/tracks?${SINCE}&times`).expect(200)
 
     expect(res.body[SELF_CONTEXT].isSelf).toBe(true)
     expect(res.body[OTHER_CONTEXT].isSelf).toBe(false)
@@ -340,7 +414,7 @@ describe('GET /tracks?times', () => {
     // The timed and untimed forms share one filter; a bbox that excludes a
     // vessel must exclude it either way.
     const h = seeded()
-    const bbox = 'bbox=24.5,60.05,25.5,60.25'
+    const bbox = `${SINCE}&bbox=24.5,60.05,25.5,60.25`
 
     const plain = await request(h.app).get(`${API}/tracks?${bbox}`).expect(200)
     const timed = await request(h.app).get(`${API}/tracks?${bbox}&times`).expect(200)
@@ -357,6 +431,8 @@ describe('GET /tracks?times', () => {
       .expect(200)
 
     expect(res.body[SELF_CONTEXT].times).toEqual([['2026-08-14T09:01:00.000Z']])
+    // The other vessel's one position lies after the window, so it is left out.
+    expect(res.body).not.toHaveProperty(OTHER_CONTEXT)
   })
 })
 
@@ -761,11 +837,11 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
       times,
     )
 
-    for (const query of ['', '?resolution=2m']) {
-      const json = await request(h.app)
-        .get(`${API}/self/track${query}${query ? '&' : '?'}times`)
-        .expect(200)
-      const gpx = await request(h.app).get(`${API}/self/track.gpx${query}`).expect(200)
+    // The JSON route reads the last day unless asked for more, so both name a
+    // window from before the first point.
+    for (const query of ['from=2026-06-30T00:00:00Z', 'from=2026-06-30T00:00:00Z&resolution=2m']) {
+      const json = await request(h.app).get(`${API}/self/track?${query}&times`).expect(200)
+      const gpx = await request(h.app).get(`${API}/self/track.gpx?${query}`).expect(200)
 
       const segments = fromGpx(gpx.text)[0]!.segments
       expect(segments).toHaveLength(3)
@@ -844,15 +920,16 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(h.errors).toEqual([])
   })
 
-  // The GPX and JSON routes share one read pipeline, so a query answered by
-  // one must be answered the same way by the other.
+  // The GPX and JSON routes share one read pipeline, so a window read by one
+  // must be answered the same way by the other.
   it('returns the same points as the JSON route', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]], [SELF_CONTEXT, [60.2, 25.0]])
 
-    const json = await request(h.app).get(`${API}/self/track`).expect(200)
-    const gpx = await request(h.app).get(`${API}/self/track.gpx`).expect(200)
+    const json = await request(h.app).get(`${API}/self/track?duration=1h`).expect(200)
+    const gpx = await request(h.app).get(`${API}/self/track.gpx?duration=1h`).expect(200)
 
     const fromJson = (json.body.coordinates as [number, number][][]).flat().map(([lng, lat]) => [lat, lng])
+    expect(fromJson).not.toHaveLength(0)
     expect(
       fromGpx(gpx.text)[0]
         ?.segments.flat()
