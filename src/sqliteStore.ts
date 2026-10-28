@@ -352,6 +352,13 @@ const unrefinedIn = (refined: RefinedDays | undefined, range: TimeRange): TimeRa
  */
 const DETAIL_KEEP = 24 * 60 * 60 * 1000
 /**
+ * How long after a day ended refineLevels() waits to refine it, with a
+ * `storageTolerance`, by the server's clock and by what the vessel recorded
+ * since: a fix held up on its way then lands before the day is refined
+ * rather than sending it back.
+ */
+const REFINE_MARGIN = 60 * 60 * 1000
+/**
  * The most time the stored positions are simplified to leave between two
  * kept ones, where the recording had a position between them: a straight leg
  * then never reads as a pause, to `segment()` at a gap of a minute or more,
@@ -516,6 +523,20 @@ export class SqliteTrackStore implements TrackStore {
   private readonly levelFrontier = new Map<string, number>()
   /** The last refinable day as of the newest pass over every context. */
   private refinedThrough: number | undefined
+  /** The last day no context waits on as of that pass; see refineWaiting. */
+  private refinedSettled: number | undefined
+  /**
+   * Both as of the start of the pass still going on, which it ends with; none
+   * once a change came that the pass may have gone past.
+   */
+  private refinePass: { through: number; settled: number } | undefined
+  /**
+   * Per context, the day the pass waits to refine until the context records
+   * something dated REFINE_MARGIN after its end; see refineLevels().
+   */
+  private readonly refineWaiting = new Map<string, number>()
+  /** Contexts a fix woke, which the next call refines on their own; see newPosition(). */
+  private readonly refineWoken = new Set<string>()
   /** Where the pass over the contexts goes on after running out of budget. */
   private refineResume: string | undefined
   /**
@@ -529,7 +550,7 @@ export class SqliteTrackStore implements TrackStore {
    * the tolerance it did so at; a copy of simplify_frontier.
    */
   private readonly simplifyFrontier = new Map<string, { through: number; tolerance: number }>()
-  /** The last refinable day as of the newest simplifying pass over every context. */
+  /** The last day simplifyStored() goes over as of its newest pass over every context. */
   private simplifiedThrough: number | undefined
   /** Where the simplifying pass over the contexts goes on after running out of budget. */
   private simplifyResume: string | undefined
@@ -554,7 +575,10 @@ export class SqliteTrackStore implements TrackStore {
     | undefined
   /** See refining(). */
   private refineStatements:
-    | Record<'select' | 'copy' | 'visit' | 'unstale' | 'frontier' | 'deleteSignificant' | 'deleteVisits', StatementSync>
+    | Record<
+        'select' | 'copy' | 'visit' | 'unstale' | 'frontier' | 'deleteSignificant' | 'deleteVisits' | 'firstAt',
+        StatementSync
+      >
     | undefined
 
   constructor(config: SqliteStoreConfig, debug: Debug) {
@@ -859,6 +883,23 @@ export class SqliteTrackStore implements TrackStore {
     const partial = this.refinePartial
     if ((through !== undefined && day <= through) || (partial?.context === context && day <= partial.day)) {
       this.invalidateLevels(context, timestamp, timestamp)
+      return
+    }
+    // Woken, the context alone is refined on the next call: one that waits
+    // once it records something dated REFINE_MARGIN past the end of the day
+    // it waits on, or into a day before it, and any other for a day after
+    // its frontier that a pass, the one going on included, may have found
+    // nothing of.
+    const waiting = this.refineWaiting.get(context)
+    const passed = Math.max(
+      this.refinedThrough ?? Number.NEGATIVE_INFINITY,
+      this.refinePass?.through ?? Number.NEGATIVE_INFINITY,
+    )
+    if (
+      waiting === undefined ? day <= passed : day < waiting || timestamp >= (waiting + 1) * LEVEL_DAY_MS + REFINE_MARGIN
+    ) {
+      this.refineWaiting.delete(context)
+      this.refineWoken.add(context)
     }
   }
 
@@ -1843,23 +1884,36 @@ export class SqliteTrackStore implements TrackStore {
    * Give finished days their significant positions, refining about
    * `refineBudget` positions per call.
    *
-   * A day is finished once it ended more than DETAIL_KEEP ago: by then
-   * `prune()` has thinned its detail, which would otherwise take positions
-   * out from under their levels. Each day is refined in pieces, split where
-   * the recording stopped for longer than CLIP_STRETCH_GAP and cut at
-   * LEVEL_PIECE_MAX, each simplified on its own, so a day's levels never
-   * depend on another day's positions and a new day never changes an old
-   * one's. A call that runs out of budget inside a day goes on from there
-   * next time. Days a change sent back come first; then each context's days
-   * after its frontier, the pass picking up where the last call stopped. Once
-   * a pass finds nothing left to do, calls cost nothing until another day
-   * finishes.
+   * With a `storageTolerance`, a day is finished once it ended more than
+   * REFINE_MARGIN ago, so a read at a tolerance reads yesterday by level as
+   * well: what simplifyStored() deletes of it once it ended more than
+   * DETAIL_KEEP ago lies below every level. Until DETAIL_KEEP, it waits as
+   * well for the context to record something dated REFINE_MARGIN past its
+   * end: fixes from a source whose clock runs behind the server's are dated
+   * into the day for a while after it ended, and each would send it back to
+   * be refined again, which would hold up all refining until they stop.
+   * Without one, a day is finished once it ended more than DETAIL_KEEP ago,
+   * when `prune()` has thinned its detail: thinning a refined day sends it
+   * back, so refining it sooner would refine it twice.
+   *
+   * Each day is refined in pieces, split where the recording stopped for
+   * longer than CLIP_STRETCH_GAP and cut at LEVEL_PIECE_MAX, each simplified
+   * on its own, so a day's levels never depend on another day's positions
+   * and a new day never changes an old one's. A call that runs out of budget
+   * inside a day goes on from there next time. Days a change sent back come
+   * first; then each context's days after its frontier, the pass picking up
+   * where the last call stopped. Once a pass finds nothing left to do, calls
+   * cost nothing until the cutoffs move, at midnight and, with a
+   * `storageTolerance`, REFINE_MARGIN after, but for the contexts a fix woke,
+   * which they refine on their own.
    *
    * Returns whether the call stopped with work left, so the caller can come
    * back sooner while there is a backlog.
    */
   refineLevels(now = Date.now()): boolean {
-    const lastDay = dayOf(now - DETAIL_KEEP) - 1
+    const lastDay = dayOf(now - (this.storageTolerance > 0 ? REFINE_MARGIN : DETAIL_KEEP)) - 1
+    // Simplifying waits for DETAIL_KEEP, for the detail an anchor alarm reads.
+    const settledDay = dayOf(now - DETAIL_KEEP) - 1
     let budget = this.refineBudget
     const partial = this.refinePartial
     if (partial) {
@@ -1882,38 +1936,74 @@ export class SqliteTrackStore implements TrackStore {
         }
       }
     }
-    if (this.refinedThrough === lastDay) {
-      return this.simplifyStored(lastDay, budget)
+    const { firstAt } = this.refining()
+    for (const context of this.refineWoken) {
+      budget = this.refineContext(context, lastDay, settledDay, budget, firstAt)
+      if (this.refinePartial || budget <= 0) {
+        return true
+      }
+      this.refineWoken.delete(context)
+    }
+    if (this.refinedThrough === lastDay && this.refinedSettled === settledDay) {
+      return this.simplifyStored(settledDay, budget)
     }
     const nextContext = this.db.prepare('SELECT context FROM positions WHERE context > ? ORDER BY context LIMIT 1')
-    const firstAt = this.db.prepare(
-      'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
-    )
     let context: string | undefined = this.refineResume
     if (context === undefined) {
       context = (nextContext.get('') as { context: string } | undefined)?.context
+      this.refinePass = { through: lastDay, settled: settledDay }
     }
     this.refineResume = undefined
     while (context !== undefined) {
-      for (;;) {
-        const through = this.levelFrontier.get(context)
-        const row = firstAt.get(
-          context,
-          through === undefined ? Number.NEGATIVE_INFINITY : (through + 1) * LEVEL_DAY_MS,
-        ) as { timestamp: number } | undefined
-        if (!row || dayOf(row.timestamp) > lastDay) {
-          break
-        }
-        budget = this.refineDay(context, dayOf(row.timestamp), Number.NEGATIVE_INFINITY, budget, false)
-        if (this.refinePartial || budget <= 0) {
-          this.refineResume = context
-          return true
-        }
+      budget = this.refineContext(context, lastDay, settledDay, budget, firstAt)
+      if (this.refinePartial || budget <= 0) {
+        this.refineResume = context
+        return true
       }
       context = (nextContext.get(context) as { context: string } | undefined)?.context
     }
-    this.refinedThrough = lastDay
-    return this.simplifyStored(lastDay, budget)
+    // A cutoff that moved while the pass went on, or a change it may have
+    // gone past, sends it round again.
+    const moved = this.refinePass?.through !== lastDay || this.refinePass.settled !== settledDay
+    this.refinedThrough = this.refinePass?.through
+    this.refinedSettled = this.refinePass?.settled
+    this.refinePass = undefined
+    return this.simplifyStored(settledDay, budget) || moved
+  }
+
+  /**
+   * Refine a context's days after its frontier up to `lastDay`, as the pass
+   * over every context does, resolving to the budget left. One after
+   * `settledDay` waits in refineWaiting until the context records something
+   * dated REFINE_MARGIN past its end.
+   */
+  private refineContext(
+    context: Context,
+    lastDay: number,
+    settledDay: number,
+    budget: number,
+    firstAt: StatementSync,
+  ): number {
+    this.refineWaiting.delete(context)
+    for (;;) {
+      const through = this.levelFrontier.get(context)
+      const row = firstAt.get(
+        context,
+        through === undefined ? Number.NEGATIVE_INFINITY : (through + 1) * LEVEL_DAY_MS,
+      ) as { timestamp: number } | undefined
+      if (!row || dayOf(row.timestamp) > lastDay) {
+        return budget
+      }
+      const day = dayOf(row.timestamp)
+      if (day > settledDay && !firstAt.get(context, (day + 1) * LEVEL_DAY_MS + REFINE_MARGIN)) {
+        this.refineWaiting.set(context, day)
+        return budget
+      }
+      budget = this.refineDay(context, day, Number.NEGATIVE_INFINITY, budget, false)
+      if (this.refinePartial || budget <= 0) {
+        return budget
+      }
+    }
   }
 
   /**
@@ -1995,8 +2085,11 @@ export class SqliteTrackStore implements TrackStore {
     } else {
       statements.frontier.run(context, day)
       this.levelFrontier.set(context, day)
-      // A day refined is one more to simplify.
-      this.simplifiedThrough = undefined
+      // A day refined is one more to simplify, but for one after the last the
+      // simplifying pass goes over: it comes to that once its cutoff moves.
+      if (this.simplifiedThrough !== undefined && day <= this.simplifiedThrough) {
+        this.simplifiedThrough = undefined
+      }
     }
     return budget
   }
@@ -2023,6 +2116,10 @@ export class SqliteTrackStore implements TrackStore {
         `DELETE FROM significant WHERE context = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
       ),
       deleteVisits: this.db.prepare('DELETE FROM level_visits WHERE context = ? AND hour >= ? AND hour < ?'),
+      // A context's first position from a time on, for the pass over the contexts.
+      firstAt: this.db.prepare(
+        'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
+      ),
     })
   }
 
@@ -2033,7 +2130,8 @@ export class SqliteTrackStore implements TrackStore {
    * `significant` holds. About `refineBudget` positions per call, each one
    * deleted counting once more, once refineLevels() has nothing left, so no
    * day is stale: days a change sent back first, then each context's refined
-   * days after its frontier. Returns whether it stopped with work left.
+   * days after its frontier up to `lastDay`. Returns whether it stopped with
+   * work left.
    *
    * A frontier reached at a smaller tolerance counts for none, so raising
    * the tolerance goes over every day again. Lowering it brings nothing
@@ -2091,7 +2189,8 @@ export class SqliteTrackStore implements TrackStore {
           context,
           through === undefined ? Number.NEGATIVE_INFINITY : (through + 1) * LEVEL_DAY_MS,
         ) as { timestamp: number } | undefined
-        if (!row || refined === undefined || dayOf(row.timestamp) > refined) {
+        // Refining runs ahead of it with a storageTolerance; see refineLevels().
+        if (!row || refined === undefined || dayOf(row.timestamp) > Math.min(refined, lastDay)) {
           break
         }
         budget = this.simplifyDay(context, dayOf(row.timestamp), Number.NEGATIVE_INFINITY, budget, false)
@@ -2286,11 +2385,13 @@ export class SqliteTrackStore implements TrackStore {
       this.deleteSignificant(context, partial.day * LEVEL_DAY_MS, (partial.day + 1) * LEVEL_DAY_MS)
       this.refinePartial = undefined
       this.refinedThrough = undefined
+      this.refinePass = undefined
     }
     if (through === undefined || dayOf(to) > through) {
       // The pass that last found nothing left to do may have been past these
-      // days before the change came.
+      // days before the change came, and so may the one going on.
       this.refinedThrough = undefined
+      this.refinePass = undefined
     }
     if (through === undefined) {
       return
@@ -2348,8 +2449,11 @@ export class SqliteTrackStore implements TrackStore {
     this.db.prepare('DELETE FROM simplify_pending WHERE context = ?').run(context)
     this.db.prepare('DELETE FROM simplified_days WHERE context = ?').run(context)
     this.levelFrontier.delete(context)
+    this.refineWaiting.delete(context)
+    this.refineWoken.delete(context)
     this.simplifyFrontier.delete(context)
     this.refinedThrough = undefined
+    this.refinePass = undefined
     this.simplifiedThrough = undefined
     if (this.refinePartial?.context === context) {
       this.refinePartial = undefined
@@ -2747,7 +2851,7 @@ export class SqliteTrackStore implements TrackStore {
     if (!(this.storageTolerance > 0)) {
       return { written: segments, days }
     }
-    // As refineLevels() reckons the last day it refines.
+    // As refineLevels() reckons the last day simplifyStored() goes over.
     const lastDay = dayOf(now - DETAIL_KEEP) - 1
     const byDay = new Map<number, { segment: number; index: number; point: TimedPosition }[]>()
     for (const [segment, points] of segments.entries()) {
@@ -3050,6 +3154,11 @@ export class SqliteTrackStore implements TrackStore {
     // between are empty now, and their significant positions go with them.
     if (moved > 0) {
       this.invalidateLevels(context, lower, to)
+      // One the bin took every position of waits on no day, and no pass
+      // comes to it to say so.
+      if (!this.knows(context)) {
+        this.refineWaiting.delete(context)
+      }
     }
     return { id, known }
   }
@@ -3375,6 +3484,9 @@ export class SqliteTrackStore implements TrackStore {
     this.refinedThrough = undefined
     this.refineResume = undefined
     this.refinePartial = undefined
+    this.refinePass = undefined
+    this.refineWaiting.clear()
+    this.refineWoken.clear()
     this.simplifyFrontier.clear()
     for (const { context, through, tolerance } of this.db
       .prepare('SELECT context, through, tolerance FROM simplify_frontier')

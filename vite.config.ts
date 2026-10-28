@@ -49,6 +49,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     globalSetup: ['src/workerTestSetup.ts'],
+    setupFiles: ['src/fileTestSetup.ts'],
     forceRerunTriggers: [
       'src/sqliteStore.ts',
       'src/trackStoreWorker.ts',
