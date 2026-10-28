@@ -182,7 +182,7 @@ const msToDuration = (ms: number): Temporal.Duration =>
 
 const toLngLat = ([lat, lng]: LatLngTuple): [number, number] => [lng, lat]
 
-/** A read's tolerance, where it has one. */
+/** A read's tolerance as a key left out when there is none, which exactOptionalPropertyTypes requires. */
 const readAt = (tolerance: number | undefined): { tolerance?: number } => (tolerance === undefined ? {} : { tolerance })
 
 /** The spacing a read thins to: the wider of the client's and the one a fit adds. */

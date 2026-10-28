@@ -5,7 +5,7 @@ import { knotsBetween } from './glitchFilter.js'
 import type { Fix } from './glitchFilter.js'
 import { outsideSpans } from './recycleBin.js'
 import { significance } from './simplify.js'
-import { thin, Thinner } from './timeWindow.js'
+import { keeps, thin, Thinner } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
 import {
@@ -1133,7 +1133,7 @@ export class SqliteTrackStore implements TrackStore {
     let keptLast = false
     for (const { timestamp } of this.daysOf(context, range, levels)) {
       seen++
-      keptLast = timestamp - lastKept >= resolution
+      keptLast = keeps(lastKept, timestamp, resolution)
       if (keptLast) {
         lastKept = timestamp
         if (++kept >= limit) {

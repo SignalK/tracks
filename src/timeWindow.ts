@@ -250,6 +250,15 @@ function thinStretch(points: TimedPosition[], resolution: number): TimedPosition
 }
 
 /**
+ * Whether thinning to `resolution` keeps a point at `timestamp` after the one
+ * it kept last. `Thinner` keeps by it, and the store counts what a thinned
+ * read keeps by it, so both apply the same rule; the store's count copies
+ * what `finish()` adds, which its test against `getTimed()` pins.
+ */
+export const keeps = (lastKept: number, timestamp: number, resolution: number): boolean =>
+  timestamp - lastKept >= resolution
+
+/**
  * One stretch thinned as `thin()` thins it, fed a point at a time.
  *
  * Lets a reader thin a track while reading it, holding only the points it
@@ -275,7 +284,7 @@ export class Thinner {
       this.head.push(point)
     }
     const pause = this.previous ? pauseBetween(this.previous, point) : 0
-    this.keptLast = point.timestamp - this.lastKept >= this.resolution
+    this.keptLast = keeps(this.lastKept, point.timestamp, this.resolution)
     if (this.keptLast) {
       this.kept.push(
         this.droppedPause === undefined ? point : { ...point, pauseBefore: Math.max(this.droppedPause, pause) },
