@@ -8,11 +8,11 @@ install and needs no configuration to start recording.
 
 Requires Signal K server >= 2.33.0 for the v2 Track API; older servers get the v1 routes only.
 
-| Setting                               | Behaviour                                                                                                   |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Track resolution                      | Minimum spacing between recorded positions.                                                                 |
-| Record other vessels (AIS)            | On by default. Off records the own vessel only.                                                             |
-| Days to keep other vessels' positions | Drops other vessels' positions older than this, even while a vessel stays in range. 0 keeps every position. |
+| Setting                               | Behaviour                                                                                                      |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Track resolution                      | Minimum spacing between recorded positions.                                                                    |
+| Record other vessels (AIS)            | On by default. Off records the own vessel only.                                                                |
+| Days to keep other vessels' positions | Drops other vessels' positions older than this, even while a vessel stays in range. 0 keeps them indefinitely. |
 
 The plugin's configuration page shows the current defaults, and is the authority on them.
 

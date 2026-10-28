@@ -213,7 +213,7 @@ interface TracksPluginConfig {
   resolution?: number
   /** Whether vessels other than the own one are recorded; they are unless false. */
   recordOtherVessels?: boolean
-  /** Days another vessel's positions are kept. 0 keeps every position. */
+  /** Days another vessel's positions are kept. 0 keeps them indefinitely. */
   aisRetentionDays?: number
   /** Days a deleted track waits in the recycle bin before it is purged. */
   recycleBinDays?: number
@@ -1831,7 +1831,7 @@ export default function ThePlugin(app: App): Plugin {
           minimum: 0,
           title: "Days to keep other vessels' positions",
           description:
-            "The own vessel is never removed. Other vessels' positions are removed once older than this, and a vessel with none left is dropped: a busy harbour puts hundreds of AIS targets past the receiver in a day, and a neighbour that never leaves range would otherwise grow without bound. 0 keeps every position indefinitely.",
+            "The own vessel is never removed. Other vessels' positions are removed once older than this, and a vessel with none left is dropped: a busy harbour puts hundreds of AIS targets past the receiver in a day, and a neighbour that never leaves range would otherwise grow without bound. 0 keeps them indefinitely.",
           default: DEFAULT_AIS_RETENTION_DAYS,
         },
         segmentGapMinutes: {
