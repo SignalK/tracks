@@ -323,8 +323,9 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
    * over the budget is read at the smallest tolerance whose levels hold it
    * within the budget; with `maxPoints`, which asks for spacing, no
    * tolerance is tried, and it is spaced as `maxPoints` first spaces a
-   * track, where that holds it. Where neither does, or the read may pass no
-   * tolerance (tracks split at pauses), it is spaced in time to the budget.
+   * track, where that holds it. Where neither does, or, without `maxPoints`,
+   * the read may pass no tolerance (tracks split at pauses), it is spaced in
+   * time to the budget.
    * A track within the budget is read as before, and `maxPoints` thins it
    * as it always did.
    */
