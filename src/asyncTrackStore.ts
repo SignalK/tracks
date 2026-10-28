@@ -5,6 +5,7 @@ import type { SqliteTrackStore, SqliteStoreConfig } from './sqliteStore.js'
 import type {
   Debug,
   Context,
+  GpxUploadState,
   HistoryImportState,
   ImportedTrack,
   ImportFilter,
@@ -12,6 +13,7 @@ import type {
   TimedPosition,
   TimeWindow,
   TrackParams,
+  UploadPart,
 } from './types.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { Operation, StoreMethod, WorkerMessage } from './trackStoreProtocol.js'
@@ -400,6 +402,12 @@ export class AsyncTrackStore implements TrackStore {
   }
   saveHistoryImport(state: HistoryImportState, runs: TimedPosition[][], since?: number): Promise<number> {
     return this.enqueue('saveHistoryImport', [state, runs, since], 'acknowledged')
+  }
+  gpxUpload() {
+    return this.enqueue('gpxUpload', [])
+  }
+  saveGpxUpload(state: GpxUploadState, parts: UploadPart[]): Promise<GpxUploadState> {
+    return this.enqueue('saveGpxUpload', [state, parts], 'acknowledged')
   }
   getImport(id: string) {
     return this.enqueue('getImport', [id])

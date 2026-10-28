@@ -14,9 +14,12 @@ import {
   fillGaps,
   longitudeSpan,
   longitudeSpanOf,
+  mergeSpan,
   MIN_FILLED_GAP_MS,
   splitAtAntimeridian,
+  subtractSpans,
   UnknownContextError,
+  withinSpans,
 } from './utils.js'
 import type { LongitudeExtremes } from './utils.js'
 import type {
@@ -24,6 +27,7 @@ import type {
   Context,
   Debug,
   GeoBounds,
+  GpxUploadState,
   HistoryImportState,
   ImportedPoint,
   ImportedTrack,
@@ -32,6 +36,7 @@ import type {
   LatLngTuple,
   RecordedSpan,
   RestoreResult,
+  Span,
   TimedPosition,
   TimedTrackCollection,
   TimeExtent,
@@ -39,6 +44,7 @@ import type {
   TrackCollection,
   TrackParams,
   TrackSummary,
+  UploadPart,
 } from './types.js'
 
 export class TransactionStateError extends Error {}
@@ -754,6 +760,12 @@ export class SqliteTrackStore implements TrackStore {
         in_gap      INTEGER,
         finished_at INTEGER,
         error       TEXT
+      );
+      -- The last GPX file uploaded in slices, so a restart goes on with it;
+      -- see gpxUpload.ts. A new upload replaces the row.
+      CREATE TABLE IF NOT EXISTS gpx_uploads (
+        id    TEXT PRIMARY KEY,
+        state TEXT NOT NULL
       );
     `)
     this.loadLevels()
@@ -2505,13 +2517,29 @@ export class SqliteTrackStore implements TrackStore {
    * each piece on its own window decides every point as one read would.
    */
   fillTrack(context: Context, runs: TimedPosition[][]): number {
+    const { kept, overlapping } = this.judgeFill(context, runs)
+    this.fill(context, kept.flat())
+    return overlapping
+  }
+
+  /**
+   * What of each run `fillTrack` writes, and how many points it leaves out.
+   * The recorded positions within `own`, which a sliced upload's segment
+   * wrote in the slices before, do not count against the first run: they are
+   * that segment's own.
+   */
+  private judgeFill(
+    context: Context,
+    runs: TimedPosition[][],
+    own: readonly Span[] = [],
+  ): { kept: TimedPosition[][][]; overlapping: number } {
     const recorded = this.db.prepare(
       'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?',
     )
-    const kept: TimedPosition[][] = []
+    const kept: TimedPosition[][][] = []
     const index = new KeptRuns()
     let overlapping = 0
-    for (const run of runs) {
+    for (const [r, run] of runs.entries()) {
       // Added once the whole run is judged, so it never counts against itself.
       const judged: TimedPosition[][] = []
       for (const piece of fillPieces(run)) {
@@ -2520,16 +2548,18 @@ export class SqliteTrackStore implements TrackStore {
         if (first === undefined || last === undefined) continue
         const from = first.timestamp - MIN_FILLED_GAP_MS
         const to = last.timestamp + MIN_FILLED_GAP_MS
-        const around = [...(recorded.all(context, from, to) as { timestamp: number }[]), ...index.within(from, to)]
-        const filled = fillGaps([piece], around, MIN_FILLED_GAP_MS)
+        let stored = recorded.all(context, from, to) as { timestamp: number }[]
+        if (r === 0 && own.length > 0) {
+          stored = stored.filter(({ timestamp }) => !withinSpans(own, timestamp))
+        }
+        const filled = fillGaps([piece], [...stored, ...index.within(from, to)], MIN_FILLED_GAP_MS)
         judged.push(...filled.runs)
         overlapping += filled.overlapping
       }
-      kept.push(...judged)
+      kept.push(judged)
       for (const run of judged) index.add(run)
     }
-    this.fill(context, kept)
-    return overlapping
+    return { kept, overlapping }
   }
 
   /**
@@ -2537,7 +2567,11 @@ export class SqliteTrackStore implements TrackStore {
    * them as imported rather than thin them as detail. What
    * simplifyUnrecorded() leaves out of them is not written.
    */
-  private fill(context: Context, segments: TimedPosition[][]): void {
+  private fill(
+    context: Context,
+    segments: TimedPosition[][],
+    mine: ReadonlyMap<number, number> = new Map(),
+  ): Map<number, number> {
     for (const points of segments) {
       const first = points[0]
       const last = points.at(-1)
@@ -2547,7 +2581,7 @@ export class SqliteTrackStore implements TrackStore {
     // The next live fix would otherwise open a detail span from the last one
     // recorded before the import, reaching over the imported points.
     this.lastStored.delete(context)
-    const { written, days } = this.simplifyUnrecorded(context, segments)
+    const { written, days } = this.simplifyUnrecorded(context, segments, mine)
     for (const [s, points] of segments.entries()) {
       for (const { position, timestamp } of written[s]!) {
         this.store(context, position, timestamp)
@@ -2562,6 +2596,7 @@ export class SqliteTrackStore implements TrackStore {
     for (const [day, positions] of days) {
       this.simplifying().mark.run(context, day, this.storageTolerance, positions)
     }
+    return days
   }
 
   /**
@@ -2576,11 +2611,15 @@ export class SqliteTrackStore implements TrackStore {
    * A day the recording has positions of is written in full: simplifying the
    * import's stretches alone keeps their ends, and judges a point by the
    * chord its stretch draws rather than the one the whole day does. An
-   * earlier import's positions count as the recording's.
+   * earlier import's positions count as the recording's, except on the days
+   * in `mine`: a sliced upload wrote that many positions of each simplified,
+   * and goes on with it while the day holds no others. Each day comes back
+   * with every position written of it so.
    */
   private simplifyUnrecorded(
     context: Context,
     segments: TimedPosition[][],
+    mine: ReadonlyMap<number, number> = new Map(),
     now = Date.now(),
   ): { written: TimedPosition[][]; days: Map<number, number> } {
     const days = new Map<number, number>()
@@ -2599,10 +2638,15 @@ export class SqliteTrackStore implements TrackStore {
         entries.push({ segment, index, point })
       }
     }
-    const { recorded } = this.simplifying()
+    const { recorded, count } = this.simplifying()
     const dropped = segments.map(() => new Set<number>())
     for (const [day, entries] of byDay) {
-      if (recorded.get(context, day * LEVEL_DAY_MS, (day + 1) * LEVEL_DAY_MS)) continue
+      const own = mine.get(day)
+      const others =
+        own === undefined
+          ? recorded.get(context, day * LEVEL_DAY_MS, (day + 1) * LEVEL_DAY_MS) !== undefined
+          : (count.get(context, day * LEVEL_DAY_MS, (day + 1) * LEVEL_DAY_MS) as { n: number }).n !== own
+      if (others) continue
       // In the order refineDay() reads them: by time, and as written, which is the rowid's order.
       entries.sort((a, b) => a.point.timestamp - b.point.timestamp)
       const points = entries.map(({ point }) => point)
@@ -2622,12 +2666,89 @@ export class SqliteTrackStore implements TrackStore {
           }
         }
       }
-      days.set(day, kept)
+      days.set(day, (own ?? 0) + kept)
     }
     const written = segments.map((points, s) =>
       dropped[s]!.size === 0 ? points : points.filter((_, i) => !dropped[s]!.has(i)),
     )
     return { written, days }
+  }
+
+  /** The last GPX file uploaded in slices, as its last write left it. */
+  gpxUpload(): GpxUploadState | undefined {
+    const row = this.db.prepare('SELECT state FROM gpx_uploads').get() as { state: string } | undefined
+    return row && (JSON.parse(row.state) as GpxUploadState)
+  }
+
+  /**
+   * Write the points a slice of an uploaded GPX file brought into the
+   * recording, together with the upload's state, so a restart never finds
+   * the one without the other; resolves to the state with what was written
+   * counted in.
+   *
+   * Each slice is written as a whole upload of the same points would be, by
+   * `fillTrack` or `recordTrack`, judged against the recording as it was
+   * before the upload: a segment that goes on from the slice before is not
+   * judged against what it wrote there, and a replaced span is binned only
+   * where no segment of the upload wrote already, into the entry its segment
+   * began. A day it wrote simplified, it goes on simplifying.
+   */
+  saveGpxUpload(state: GpxUploadState, parts: UploadPart[]): GpxUploadState {
+    const { context } = state
+    const runs = parts.map(({ points }) => points)
+    const count = runs.reduce((sum, points) => sum + points.length, 0)
+    const continues = parts[0]?.continues === true
+    const mine = new Map(state.simplifiedDays)
+    let { imported, overlapping } = state
+    let days: Map<number, number>
+    let next: Partial<GpxUploadState>
+    if (state.onOverlap === 'keep') {
+      const judged = this.judgeFill(context, runs, continues ? state.filled : [])
+      overlapping += judged.overlapping
+      imported += count - judged.overlapping
+      days = this.fill(context, judged.kept.flat(), mine)
+      let filled: Span[] = parts.length === 1 && continues ? (state.filled ?? []) : []
+      for (const run of judged.kept.at(-1) ?? []) {
+        filled = mergeSpan(filled, [run[0]!.timestamp, run.at(-1)!.timestamp])
+      }
+      next = { filled }
+    } else {
+      const now = Date.now()
+      let replaced = state.replaced ?? []
+      let binned = continues ? state.binned : undefined
+      for (const [p, { points }] of parts.entries()) {
+        const first = points[0]?.timestamp
+        const last = points.at(-1)?.timestamp
+        if (first === undefined || last === undefined) continue
+        if (p > 0) binned = undefined
+        // A segment's span takes in the time between its slices as well.
+        const span: Span = [Math.min(first, binned?.from ?? first), Math.max(last, binned?.to ?? last)]
+        let entry = binned?.id === undefined ? undefined : { id: binned.id, deletedAt: binned.deletedAt ?? now }
+        for (const [from, to] of subtractSpans(span, replaced)) {
+          const { id } = this.binRecorded(context, from, to, now, state.keepEmpty, entry)
+          if (id !== undefined && id !== entry?.id) entry = { id, deletedAt: now }
+        }
+        binned = { ...(entry === undefined ? {} : entry), from: span[0], to: span[1] }
+        replaced = mergeSpan(replaced, span)
+      }
+      days = this.fill(context, runs, mine)
+      imported += count
+      next = { replaced, ...(binned === undefined ? {} : { binned }) }
+    }
+    const saved: GpxUploadState = { ...state, imported, overlapping }
+    // A slice without a whole point leaves the segment and its days open.
+    if (parts.length > 0) {
+      delete saved.filled
+      delete saved.replaced
+      delete saved.binned
+      delete saved.simplifiedDays
+      Object.assign(saved, next, days.size === 0 ? {} : { simplifiedDays: [...days] })
+    }
+    this.db.prepare('DELETE FROM gpx_uploads WHERE id <> ?').run(saved.id)
+    this.db
+      .prepare('INSERT INTO gpx_uploads (id, state) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET state = excluded.state')
+      .run(saved.id, JSON.stringify(saved))
+    return saved
   }
 
   /** How far the import of a vessel's track from a history provider got, or undefined before one started. */
@@ -2757,6 +2878,13 @@ export class SqliteTrackStore implements TrackStore {
    * An entry is made even when the store holds nothing there if `keepEmpty`
    * says the history import could bring the span in: it still has to keep
    * the import out. Without one, an empty delete leaves no entry behind.
+   *
+   * `into` names an entry of the same vessel to add the positions to instead,
+   * its span widened to take in this one: a sliced upload replaces one
+   * segment over several writes, and makes one entry of it as a whole upload
+   * does. It names the entry by its time of deletion as well as its id, since
+   * a restore frees the id for the next entry, of any vessel. When the entry
+   * is gone, the positions start one of their own.
    */
   binRecorded(
     context: Context,
@@ -2764,10 +2892,23 @@ export class SqliteTrackStore implements TrackStore {
     to: number,
     deletedAt: number,
     keepEmpty: boolean,
+    entry?: { id: number; deletedAt: number },
   ): { id?: number; known: boolean } {
     const known = this.knows(context)
     const lower = from ?? Number.MIN_SAFE_INTEGER
-    const id = this.newBinEntry({ context, ...(from === undefined ? {} : { from }), to, deletedAt })
+    const into =
+      entry &&
+      this.db
+        .prepare('SELECT 1 AS found FROM recycle_bin WHERE id = ? AND context = ? AND deleted_at = ? AND purged = 0')
+        .get(entry.id, context, entry.deletedAt)
+        ? entry.id
+        : undefined
+    const id = into ?? this.newBinEntry({ context, ...(from === undefined ? {} : { from }), to, deletedAt })
+    if (into !== undefined) {
+      this.db
+        .prepare('UPDATE recycle_bin SET span_from = MIN(span_from, ?), span_to = MAX(span_to, ?) WHERE id = ?')
+        .run(lower, to, into)
+    }
     const moved = Number(
       this.db
         .prepare(
@@ -2777,7 +2918,7 @@ export class SqliteTrackStore implements TrackStore {
         )
         .run(id, context, lower, to).changes,
     )
-    if (moved === 0 && !keepEmpty) {
+    if (moved === 0 && !keepEmpty && into === undefined) {
       this.db.prepare('DELETE FROM recycle_bin WHERE id = ?').run(id)
       return { known }
     }

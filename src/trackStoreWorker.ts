@@ -56,6 +56,7 @@ const ACKNOWLEDGED = new Set<Operation['method']>([
   'restoreFromBin',
   'purgeFromBin',
   'saveHistoryImport',
+  'saveGpxUpload',
 ])
 function acknowledge(operation: Operation, target: SqliteTrackStore): unknown {
   switch (operation.method) {
@@ -75,6 +76,8 @@ function acknowledge(operation: Operation, target: SqliteTrackStore): unknown {
       return target.purgeFromBin(...operation.args)
     case 'saveHistoryImport':
       return target.saveHistoryImport(...operation.args)
+    case 'saveGpxUpload':
+      return target.saveGpxUpload(...operation.args)
     default:
       throw new Error('Unknown track operation')
   }
@@ -218,6 +221,9 @@ if (store) {
                 break
               case 'historyImport':
                 value = target.historyImport(...operation.args)
+                break
+              case 'gpxUpload':
+                value = target.gpxUpload()
                 break
               default:
                 throw new Error('Unknown track operation')

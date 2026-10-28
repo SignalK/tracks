@@ -5,7 +5,10 @@ import { parseDuration } from './timeWindow.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '../public/bin.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
-import { imported, importQuery, start as startImport } from '../public/import.js'
+import { imported, progress, start as startImport, trackChoice, uploaded } from '../public/import.js'
+// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
+import { fingerprintOf, scanGpx, SLICE_BYTES, uploadGpx } from '../public/upload.js'
+import { GpxReader } from './gpxUpload.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { confirmed, start as startDanger } from '../public/danger.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
@@ -1287,49 +1290,94 @@ describe('the import form', () => {
     )
   })
 
-  it('asks to replace a recording only for the own vessel', () => {
-    expect(importQuery({ self: false, replace: true })).toBe('')
-    expect(importQuery({ self: true, replace: false })).toBe('?self=true')
-    expect(importQuery({ self: true, replace: true })).toBe('?self=true&onOverlap=replace')
+  it('says what an upload into the own recording came to, and how far one got', () => {
+    expect(uploaded({ imported: 1200, overlapping: 0, untimed: 0 })).toBe(
+      `Imported ${(1200).toLocaleString()} points into your vessel's track.`,
+    )
+    expect(uploaded({ imported: 1, overlapping: 2, untimed: 3 })).toBe(
+      "Imported 1 point into your vessel's track. 3 points without a time left out. " +
+        '2 points left out where your vessel already has a track.',
+    )
+    expect(progress({ received: 512 * 1024 * 1024, size: 1024 * 1024 * 1024 })).toBe('Importing: 50%, 512 of 1024 MB.')
   })
 
-  it('offers to replace a recording only while the own vessel is chosen', () => {
-    let changed = () => {}
-    const self = {
+  it('offers a file’s tracks with times, and proposes those not named like an AIS target', () => {
+    const from = '2023-08-29T21:57:38Z'
+    expect(trackChoice({ name: 'Own', points: 2, from, to: '2023-09-02T10:00:00Z' })).toEqual({
+      name: 'Own',
+      label: 'Own: 2 points, 2023-08-29 to 2023-09-02',
+      disabled: false,
+      checked: true,
+    })
+    expect(trackChoice({ name: 'AIS Ariadne', points: 1, from, to: from })).toMatchObject({
+      label: 'AIS Ariadne: 1 point, 2023-08-29',
       checked: false,
-      addEventListener: (_type: string, handler: () => void) => {
-        changed = handler
-      },
-    }
-    const replace = { checked: false, disabled: false }
-    const form = { elements: { self, replace }, querySelector: () => ({}), addEventListener: () => {} }
-    vi.stubGlobal('document', { getElementById: (id: string) => (id === 'import-form' ? form : {}) })
-    startImport()
-    expect(replace.disabled).toBe(true)
-    self.checked = true
-    changed()
-    expect(replace.disabled).toBe(false)
+    })
+    expect(trackChoice({ name: '987654321', points: 1, from, to: from })).toMatchObject({ checked: false })
+    expect(trackChoice({ name: '', points: 3 })).toEqual({
+      name: '',
+      label: '(no name): 3 points, no times',
+      disabled: true,
+      checked: false,
+    })
   })
 
-  // Each upload stores the file anew, so a second submit would import it twice.
-  it('sends one upload at a time, and allows another after a failure', async () => {
+  /** Stand-ins for the form's elements, enough for start() to wire up. */
+  const formStub = (over: { self?: object; file?: object } = {}) => {
+    const listening = () => ({ addEventListener: () => {} })
+    const self = { checked: false, ...listening(), ...over.self }
+    const replace = { checked: false, disabled: false }
     const button = { disabled: false }
     const status = { textContent: '', hidden: true, dataset: {} as Record<string, string> }
     let submit: (event: { preventDefault: () => void }) => Promise<void> = async () => {}
     const form = {
-      elements: {
-        file: { files: [{ name: 'a.gpx' }] },
-        self: { checked: false, addEventListener: () => {} },
-        replace: { checked: false, disabled: false },
-      },
+      elements: { file: { files: [], ...listening(), ...over.file }, self, replace },
       querySelector: () => button,
       addEventListener: (_type: string, handler: typeof submit) => {
         submit = handler
       },
     }
+    const elements: Record<string, unknown> = {
+      'import-form': form,
+      'import-status': status,
+      'import-tracks': { hidden: true, replaceChildren: () => {}, ...listening() },
+      'import-stop': { hidden: true, ...listening() },
+    }
+    vi.stubGlobal('document', { getElementById: (id: string) => elements[id] })
+    return { self, replace, button, status, submit: (event: { preventDefault: () => void }) => submit(event) }
+  }
+
+  it('offers to replace a recording only while the own vessel is chosen', () => {
+    const handlers: (() => void)[] = []
+    const { self, replace } = formStub({
+      self: {
+        addEventListener: (_type: string, handler: () => void) => {
+          handlers.push(handler)
+        },
+      },
+    })
+    startImport()
+    expect(replace.disabled).toBe(true)
+    self.checked = true
+    for (const handler of handlers) handler()
+    expect(replace.disabled).toBe(false)
+  })
+
+  it('refuses a file of another vessel too large for one request, before sending any of it', async () => {
+    const { status, submit } = formStub({ file: { files: [{ name: 'big.gpx', size: 25 * 1024 * 1024 + 1 }] } })
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    startImport()
+    await submit({ preventDefault: () => {} })
+    expect(fetch).not.toHaveBeenCalled()
+    expect(status.textContent).toMatch(/at most 25 MB/)
+  })
+
+  // Each upload stores the file anew, so a second submit would import it twice.
+  it('sends one upload at a time, and allows another after a failure', async () => {
+    const { button, status, submit } = formStub({ file: { files: [{ name: 'a.gpx', size: 100 }] } })
     let answer: (response: unknown) => void = () => {}
     const fetch = vi.fn(() => new Promise((resolve) => (answer = resolve)))
-    vi.stubGlobal('document', { getElementById: (id: string) => (id === 'import-form' ? form : status) })
     vi.stubGlobal('fetch', fetch)
     startImport()
 
@@ -1343,6 +1391,298 @@ describe('the import form', () => {
     await first
     expect(status.textContent).toBe('No track found')
     expect(button.disabled).toBe(false)
+  })
+})
+
+describe('a GPX file uploaded in slices', () => {
+  const GPX = 'http://www.topografix.com/GPX/1/1'
+  const trkpt = (time?: string) => `<trkpt lat="1" lon="2">${time === undefined ? '' : `<time>${time}</time>`}</trkpt>`
+  const xml = [
+    `<?xml version="1.0"?><gpx version="1.1" xmlns="${GPX}">`,
+    `<trk><name> Ström &amp; Söhne ⛵ </name><extensions><name>vendor</name></extensions>`,
+    `<trkseg>${trkpt('2023-08-29T21:57:38Z')}${trkpt('2023-08-30T08:00:00Z')}</trkseg></trk>`,
+    `<trk><name>AIS Ariadne</name><trkseg>${trkpt('2023-08-29T22:00:00Z')}</trkseg></trk>`,
+    `<trk><trkseg>${trkpt()}<trkpt lat="3" lon="4"/></trkseg><name>late</name></trk>`,
+    `<trk><name>AIS Ariadne</name><trkseg>${trkpt('2023-08-31T00:00:00Z')}</trkseg></trk>`,
+    '</gpx>',
+  ].join('\n')
+  const file = new Blob([xml])
+
+  it.each([7, 64, 1 << 20])('lists the tracks by name, in chunks of %i bytes', async (chunk) => {
+    expect(await scanGpx(file, () => {}, chunk)).toEqual([
+      { name: 'Ström & Söhne ⛵', points: 2, from: '2023-08-29T21:57:38Z', to: '2023-08-30T08:00:00Z' },
+      { name: 'AIS Ariadne', points: 2, from: '2023-08-29T22:00:00Z', to: '2023-08-31T00:00:00Z' },
+      { name: '', points: 2 },
+    ])
+  })
+
+  // The server chooses tracks by name; a name spelled differently here would import nothing.
+  it('names the tracks as the server reads them', async () => {
+    const names = (await scanGpx(file)).map(({ name }: { name: string }) => name)
+    const read = await new GpxReader(new Set(names), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeUndefined()
+    expect([...read.parts.keys()]).toEqual([1, 2, 4])
+    expect(read.untimed).toBe(2)
+  })
+
+  it('reads a name in CDATA, beside references and a comment, as the server does', async () => {
+    const cdata = `<gpx xmlns="${GPX}"><trk><name> <![CDATA[Own &amp; <Co>]]> &amp;<!-- not this --> Ship </name><trkseg>${trkpt('2023-08-29T21:57:38Z')}</trkseg></trk></gpx>`
+    const names = (await scanGpx(new Blob([cdata]))).map(({ name }: { name: string }) => name)
+    expect(names).toEqual(['Own &amp; <Co> & Ship'])
+    // Cut inside the CDATA section and the comment as well.
+    expect(await scanGpx(new Blob([cdata]), () => {}, 7)).toEqual(await scanGpx(new Blob([cdata])))
+    const read = await new GpxReader(new Set(names), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(cdata),
+      true,
+    )
+    expect([...read.parts.keys()]).toEqual([1])
+  })
+
+  it('reads a name across a Windows line end as the server does', async () => {
+    const crlf = `<gpx xmlns="${GPX}"><trk><name>Leg\r\n2</name><trkseg>${trkpt('2023-08-29T21:57:38Z')}</trkseg></trk></gpx>`
+    const names = (await scanGpx(new Blob([crlf]))).map(({ name }: { name: string }) => name)
+    expect(names).toEqual(['Leg\n2'])
+    const read = await new GpxReader(new Set(names), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(crlf),
+      true,
+    )
+    expect([...read.parts.keys()]).toEqual([1])
+  })
+
+  type Call = { url: string; method: string; offset?: number; size?: number; signal?: AbortSignal | null | undefined }
+
+  /**
+   * A server taking an upload: `answer` may stand in for its answer to a
+   * slice. Each call is noted with the offset and size of the slice it sent.
+   */
+  const server = (
+    size: number,
+    over: {
+      current?: object
+      answer?: (call: Call, take: () => Response) => Response | Promise<Response>
+      stop?: () => Response
+    } = {},
+  ) => {
+    const calls: Call[] = []
+    let upload = {
+      id: 'u1',
+      state: 'receiving',
+      received: 0,
+      size,
+      filename: 'f.gpx',
+      tracks: ['Own'],
+      onOverlap: 'keep',
+    }
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
+    const request = vi.fn(async (url: string, init: RequestInit = {}) => {
+      const method = init.method ?? 'GET'
+      const offset = /offset=(\d+)/.exec(url)?.[1]
+      const call: Call = { url, method, signal: init.signal }
+      if (offset !== undefined) {
+        call.offset = Number(offset)
+        call.size = (init.body as Blob).size
+      }
+      calls.push(call)
+      if (method === 'GET') return json({ upload: over.current ?? null })
+      if (method === 'POST') return json({ upload }, 201)
+      if (method === 'DELETE' && over.stop) return over.stop()
+      if (method === 'DELETE') return json({ upload: (upload = { ...upload, state: 'aborted' }) })
+      const take = () => {
+        const received = upload.received + call.size!
+        upload = { ...upload, received, state: received === size ? 'finished' : 'receiving' }
+        return json({ upload })
+      }
+      return over.answer ? over.answer(call, take) : take()
+    })
+    return { calls, request }
+  }
+
+  const blob = (size: number) => Object.assign(new Blob([new Uint8Array(size)]), { name: 'f.gpx' })
+  const options = { tracks: ['Own'], onOverlap: 'keep', onStatus: () => {}, sleep: async () => {} }
+
+  it('sends the file a slice at a time from where the server says it got to', async () => {
+    const size = 2 * SLICE_BYTES + 5
+    const { calls, request } = server(size)
+    const done = await uploadGpx({ ...options, file: blob(size), request })
+    expect(done).toMatchObject({ state: 'finished', received: size })
+    expect(calls.filter(({ method }) => method === 'PUT').map(({ offset, size }) => [offset, size])).toEqual([
+      [0, SLICE_BYTES],
+      [SLICE_BYTES, SLICE_BYTES],
+      [2 * SLICE_BYTES, 5],
+    ])
+  })
+
+  it('goes on with an upload of the same file broken off before', async () => {
+    const size = SLICE_BYTES + 5
+    const current = {
+      id: 'u0',
+      state: 'receiving',
+      received: SLICE_BYTES,
+      size,
+      filename: 'f.gpx',
+      tracks: ['Own'],
+      onOverlap: 'keep',
+      fingerprint: await fingerprintOf(blob(size)),
+    }
+    const { calls, request } = server(size, {
+      current,
+      answer: () => new Response(JSON.stringify({ upload: { ...current, received: size, state: 'finished' } })),
+    })
+    await uploadGpx({ ...options, file: blob(size), request })
+    expect(calls.map(({ method, url }) => `${method} ${url.replace(/^.*upload/, '')}`)).toEqual([
+      'GET ',
+      `PUT /u0?offset=${SLICE_BYTES}`,
+    ])
+  })
+
+  it('starts anew with another file of the same name and size', async () => {
+    const size = SLICE_BYTES + 5
+    const other = Object.assign(new Blob([new Uint8Array(size).fill(1)]), { name: 'f.gpx' })
+    const current = {
+      id: 'u0',
+      state: 'receiving',
+      received: SLICE_BYTES,
+      size,
+      filename: 'f.gpx',
+      tracks: ['Own'],
+      onOverlap: 'keep',
+      fingerprint: await fingerprintOf(blob(size)),
+    }
+    const { calls, request } = server(size, { current })
+    await uploadGpx({ ...options, file: other, request })
+    expect(calls.map(({ method }) => method).slice(0, 3)).toEqual(['GET', 'POST', 'PUT'])
+    expect(calls[2]).toMatchObject({ offset: 0 })
+  })
+
+  it('starts anew when only the last bytes of a same-size file differ', async () => {
+    const size = SLICE_BYTES + 5
+    const bytes = new Uint8Array(size)
+    bytes[size - 1] = 1
+    const other = Object.assign(new Blob([bytes]), { name: 'f.gpx' })
+    const current = {
+      id: 'u0',
+      state: 'receiving',
+      received: SLICE_BYTES,
+      size,
+      filename: 'f.gpx',
+      tracks: ['Own'],
+      onOverlap: 'keep',
+      fingerprint: await fingerprintOf(blob(size)),
+    }
+    const { calls, request } = server(size, { current })
+    await uploadGpx({ ...options, file: other, request })
+    expect(calls.map(({ method }) => method).slice(0, 3)).toEqual(['GET', 'POST', 'PUT'])
+    expect(calls[2]).toMatchObject({ offset: 0 })
+  })
+
+  it('sends a slice again after a dropped connection, from where the server got to', async () => {
+    let failed = false
+    const { calls, request } = server(10, {
+      answer: (_call, take) => {
+        if (!failed) {
+          failed = true
+          throw new TypeError('Failed to fetch')
+        }
+        return take()
+      },
+    })
+    await uploadGpx({ ...options, file: blob(10), request })
+    expect(calls.filter(({ method }) => method === 'PUT')).toHaveLength(2)
+  })
+
+  it('gives up on a refusal no second try changes', async () => {
+    const { request } = server(10, {
+      answer: () => new Response(JSON.stringify({ message: 'The file is not well-formed GPX' }), { status: 422 }),
+    })
+    await expect(uploadGpx({ ...options, file: blob(10), request })).rejects.toThrow('The file is not well-formed GPX')
+  })
+
+  it('ends the upload on the server when stopped', async () => {
+    const controller = new AbortController()
+    const { calls, request } = server(2 * SLICE_BYTES, {
+      answer: (_call, take) => {
+        controller.abort()
+        return take()
+      },
+    })
+    await expect(
+      uploadGpx({ ...options, file: blob(2 * SLICE_BYTES), request, signal: controller.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    expect(calls.map(({ method }) => method)).toEqual(['GET', 'POST', 'PUT', 'DELETE'])
+  })
+
+  it('gives up a slice stuck on its way when stopped', async () => {
+    const controller = new AbortController()
+    const { calls, request } = server(10, {
+      answer: ({ signal }) => {
+        setTimeout(() => controller.abort(), 0)
+        return new Promise((_, reject) => {
+          signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        })
+      },
+    })
+    await expect(uploadGpx({ ...options, file: blob(10), request, signal: controller.signal })).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+    expect(calls.map(({ method }) => method)).toEqual(['GET', 'POST', 'PUT', 'DELETE'])
+  })
+
+  it('stops while the upload is being started, and ends the upload that start brings', async () => {
+    const controller = new AbortController()
+    let answer: (response: Response) => void = () => {}
+    const calls: string[] = []
+    const request = vi.fn(async (url: string, init: RequestInit = {}) => {
+      const method = init.method ?? 'GET'
+      calls.push(`${method} ${url.replace(/^.*upload/, '')}`)
+      if (method === 'GET') return new Response(JSON.stringify({ upload: null }))
+      if (method === 'POST') return new Promise<Response>((resolve) => (answer = resolve))
+      return new Response(JSON.stringify({ upload: { id: 'u1', state: 'aborted' } }))
+    })
+    const uploading = uploadGpx({ ...options, file: blob(10), request, signal: controller.signal })
+    await vi.waitFor(() => expect(calls).toContain('POST '))
+    controller.abort()
+    await expect(uploading).rejects.toMatchObject({ name: 'AbortError' })
+    answer(new Response(JSON.stringify({ upload: { id: 'u1', state: 'receiving', received: 0, size: 10 } })))
+    await vi.waitFor(() => expect(calls).toContain('DELETE /u1'))
+  })
+
+  it('stops without waiting out the delay before a retry', async () => {
+    const controller = new AbortController()
+    const { calls, request } = server(10, {
+      answer: () => {
+        setTimeout(() => controller.abort(), 0)
+        return new Response(JSON.stringify({ message: 'restarting' }), { status: 503 })
+      },
+    })
+    const started = Date.now()
+    await expect(
+      uploadGpx({ ...options, sleep: undefined, file: blob(10), request, signal: controller.signal }),
+    ).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+    expect(calls.at(-1)?.method).toBe('DELETE')
+    // The first retry waits two seconds.
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('says so when the server could not be told the upload stopped', async () => {
+    const controller = new AbortController()
+    const { calls, request } = server(2 * SLICE_BYTES, {
+      answer: (_call, take) => {
+        controller.abort()
+        return take()
+      },
+      stop: () => {
+        throw new TypeError('Failed to fetch')
+      },
+    })
+    await expect(
+      uploadGpx({ ...options, file: blob(2 * SLICE_BYTES), request, signal: controller.signal }),
+    ).rejects.toThrow('the server could not be told')
+    expect(calls.filter(({ method }) => method === 'DELETE')).toHaveLength(5)
   })
 })
 

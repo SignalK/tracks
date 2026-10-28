@@ -19,6 +19,7 @@ import type {
   GeoBounds,
   ImportedTrack,
   LatLngTuple,
+  OnOverlap,
   StoredImport,
   TimedPosition,
   TimeWindow,
@@ -723,12 +724,7 @@ function extentEpsilon([west, south, east, north]: TrackBoundingBox): number {
   return Math.max(diagonal / AUTO_EPSILON_DIVISOR, MIN_AUTO_EPSILON)
 }
 
-/**
- * What an import does where the vessel's recording already holds positions.
- * `keep` leaves them alone and fills only the stretches with nothing; `replace`
- * puts the import in their place, sending them to the recycle bin.
- */
-export type OnOverlap = 'keep' | 'replace'
+export type { OnOverlap }
 
 export interface KeepTrackDeps {
   store: Required<Pick<TrackStore, 'storeImport' | 'recordTrack' | 'fillTrack'>>

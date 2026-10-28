@@ -19,6 +19,9 @@ import {
   longitudeSpanOf,
   fillGaps,
   MIN_FILLED_GAP_MS,
+  mergeSpan,
+  subtractSpans,
+  withinSpans,
 } from './utils.js'
 import type { LatLngTuple, TimedPosition, TrackParams } from './types.js'
 
@@ -612,5 +615,91 @@ describe('fillGaps', () => {
     const { runs, overlapping } = fillGaps([at(3, 4, 5, 6)], at(2, 6.5), MIN_FILLED_GAP_MS)
     expect(runs).toEqual([])
     expect(overlapping).toBe(4)
+  })
+})
+
+describe('spans', () => {
+  it('merges a span with those it overlaps or touches', () => {
+    expect(mergeSpan([], [5, 9])).toEqual([[5, 9]])
+    expect(
+      mergeSpan(
+        [
+          [0, 2],
+          [10, 12],
+          [20, 22],
+        ],
+        [3, 9],
+      ),
+    ).toEqual([
+      [0, 12],
+      [20, 22],
+    ])
+    expect(
+      mergeSpan(
+        [
+          [0, 2],
+          [20, 22],
+        ],
+        [5, 9],
+      ),
+    ).toEqual([
+      [0, 2],
+      [5, 9],
+      [20, 22],
+    ])
+    expect(
+      mergeSpan(
+        [
+          [0, 2],
+          [5, 6],
+          [20, 22],
+        ],
+        [1, 30],
+      ),
+    ).toEqual([[0, 30]])
+  })
+
+  it('leaves the parts of a span outside others', () => {
+    expect(subtractSpans([0, 10], [])).toEqual([[0, 10]])
+    expect(
+      subtractSpans(
+        [0, 10],
+        [
+          [3, 4],
+          [7, 8],
+        ],
+      ),
+    ).toEqual([
+      [0, 2],
+      [5, 6],
+      [9, 10],
+    ])
+    expect(
+      subtractSpans(
+        [3, 8],
+        [
+          [0, 4],
+          [7, 20],
+        ],
+      ),
+    ).toEqual([[5, 6]])
+    expect(subtractSpans([3, 8], [[0, 20]])).toEqual([])
+    expect(subtractSpans([3, 8], [[10, 20]])).toEqual([[3, 8]])
+  })
+
+  it('tells a time within a span, ends included', () => {
+    const spans: [number, number][] = [
+      [0, 2],
+      [10, 12],
+    ]
+    expect([0, 2, 3, 9, 10, 12, 13].map((time) => withinSpans(spans, time))).toEqual([
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+    ])
   })
 })

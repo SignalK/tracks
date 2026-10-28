@@ -71,6 +71,10 @@
           metre, or to the tolerance the plugin's settings give, and not at all at 0. What simplifying leaves out cannot
           be brought back, so keep the GPX file if you want every point.
         </p>
+        <p>
+          A file of your own vessel can be of any size, such as a chartplotter's export of years: the page lists its
+          tracks to choose from and sends it a piece at a time. A file of another vessel can be at most 25 MB.
+        </p>
         <form id="import-form">
           <label>GPX file <input type="file" name="file" accept=".gpx,application/gpx+xml" required /></label>
           <label><input type="checkbox" name="self" /> Tracks of my own vessel</label>
@@ -78,7 +82,9 @@
             ><input type="checkbox" name="replace" /> Replace what my vessel recorded over the same time (it goes to the
             recycle bin)</label
           >
+          <fieldset id="import-tracks" hidden></fieldset>
           <button type="submit">Import</button>
+          <button type="button" id="import-stop" hidden>Stop</button>
         </form>
         <p id="import-status" role="status" hidden></p>
       </section>

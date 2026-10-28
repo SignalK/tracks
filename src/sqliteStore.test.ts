@@ -17,13 +17,54 @@ import {
   splitAtAntimeridian,
   UnknownContextError,
 } from './utils.js'
-import type { Context, GeoBounds, ImportedTrack, LatLngTuple, TimedPosition, TimeWindow } from './types.js'
+import type {
+  Context,
+  GeoBounds,
+  GpxUploadState,
+  ImportedTrack,
+  LatLngTuple,
+  OnOverlap,
+  TimedPosition,
+  TimeWindow,
+} from './types.js'
 
 const debug = Object.assign(() => {}, { enabled: false })
 const ctx = 'vessels.urn:mrn:signalk:uuid:test' as Context
 const other = 'vessels.urn:mrn:signalk:uuid:other' as Context
 
 const newStore = (): SqliteTrackStore => new SqliteTrackStore({ file: ':memory:' }, debug)
+
+/** A GPX upload just begun, as `newUpload` makes one. */
+const uploading = (onOverlap: OnOverlap = 'keep'): GpxUploadState => ({
+  id: 'upload',
+  filename: 'export.gpx',
+  size: 1,
+  context: ctx,
+  tracks: [''],
+  onOverlap,
+  keepEmpty: false,
+  state: 'receiving',
+  checkpoint: { offset: 0, open: [], segments: 0 },
+  imported: 0,
+  overlapping: 0,
+  untimed: 0,
+  startedAt: 0,
+  updatedAt: 0,
+})
+
+/** Save `slices` of one upload in turn, each a list of `[segment, points]`. */
+const saveSlices = (
+  store: SqliteTrackStore,
+  state: GpxUploadState,
+  slices: [segment: number, points: TimedPosition[]][][],
+): GpxUploadState => {
+  for (const slice of slices) {
+    const parts = slice.map(([segment, points]) => ({ segment, points, continues: segment === state.lastSegment }))
+    const lastSegment = slice.at(-1)?.[0] ?? state.lastSegment
+    state = { ...store.saveGpxUpload(state, parts), ...(lastSegment === undefined ? {} : { lastSegment }) }
+  }
+  return state
+}
 
 describe('S2 cell ids', () => {
   it('round-trips an id above INT64_MAX exactly', () => {
@@ -1640,6 +1681,27 @@ describe('storage simplification', () => {
     })
   })
 
+  it('writes a day a sliced upload spreads over several slices as simplified, and leaves it so', () => {
+    const points = wandering(day0)
+    const store = tolerant(0.5)
+    const cuts = [0, 3000, 7000, points.length]
+    saveSlices(
+      store,
+      uploading(),
+      cuts.slice(1).map((end, i) => [[1, points.slice(cuts[i], end)]]),
+    )
+    const written = rows(store)
+    const whole = tolerant(0.5)
+    whole.fillTrack(ctx, [points])
+    // Each slice keeps the ends it was cut at, and nothing else beyond what one write keeps.
+    expect(written.length).toBeLessThanOrEqual(rows(whole).length + 2 * (cuts.length - 2))
+    whole.close()
+    // Simplifying it again would cut its pieces elsewhere and drop their ends.
+    settle(store)
+    expect(rows(store)).toEqual(written)
+    store.close()
+  })
+
   it('writes an import in full into a day the recording has positions of', () => {
     const store = tolerant(0.5)
     straight(store, day0)
@@ -2741,6 +2803,99 @@ describe('an import filling the gaps in a recording', () => {
       store.fillTrack(ctx, [run(61, t0 + 9.5 * MINUTE, 1, 0), run(61, t0 + 14.4 * MINUTE, 1, 0)])
       expect(store.fillTrack(ctx, [run(62, t0 + 10 * MINUTE, 5, MINUTE)])).toBe(5)
       expect((await store.getTimed(ctx)).filter(({ position }) => position[0] === 62)).toEqual([])
+    } finally {
+      store.close()
+    }
+  })
+})
+
+describe('a GPX file saved in slices', () => {
+  const t0 = Date.parse('2026-06-01T00:00:00Z')
+  const SECOND = 1000
+  const run = (lat: number, from: number, count: number, step = SECOND, offset = 0): TimedPosition[] =>
+    Array.from({ length: count }, (_, i) => ({ position: [lat, 24], timestamp: from + i * step + offset }))
+  const times = async (store: SqliteTrackStore) => (await store.getTimed(ctx)).map(({ timestamp }) => timestamp)
+
+  it('fills a gap in the recording as one upload would, wherever a slice ends in it', async () => {
+    // Recorded for a minute either side of a seven-minute gap.
+    const recorded = [...run(60, t0, 61), ...run(60, t0 + 480 * SECOND, 61)]
+    const points = run(61, t0, 541)
+    const whole = newStore()
+    const sliced = newStore()
+    try {
+      whole.fillTrack(ctx, [recorded])
+      sliced.fillTrack(ctx, [recorded])
+      const left = whole.fillTrack(ctx, [points])
+      const state = saveSlices(sliced, uploading(), [[[1, points.slice(0, 200)]], [[1, points.slice(200)]]])
+      expect(state).toMatchObject({ imported: points.length - left, overlapping: left })
+      expect(await times(sliced)).toEqual(await times(whole))
+    } finally {
+      whole.close()
+      sliced.close()
+    }
+  })
+
+  it('replaces the recording without binning what an earlier slice wrote', async () => {
+    const recorded = run(60, t0, 121, SECOND, 500)
+    const first = run(61, t0, 61)
+    const second = run(62, t0 + 30 * SECOND, 61)
+    const whole = newStore()
+    const sliced = newStore()
+    try {
+      whole.fillTrack(ctx, [recorded])
+      sliced.fillTrack(ctx, [recorded])
+      whole.recordTrack(ctx, [first, second], t0, false)
+      saveSlices(sliced, uploading('replace'), [
+        [[1, first.slice(0, 40)]],
+        [
+          [1, first.slice(40)],
+          [2, second],
+        ],
+      ])
+      expect(await times(sliced)).toEqual(await times(whole))
+      expect(sliced.binEntries().map(({ pointCount }) => pointCount)).toEqual(expect.arrayContaining([60, 30]))
+      expect(sliced.binEntries()).toHaveLength(2)
+    } finally {
+      whole.close()
+      sliced.close()
+    }
+  })
+
+  it.each([
+    ['restored', (store: SqliteTrackStore, id: number) => store.restoreFromBin(id)],
+    ['purged', (store: SqliteTrackStore, id: number) => store.purgeFromBin(id)],
+  ])('starts a recycle bin entry of its own when the one a segment began was %s', (_, end) => {
+    const store = newStore()
+    try {
+      store.fillTrack(ctx, [run(60, t0, 121, SECOND, 500)])
+      const points = run(61, t0, 121)
+      const state = saveSlices(store, uploading('replace'), [[[1, points.slice(0, 60)]]])
+      end(store, state.binned!.id!)
+      saveSlices(store, state, [[[1, points.slice(60)]]])
+      expect(store.binEntries()).toEqual([expect.objectContaining({ pointCount: 61 })])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('leaves alone an entry made later under the id a restore freed', () => {
+    const store = newStore()
+    const other = 'vessels.urn:mrn:signalk:uuid:other' as Context
+    try {
+      store.fillTrack(ctx, [run(60, t0, 121, SECOND, 500)])
+      store.fillTrack(other, [run(50, t0, 10)])
+      const points = run(61, t0, 121)
+      const state = saveSlices(store, uploading('replace'), [[[1, points.slice(0, 60)]]])
+      store.restoreFromBin(state.binned!.id!)
+      const { id } = store.binRecorded(other, t0, t0 + 9 * SECOND, t0 + 1, false)
+      expect(id).toBe(state.binned!.id)
+      saveSlices(store, state, [[[1, points.slice(60)]]])
+      expect(store.binEntries().map(({ context, pointCount }) => [context, pointCount])).toEqual(
+        expect.arrayContaining([
+          [other, 10],
+          [ctx, 61],
+        ]),
+      )
     } finally {
       store.close()
     }

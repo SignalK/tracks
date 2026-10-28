@@ -29,7 +29,16 @@ import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
 import { fromGpx, GpxTrackWriter, toGpx } from './gpx.js'
 import { fromGpxTrack, isImportedId } from './importedTracks.js'
-import { readText, UploadTooLargeError, UploadTypeError } from './upload.js'
+import { readSlice, readText, UploadTooLargeError, UploadTypeError } from './upload.js'
+import {
+  GpxUpload,
+  MAX_SLICE_BYTES,
+  newUpload,
+  parseUploadStart,
+  UploadConflictError,
+  UploadFormatError,
+} from './gpxUpload.js'
+import type { SliceReservation } from './gpxUpload.js'
 import { parseTrackQuery, segment, TimeWindowError, TrackStream } from './timeWindow.js'
 import type { StreamedPoint, TrackQuery } from './timeWindow.js'
 import type {
@@ -37,6 +46,7 @@ import type {
   Context,
   Debug,
   DeletedSpan,
+  GpxUploadState,
   HistoryImportState,
   LatLngTuple,
   LngLatTuple,
@@ -522,6 +532,42 @@ export default function ThePlugin(app: App): Plugin {
   let historyImport: { state: HistoryImportState; running: boolean; stop: boolean } | undefined
   /** Set while a request to start the import is on its way, so two cannot both start one. */
   let historyImportStarting = false
+  /**
+   * The GPX file being uploaded in slices, or the last one, loaded from the
+   * store on the first request after a start; see gpxUpload.ts. One at a
+   * time: two would write into the one recording side by side.
+   */
+  let gpxUpload: Promise<GpxUpload | undefined> | undefined
+  /** Set while a request to start an upload is on its way, so two cannot both start one. */
+  let gpxUploadStarting = false
+
+  /**
+   * Whether the history import could bring a vessel's track back; see
+   * TrackProviderDeps. An import started already counts even while its
+   * provider is away, restarting say: it goes on once the provider is back.
+   */
+  const importable = async (context: string): Promise<boolean> =>
+    context === app.selfContext &&
+    ((await tracks?.historyImport?.(context)) !== undefined || (await historyProviderAvailable(app)))
+
+  type UploadStore = TrackStore & Required<Pick<TrackStore, 'gpxUpload' | 'saveGpxUpload'>>
+
+  const uploadOf = (store: UploadStore, state: GpxUploadState) =>
+    new GpxUpload(state, {
+      save: async (next, parts) => store.saveGpxUpload(next, parts),
+      replaced: () => {
+        deletedSpans = undefined
+      },
+    })
+
+  /** The upload the store holds, if any. */
+  function currentUpload(store: UploadStore): Promise<GpxUpload | undefined> {
+    const loading = (gpxUpload ??= Promise.resolve(store.gpxUpload()).then((state) => state && uploadOf(store, state)))
+    loading.catch(() => {
+      if (gpxUpload === loading) gpxUpload = undefined
+    })
+    return loading
+  }
 
   /** Go on with the history import from `state`, unless it is running. */
   function startHistoryImport(state: HistoryImportState): void {
@@ -595,6 +641,7 @@ export default function ThePlugin(app: App): Plugin {
       startedWith = config
       storageError = undefined
       historyImport = undefined
+      gpxUpload = undefined
       const { resolution } = config
       const segmentGapMinutes = toNumber(config.segmentGapMinutes) ?? DEFAULT_SEGMENT_GAP_MINUTES
       segmentGap = segmentGapMinutes > 0 ? segmentGapMinutes * 60 * 1000 : 0
@@ -799,11 +846,7 @@ export default function ThePlugin(app: App): Plugin {
             context,
             remembering(() => tracks),
           ),
-        // An import started already counts even while its provider is away,
-        // restarting say: it goes on once the provider is back.
-        importable: async (context) =>
-          context === app.selfContext &&
-          ((await tracks?.historyImport?.(context)) !== undefined || (await historyProviderAvailable(app))),
+        importable,
         deleted: () => {
           deletedSpans = undefined
         },
@@ -855,6 +898,7 @@ export default function ThePlugin(app: App): Plugin {
       })
       onStop = []
       if (historyImport) historyImport.stop = true
+      gpxUpload = undefined
       // Forget which sources were seen: the point of a restart is often to
       // apply a source priority change, and carrying the old observations over
       // would keep warning about a setup that has just been fixed.
@@ -1380,6 +1424,136 @@ export default function ThePlugin(app: App): Plugin {
             overlappingPoints: kept.reduce((sum, { overlapping }) => sum + overlapping, 0),
           })
         })()
+      })
+
+      // A GPX file too large for one request, uploaded in slices into the own
+      // vessel's recording; see gpxUpload.ts. Writing asks for write access,
+      // as storing a track does, and so does reading how far it got, which
+      // names the file.
+      const uploadStore = (res: Response): UploadStore | undefined => {
+        const store = tracks
+        if (!store?.gpxUpload || !store.saveGpxUpload) {
+          notAvailable(res)
+          return undefined
+        }
+        return store as UploadStore
+      }
+      const uploadFailed = (res: Response, upload?: GpxUpload) => (err: unknown) => {
+        const status = upload && { upload: upload.status }
+        if (err instanceof UploadConflictError) {
+          res.status(409).json({ message: err.message, ...status })
+        } else if (err instanceof UploadFormatError) {
+          res.status(422).json({ message: err.message, ...status })
+        } else {
+          app.error(`GPX upload: ${errorDetail(err)}`)
+          res.status(500).json({ message: 'Track storage failed', ...status })
+        }
+      }
+      /** The upload `:id` names, or undefined after answering. */
+      const namedUpload = async (req: Request, res: Response): Promise<GpxUpload | undefined> => {
+        const store = uploadStore(res)
+        if (!store) return undefined
+        const upload = await currentUpload(store)
+        if (upload?.id !== req.params.id) {
+          res.status(404).json({ message: `No upload '${String(req.params.id)}'` })
+          return undefined
+        }
+        return upload
+      }
+
+      writable.get('/imports/upload', (_req: Request, res: Response) => {
+        const store = uploadStore(res)
+        if (!store) return
+        currentUpload(store)
+          .then((upload) => res.json({ upload: upload?.status ?? null }))
+          .catch(uploadFailed(res))
+      })
+
+      writable.post('/imports/upload', (req: Request, res: Response) => {
+        const store = uploadStore(res)
+        if (!store) return
+        const start = parseUploadStart(req.body)
+        if (typeof start === 'string') {
+          res.status(400).json({ message: start })
+          return
+        }
+        if (gpxUploadStarting) {
+          res.status(409).json({ message: 'Another file is being imported' })
+          return
+        }
+        gpxUploadStarting = true
+        void (async () => {
+          const current = await currentUpload(store)
+          // An upload nobody has sent to for a while gives way: its file may be gone.
+          if (current?.active && !current.idle) {
+            res.status(409).json({ message: 'Another file is being imported', upload: current.status })
+            return
+          }
+          current?.supersede()
+          let saved: GpxUploadState
+          try {
+            const keepEmpty = start.onOverlap === 'replace' && (await importable(app.selfContext))
+            saved = await store.saveGpxUpload(newUpload({ ...start, context: app.selfContext, keepEmpty }), [])
+          } catch (err) {
+            current?.resume()
+            throw err
+          }
+          const upload = uploadOf(store, saved)
+          if (tracks === store) gpxUpload = Promise.resolve(upload)
+          res.status(201).json({ upload: upload.status })
+        })()
+          .catch(uploadFailed(res))
+          .finally(() => {
+            gpxUploadStarting = false
+          })
+      })
+
+      writable.put('/imports/upload/:id', (req: Request, res: Response) => {
+        const offset = Number(req.query.offset)
+        if (!Number.isSafeInteger(offset) || offset < 0) {
+          res.status(400).json({ message: 'offset must be the byte the slice starts at' })
+          return
+        }
+        void (async () => {
+          const upload = await namedUpload(req, res)
+          if (!upload) return
+          // Before the body is read, so two requests cannot both hold a slice's worth of it.
+          let slice: SliceReservation
+          try {
+            slice = upload.reserve(offset)
+          } catch (err) {
+            uploadFailed(res, upload)(err)
+            return
+          }
+          let bytes: Buffer
+          try {
+            bytes = await readSlice(req, MAX_SLICE_BYTES)
+          } catch (err) {
+            slice.release()
+            if (err instanceof UploadTooLargeError) {
+              res.status(413).json({ message: err.message, upload: upload.status })
+            } else if (err instanceof UploadTypeError) {
+              res.status(415).json({ message: err.message, upload: upload.status })
+            } else {
+              res.status(400).json({ message: 'The slice could not be read', upload: upload.status })
+            }
+            return
+          }
+          if (bytes.length === 0) {
+            slice.release()
+            res.status(400).json({ message: 'The slice is empty', upload: upload.status })
+            return
+          }
+          await slice.write(bytes).then(() => res.json({ upload: upload.status }), uploadFailed(res, upload))
+        })().catch(uploadFailed(res))
+      })
+
+      writable.delete('/imports/upload/:id', (req: Request, res: Response) => {
+        void (async () => {
+          const upload = await namedUpload(req, res)
+          if (!upload) return
+          await upload.abort().then(() => res.json({ upload: upload.status }), uploadFailed(res, upload))
+        })().catch(uploadFailed(res))
       })
 
       // Downloading a track asks for read access, as reading it through the
