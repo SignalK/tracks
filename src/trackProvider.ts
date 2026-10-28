@@ -76,8 +76,9 @@ export interface TrackProviderDeps {
  * four years took a process past 900 MB, read in full and built into one
  * answer before `maxPoints` or simplifying could shrink it. A track larger
  * than this is read simplified instead, to the smallest tolerance whose
- * levels hold it within the budget, or thinned in time where levels cannot
- * be read; the answer reports which in `epsilon` or `resolution`.
+ * levels hold it within the budget, or thinned in time where `maxPoints`
+ * asks for spacing, where levels cannot be read, or where none holds it;
+ * the answer reports which in `epsilon` or `resolution`.
  */
 export const MAX_TRACK_POINTS = 250_000
 
@@ -366,9 +367,12 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
       let fit: Fit | undefined
       if (query.maxPoints !== undefined) {
         // thinToBudget's first spacing, which keeps no more than maxPoints
-        // but for positions sharing the last time.
+        // but for positions sharing the last time, or a maxPoints of 1.
         // Read at it, a track of more positions than maxPoints gets the
-        // answer it always got, without a resolution; with one, thinToBudget
+        // answer it always got, without a resolution, but for those two:
+        // thinToBudget then widens the spacing over what was read rather
+        // than over every position, or keeps the first position and
+        // reports the spacing read at. With a resolution, thinToBudget
         // spaced what was read at it.
         const first = Math.max(resolution ?? 0, Math.ceil(span / Math.max(1, query.maxPoints - 1)), 1)
         if (query.maxPoints <= budget || (await within(first))) {
