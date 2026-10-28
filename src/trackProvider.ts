@@ -69,7 +69,10 @@ export interface TrackProviderDeps {
 }
 
 /**
- * The most positions the provider reads for one recorded track's answer.
+ * The most positions the provider reads for one recorded track's answer
+ * to a query without a box. A read thinned in time to fit can hold one
+ * more, where positions share the last time; its answer is thinned to the
+ * budget.
  *
  * A query for one vessel that names no window is its whole recording, and
  * with the history import that is years of positions: the 2 M of a boat's
@@ -92,8 +95,8 @@ const FIT_TOLERANCES = [4, 8, 16, 32]
 /**
  * How a recorded track too large for its answer is read instead: at, and
  * simplified to at least, a tolerance in metres; or at least `resolution`
- * milliseconds apart, then thinned to `maxPoints` where positions sharing the
- * last time leave one over.
+ * milliseconds apart, then thinned to `maxPoints` where that leaves more, as
+ * positions sharing the last time or a `maxPoints` of 1 do.
  */
 type Fit =
   { tolerance: number; resolution?: undefined } | { tolerance?: undefined; resolution: number; maxPoints: number }
