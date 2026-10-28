@@ -1608,14 +1608,15 @@ export class SqliteTrackStore implements TrackStore {
     const longitudes = this.db.prepare(
       `SELECT DISTINCT lon FROM positions WHERE ${['context_id = ?', ...inWindow].join(' AND ')}`,
     )
-    // In the order of their names, as grouped by name they came.
     const summaries = groups.map(({ context_id: id, count, first, last, south, north, ...extremes }): TrackSummary => {
       const [west, east] =
         longitudeSpanOf(extremes) ??
         longitudeSpan((longitudes.all(id, ...windowParams) as unknown as { lon: number }[]).map(({ lon }) => lon))
       return { context: this.nameOf(id), pointCount: count, first, last, bbox: [west, south, east, north] }
     })
-    return summaries.sort((a, b) => (a.context < b.context ? -1 : a.context > b.context ? 1 : 0))
+    // In the order of their names, as grouped by name they came: by their
+    // UTF-8 bytes, as SQLite orders them, which contexts() lists them in.
+    return summaries.sort((a, b) => Buffer.compare(Buffer.from(a.context), Buffer.from(b.context)))
   }
 
   getAllTracks(query?: TrackQuery): Promise<{ context: string; track: LatLngTuple[] }[]> {

@@ -15,7 +15,7 @@
 
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
-import { rmSync } from 'node:fs'
+import { existsSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { createTrackProvider } from './trackProvider.js'
 import type { TrackProvider } from './trackProvider.js'
@@ -1662,9 +1662,13 @@ export default function ThePlugin(app: App): Plugin {
           }
           let restarted: number
           try {
-            // And a rewrite for a newer schema that a crash left half built.
+            // And a rewrite for a newer schema that a crash left half built,
+            // which is built beside the file a link to the database points to.
+            const file = join(dataDir, 'tracks.db')
+            const target = existsSync(file) ? realpathSync(file) : file
+            rmSync(`${target}.migrating`, { force: true })
             for (const suffix of ['', '-wal', '-shm', '.migrating']) {
-              rmSync(join(dataDir, `tracks.db${suffix}`), { force: true })
+              rmSync(`${file}${suffix}`, { force: true })
             }
           } finally {
             // Started again whatever the delete did, so a file that would not

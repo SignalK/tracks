@@ -13,6 +13,21 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it, vi } from 'vitest'
+
+// A way into a rewrite for an older database between its last read of the
+// old file and its check that nothing wrote to it since: the fsync of the new
+// file comes in between.
+const rewriting = vi.hoisted(() => ({ beforeFsync: undefined as (() => void) | undefined }))
+vi.mock('node:fs', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...fs,
+    fsyncSync: (fd: number) => {
+      rewriting.beforeFsync?.()
+      fs.fsyncSync(fd)
+    },
+  }
+})
 import { s2 } from 's2js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
 import { simplify } from './simplify.js'
@@ -2996,6 +3011,7 @@ describe('the position index', () => {
         detail: store['db'].prepare('SELECT context, span_start, span_end FROM detail_spans ORDER BY id').all(),
         simplified: store['db'].prepare('SELECT context, through, tolerance FROM simplify_frontier').all(),
       })
+      const binned = 'vessels.urn:mrn:signalk:uuid:binned' as Context
       const config = { file, resolution: 60_000, storageTolerance: 0.5 }
       const first = new SqliteTrackStore(config, debug)
       // One commit: written to a file one by one, this many positions take a Windows runner most of a minute.
@@ -3006,6 +3022,9 @@ describe('the position index', () => {
         }
         for (let i = 0; i < 600; i++) {
           first.newPosition(other, [60.005, 24.01 + i * 0.00001], day0 + i * 1000)
+        }
+        for (let i = 0; i < 30; i++) {
+          first.newPosition(binned, [59.9, 24.1 + i * 0.001], day0 + i * MINUTE)
         }
         first.recordName(other, 'Ariadne', day0)
         first.storeImport({
@@ -3023,7 +3042,12 @@ describe('the position index', () => {
         ])
       })
       const otherWhole = await first.getTimed(other)
-      first.transaction(() => first.binRecorded(other, day0 + 300_000, day0 + 599_000, day0 + DAY_MS, false))
+      const binnedWhole = await first.getTimed(binned)
+      first.transaction(() => {
+        first.binRecorded(other, day0 + 300_000, day0 + 599_000, day0 + DAY_MS, false)
+        // Every position of it, so the bin alone holds the vessel.
+        first.binRecorded(binned, undefined, day0 + DAY_MS, day0 + DAY_MS, false)
+      })
       for (let more = true; more;) {
         first.transaction(() => {
           more = first.refineLevels(day0 + 3 * DAY_MS)
@@ -3034,7 +3058,7 @@ describe('the position index', () => {
       expect(before.byLevel.length).toBeLessThan(before.whole.length / 10)
       expect(before.boxByLevel[ctx]?.length).toBeGreaterThan(0)
       expect(Object.keys(before.every).sort()).toEqual([ctx, other].sort())
-      expect(before.bin).toHaveLength(1)
+      expect(before.bin).toHaveLength(2)
       expect(before.name).toBe('Ariadne')
       expect(before.imported?.name).toBe('Passage')
       expect(before.history?.filled).toBe(60)
@@ -3056,8 +3080,11 @@ describe('the position index', () => {
           )
           .get(),
       ).toEqual({ n: 0 })
-      expect(store.restoreFromBin(before.bin[0]!.id)).toBe('restored')
+      for (const { id } of before.bin) {
+        expect(store.restoreFromBin(id)).toBe('restored')
+      }
       expect(await store.getTimed(other)).toEqual(otherWhole)
+      expect(await store.getTimed(binned)).toEqual(binnedWhole)
       store.close()
       expect(statSync(file).size).toBeLessThan(size)
     } finally {
@@ -3202,6 +3229,40 @@ describe('the position index', () => {
       newer.close()
 
       expect(() => new SqliteTrackStore({ file }, debug)).toThrow(/written by a newer version/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves an older database as it is when something writes to it while it is rewritten', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const older = new DatabaseSync(file)
+      older.exec(OLD_POSITIONS)
+      older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+      older.close()
+      rewriting.beforeFsync = () => {
+        rewriting.beforeFsync = undefined
+        const writer = new DatabaseSync(file)
+        writer.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0 + 1000, 60.2, 24.8)
+        writer.close()
+      }
+      try {
+        expect(() => new SqliteTrackStore({ file }, debug)).toThrow(/was written to while it was rewritten/)
+      } finally {
+        rewriting.beforeFsync = undefined
+      }
+      expect(existsSync(`${file}.migrating`)).toBe(false)
+      const kept = new DatabaseSync(file)
+      expect(kept.prepare('PRAGMA user_version').get()).toEqual({ user_version: 0 })
+      expect(kept.prepare('SELECT count(*) AS n FROM positions').get()).toEqual({ n: 2 })
+      kept.close()
+
+      // Rewritten at the next start, the write included.
+      const store = new SqliteTrackStore({ file }, debug)
+      expect(await store.getTimed(ctx)).toHaveLength(2)
+      store.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

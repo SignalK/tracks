@@ -1,6 +1,7 @@
-import { existsSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { get } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -1042,6 +1043,28 @@ describe('DELETE /plugins/tracks/database', () => {
 
     expect(existsSync(join(h.dataDir, 'tracks.db.migrating'))).toBe(false)
   })
+
+  it.skipIf(process.platform === 'win32')(
+    'deletes a rewrite left half built beside the file a link to the database points to',
+    async () => {
+      const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+      await h.stop()
+      const elsewhere = mkdtempSync(join(tmpdir(), 'sk-tracks-target-'))
+      try {
+        const target = join(elsewhere, 'tracks.db')
+        renameSync(join(h.dataDir, 'tracks.db'), target)
+        symlinkSync(target, join(h.dataDir, 'tracks.db'))
+        writeFileSync(`${target}.migrating`, 'half built')
+        await h.restart()
+
+        await request(h.app).delete(DELETE_URL).expect(200)
+
+        expect(existsSync(`${target}.migrating`)).toBe(false)
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true })
+      }
+    },
+  )
 
   it('answers 409 to a second delete while the first waits for the store to close', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])

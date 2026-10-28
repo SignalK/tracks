@@ -52,9 +52,11 @@ replaces it. That takes about 8 seconds for two million positions on a Raspberry
 plugin waits, and needs room on the disk for the new file, about half the old one, and in the
 temporary directory for sorting its largest index, about an eighth of the old file. A program that
 holds the file open when the plugin starts, an `sqlite3` shell say, keeps it from being rewritten:
-the plugin then does not start, says why, and tries again at its next start. What a program writes
-to the file while it is being rewritten is lost. An older version cannot read the rewritten file;
-to go back to one, restore a backup of `tracks.db` taken before updating.
+the plugin then does not start, says why, and tries again at its next start. A program that writes
+to the file while it is being rewritten stops the rewrite the same way, and the old file stays as
+it was, but for a write in the instant before the new file replaces it, which is lost, as is what a
+program that still has the old file open writes after that. An older version cannot read the
+rewritten file; to go back to one, restore a backup of `tracks.db` taken before updating.
 
 ### Keeping tracks for years
 
