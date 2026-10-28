@@ -521,6 +521,23 @@ describe('significance levels', () => {
     store.close()
   })
 
+  // Out of time order, as with a resolution of 0, a fix can come in for a
+  // day before the one a vessel waits on, which the pass found nothing of.
+  it('wakes a waiting vessel for a fix dated into a day before the one it waits on', () => {
+    const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5 }, debug)
+    seedHour(store, day0 + 22 * 60 * MINUTE)
+    const now = day0 + DAY + 3 * 60 * MINUTE
+    store.refineLevels(now)
+    expect(store['refineWaiting'].has(ctx)).toBe(true)
+    seedHour(store, day0 - DAY + 60 * MINUTE)
+    expect(goesOver(store, now + 1).refining).toEqual([ctx])
+    expect(levels(store, day0 - DAY, day0).length).toBeGreaterThan(1)
+    // And waits on its day again.
+    expect(levels(store, day0, day0 + DAY)).toEqual([])
+    expect(store['refineWaiting'].has(ctx)).toBe(true)
+    store.close()
+  })
+
   it('lets a vessel stop waiting once the recycle bin holds every position of it', () => {
     const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5 }, debug)
     seedHour(store, day0 + 60 * MINUTE)

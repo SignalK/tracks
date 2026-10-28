@@ -887,14 +887,17 @@ export class SqliteTrackStore implements TrackStore {
     }
     // Woken, the context alone is refined on the next call: one that waits
     // once it records something dated REFINE_MARGIN past the end of the day
-    // it waits on, and any other for a day after its frontier that a pass,
-    // the one going on included, may have found nothing of.
+    // it waits on, or into a day before it, and any other for a day after
+    // its frontier that a pass, the one going on included, may have found
+    // nothing of.
     const waiting = this.refineWaiting.get(context)
     const passed = Math.max(
       this.refinedThrough ?? Number.NEGATIVE_INFINITY,
       this.refinePass?.through ?? Number.NEGATIVE_INFINITY,
     )
-    if (waiting === undefined ? day <= passed : timestamp >= (waiting + 1) * LEVEL_DAY_MS + REFINE_MARGIN) {
+    if (
+      waiting === undefined ? day <= passed : day < waiting || timestamp >= (waiting + 1) * LEVEL_DAY_MS + REFINE_MARGIN
+    ) {
       this.refineWaiting.delete(context)
       this.refineWoken.add(context)
     }
