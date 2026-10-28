@@ -64,13 +64,14 @@ export interface TrackProviderDeps {
   importable: (context: string) => Promise<boolean>
   /** Called after a delete, so whatever caches the deleted spans reloads them. */
   deleted: () => void
-  /** The most positions a recorded track's answer holds; MAX_TRACK_POINTS unless set. */
+  /** The most positions read for a recorded track's answer without a box; MAX_TRACK_POINTS unless set. */
   maxTrackPoints?: number
 }
 
 /**
- * The most positions the provider reads for one recorded track's answer
- * to a query without a box. A read thinned in time to fit can hold one
+ * The most positions the provider reads for one recorded track's answer to
+ * a query without a box, as it counts them before the read: fixes recorded
+ * in between can add a few. A read thinned in time to fit can hold one
  * more, where positions share the last time; its answer is thinned to the
  * budget.
  *
@@ -78,10 +79,11 @@ export interface TrackProviderDeps {
  * with the history import that is years of positions: the 2 M of a boat's
  * four years took a process past 900 MB, read in full and built into one
  * answer before `maxPoints` or simplifying could shrink it. A track larger
- * than this is read simplified instead, to the smallest tolerance whose
- * levels hold it within the budget, or thinned in time where `maxPoints`
- * asks for spacing, where levels cannot be read, or where none holds it;
- * the answer reports which in `epsilon` or `resolution`.
+ * than this is read simplified instead, to the smallest tolerance up to
+ * 32 m whose levels hold it within the budget, or thinned in time where
+ * `maxPoints` asks for spacing, where levels cannot be read, or where none
+ * up to 32 m holds it; the answer reports which in `epsilon` or
+ * `resolution`.
  */
 export const MAX_TRACK_POINTS = 250_000
 
@@ -320,12 +322,12 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
    * budget, each with how it is read instead, and the contexts counted, in
    * the order the store holds them. A track is counted as the read would
    * return it, at its tolerance and thinned to a client's `resolution`. One
-   * over the budget is read at the smallest tolerance whose levels hold it
-   * within the budget; with `maxPoints`, which asks for spacing, no
-   * tolerance is tried, and it is spaced as `maxPoints` first spaces a
-   * track, where that holds it. Where neither does, or, without `maxPoints`,
-   * the read may pass no tolerance (tracks split at pauses), it is spaced in
-   * time to the budget.
+   * over the budget is read at the smallest of `FIT_TOLERANCES` above the
+   * query's tolerance whose levels hold it within the budget; with
+   * `maxPoints`, which asks for spacing, no tolerance is tried, and it is
+   * spaced as `maxPoints` first spaces a track, where that holds it. Where
+   * neither does, or, without `maxPoints`, the read may pass no tolerance
+   * (tracks split at pauses), it is spaced in time to the budget.
    * A track within the budget is read as before, and `maxPoints` thins it
    * as it always did.
    */

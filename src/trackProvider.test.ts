@@ -1450,7 +1450,6 @@ describe('simplify in v2', () => {
   })
 })
 
-// #133 through the v2 provider, where maxPoints can also widen the spacing.
 // Without a window, a query for one vessel is its whole recording, years of
 // it once the history import has run. A track over the budget is read to fit
 // it rather than read whole and shrunk afterwards.
@@ -1770,6 +1769,7 @@ describe('a track too large to answer', () => {
   })
 })
 
+// #133 through the v2 provider, where maxPoints can also widen the spacing.
 describe('segment gaps on a thinned track', () => {
   const MINUTE = 60_000
   // One fix a minute for fifteen minutes with a two-minute gap setting: any
