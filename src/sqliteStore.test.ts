@@ -2877,6 +2877,29 @@ describe('a GPX file saved in slices', () => {
       store.close()
     }
   })
+
+  it('leaves alone an entry made later under the id a restore freed', () => {
+    const store = newStore()
+    const other = 'vessels.urn:mrn:signalk:uuid:other' as Context
+    try {
+      store.fillTrack(ctx, [run(60, t0, 121, SECOND, 500)])
+      store.fillTrack(other, [run(50, t0, 10)])
+      const points = run(61, t0, 121)
+      const state = saveSlices(store, uploading('replace'), [[[1, points.slice(0, 60)]]])
+      store.restoreFromBin(state.binned!.id!)
+      const { id } = store.binRecorded(other, t0, t0 + 9 * SECOND, t0 + 1, false)
+      expect(id).toBe(state.binned!.id)
+      saveSlices(store, state, [[[1, points.slice(60)]]])
+      expect(store.binEntries().map(({ context, pointCount }) => [context, pointCount])).toEqual(
+        expect.arrayContaining([
+          [other, 10],
+          [ctx, 61],
+        ]),
+      )
+    } finally {
+      store.close()
+    }
+  })
 })
 
 describe('history import', () => {

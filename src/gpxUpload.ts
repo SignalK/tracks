@@ -283,10 +283,23 @@ export class GpxReader {
 
   private text(text: string): void {
     if (this.at(TIME)) {
-      this.timeText += text
+      this.timeText = this.captured(this.timeText, text)
     } else if (this.inName()) {
-      this.nameText += text
+      this.nameText = this.captured(this.nameText, text)
     }
+  }
+
+  /**
+   * `held` and `text` together, unless that runs past MAX_PENDING_CHARS: a
+   * name or time is read from text that can come in any number of CDATA
+   * sections, each within the bound on what the parser holds.
+   */
+  private captured(held: string, text: string): string {
+    if (held.length + text.length > MAX_PENDING_CHARS) {
+      this.error ??= `The file is not GPX: a track's name or a point's time runs past ${MAX_PENDING_CHARS} characters`
+      return held
+    }
+    return held + text
   }
 
   private close(): void {
@@ -474,6 +487,11 @@ export class GpxUpload {
     this.superseded = true
   }
 
+  /** Take back `supersede()`, when the new upload could not be started after all. */
+  resume(): void {
+    this.superseded = false
+  }
+
   get status(): GpxUploadStatus {
     const {
       id,
@@ -604,6 +622,10 @@ export class GpxUpload {
   private expectReceiving(): void {
     if (!this.active) {
       throw new UploadConflictError(`The upload is ${this.state.state}`)
+    }
+    // Its state saved now would take the place of the new upload's.
+    if (this.superseded) {
+      throw new UploadConflictError('Another file is being imported')
     }
     if (this.busy) {
       throw new UploadConflictError('The slice before is still being written')

@@ -175,8 +175,12 @@ export interface GpxUploadState {
    * them keeps a segment from binning what another segment of the upload wrote.
    */
   replaced?: Span[]
-  /** With `replace`, that segment's span so far, and its recycle bin entry when one was made. */
-  binned?: { id?: number; from: number; to: number }
+  /**
+   * With `replace`, that segment's span so far, and its recycle bin entry
+   * when one was made: its id, and its time of deletion, which tells it from
+   * an entry made later under an id a restore freed.
+   */
+  binned?: { id?: number; deletedAt?: number; from: number; to: number }
   /**
    * The days the last slice wrote simplified (see `simplifyUnrecorded`), with
    * how many positions the upload has written of each: a day the next slice

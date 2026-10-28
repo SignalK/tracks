@@ -183,6 +183,16 @@ describe('reading a GPX file in slices', () => {
     expect(read.parts.size).toBe(0)
   })
 
+  it("reports a track's name that runs on past what it may hold, however many CDATA sections it takes", async () => {
+    const reader = new GpxReader(new Set(['Own']), START)
+    await reader.read(new TextEncoder().encode(`<gpx xmlns="${GPX_NS}"><trk><name>`), false)
+    const sections = new TextEncoder().encode(`<![CDATA[${'x'.repeat(MAX_PENDING_CHARS / 4)}]]>`)
+    for (let i = 0; i < 4; i++) {
+      expect((await reader.read(sections, false)).error).toBeUndefined()
+    }
+    expect((await reader.read(new TextEncoder().encode('<![CDATA[x]]>'), false)).error).toMatch(/runs past/)
+  })
+
   it('reads an empty GPX file as one without tracks', async () => {
     const read = await new GpxReader(new Set(['Own']), START).read(new TextEncoder().encode(document('')), true)
     expect(read.error).toBeUndefined()
@@ -345,6 +355,17 @@ describe('an upload', () => {
     upload.supersede()
     await expect(slice.write(bytes)).rejects.toThrow('Another file is being imported')
     expect(save).not.toHaveBeenCalled()
+  })
+
+  it('can no longer be stopped once a new upload has taken its place, unless that one failed to start', async () => {
+    const { save } = saving()
+    const upload = new GpxUpload(start(), { save, replaced: () => undefined })
+    upload.supersede()
+    await expect(upload.abort()).rejects.toThrow('Another file is being imported')
+    expect(() => upload.reserve(0)).toThrow('Another file is being imported')
+    upload.resume()
+    await upload.append(0, bytes)
+    expect(upload.status.state).toBe('finished')
   })
 
   it('has received the whole file once finished, after a restart too', async () => {

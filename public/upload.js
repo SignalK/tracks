@@ -185,11 +185,47 @@ async function stopUpload(call, url, onStatus, wait) {
   }
   if (!ended) {
     throw new Error(
-      'Stopped sending, but the server could not be told. It ends the import by itself after 15 minutes without a slice.',
+      'Stopped sending, but the server could not be told. It holds the import until another one takes its place, which it allows after 15 minutes without a slice.',
     )
   }
-  throw new DOMException('The import was stopped', 'AbortError')
+  throw stopped()
 }
+
+/** What `promise` comes to, or undefined as soon as `signal` aborts. */
+function unlessAborted(promise, signal) {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.resolve(undefined)
+  return new Promise((resolve, reject) => {
+    const aborted = () => resolve(undefined)
+    signal.addEventListener('abort', aborted, { once: true })
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', aborted)
+        resolve(value)
+      },
+      (err) => {
+        signal.removeEventListener('abort', aborted)
+        reject(err)
+      },
+    )
+  })
+}
+
+/** Wait `ms`, or less once `signal` aborts. */
+function pause(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve()
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
+}
+
+const stopped = () => new DOMException('The import was stopped', 'AbortError')
 
 /** Refusals no second try changes. */
 const FINAL = new Set([400, 401, 403, 413, 415, 422])
@@ -203,7 +239,9 @@ const FINAL = new Set([400, 401, 403, 413, 415, 422])
  * wrote stays.
  */
 export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, request = fetch, sleep }) {
-  const wait = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+  const wait = sleep ?? ((ms) => pause(ms))
+  // Stop does not wait out a retry's delay.
+  const backOff = (ms) => (sleep ? unlessAborted(sleep(ms), signal) : pause(ms, signal))
   const call = (url, init = {}) => request(url, { credentials: 'include', ...init })
   const current = async () => {
     const response = await call(UPLOAD_URL)
@@ -211,7 +249,11 @@ export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, req
   }
 
   const fingerprint = await fingerprintOf(file)
-  let status = await current().catch(() => undefined)
+  let status = await unlessAborted(
+    current().catch(() => undefined),
+    signal,
+  )
+  if (signal?.aborted) throw stopped()
   const same =
     status?.state === 'receiving' &&
     status.filename === file.name &&
@@ -221,11 +263,25 @@ export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, req
     status.tracks.length === tracks.length &&
     status.tracks.every((name) => tracks.includes(name))
   if (!same) {
-    const response = await call(UPLOAD_URL, {
+    const starting = call(UPLOAD_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filename: file.name, size: file.size, tracks, onOverlap, fingerprint }),
     })
+    const response = await unlessAborted(starting, signal)
+    if (response === undefined) {
+      // The request itself goes on, so that an upload it starts is ended once its answer comes.
+      void starting
+        .then(bodyOf)
+        .then(({ upload }) => {
+          if (upload?.state === 'receiving') {
+            return call(`${UPLOAD_URL}/${encodeURIComponent(upload.id)}`, { method: 'DELETE' })
+          }
+          return undefined
+        })
+        .catch(() => undefined)
+      throw stopped()
+    }
     const body = await bodyOf(response)
     if (!response.ok || !body.upload) {
       throw new Error(body.message ?? `The server answered ${response.status}.`)
@@ -238,7 +294,7 @@ export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, req
   let failures = 0
   const retry = async (error) => {
     if (++failures > RETRIES) throw error
-    await wait(Math.min(RETRY_DELAY_MS * 2 ** (failures - 1), RETRY_DELAY_MAX_MS))
+    await backOff(Math.min(RETRY_DELAY_MS * 2 ** (failures - 1), RETRY_DELAY_MAX_MS))
   }
   while (status.state === 'receiving') {
     if (signal?.aborted) {

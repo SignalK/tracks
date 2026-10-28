@@ -1544,6 +1544,27 @@ describe('a GPX file uploaded in slices', () => {
     expect(calls[2]).toMatchObject({ offset: 0 })
   })
 
+  it('starts anew when only the last bytes of a same-size file differ', async () => {
+    const size = SLICE_BYTES + 5
+    const bytes = new Uint8Array(size)
+    bytes[size - 1] = 1
+    const other = Object.assign(new Blob([bytes]), { name: 'f.gpx' })
+    const current = {
+      id: 'u0',
+      state: 'receiving',
+      received: SLICE_BYTES,
+      size,
+      filename: 'f.gpx',
+      tracks: ['Own'],
+      onOverlap: 'keep',
+      fingerprint: await fingerprintOf(blob(size)),
+    }
+    const { calls, request } = server(size, { current })
+    await uploadGpx({ ...options, file: other, request })
+    expect(calls.map(({ method }) => method).slice(0, 3)).toEqual(['GET', 'POST', 'PUT'])
+    expect(calls[2]).toMatchObject({ offset: 0 })
+  })
+
   it('sends a slice again after a dropped connection, from where the server got to', async () => {
     let failed = false
     const { calls, request } = server(10, {
@@ -1594,6 +1615,44 @@ describe('a GPX file uploaded in slices', () => {
       name: 'AbortError',
     })
     expect(calls.map(({ method }) => method)).toEqual(['GET', 'POST', 'PUT', 'DELETE'])
+  })
+
+  it('stops while the upload is being started, and ends the upload that start brings', async () => {
+    const controller = new AbortController()
+    let answer: (response: Response) => void = () => {}
+    const calls: string[] = []
+    const request = vi.fn(async (url: string, init: RequestInit = {}) => {
+      const method = init.method ?? 'GET'
+      calls.push(`${method} ${url.replace(/^.*upload/, '')}`)
+      if (method === 'GET') return new Response(JSON.stringify({ upload: null }))
+      if (method === 'POST') return new Promise<Response>((resolve) => (answer = resolve))
+      return new Response(JSON.stringify({ upload: { id: 'u1', state: 'aborted' } }))
+    })
+    const uploading = uploadGpx({ ...options, file: blob(10), request, signal: controller.signal })
+    await vi.waitFor(() => expect(calls).toContain('POST '))
+    controller.abort()
+    await expect(uploading).rejects.toMatchObject({ name: 'AbortError' })
+    answer(new Response(JSON.stringify({ upload: { id: 'u1', state: 'receiving', received: 0, size: 10 } })))
+    await vi.waitFor(() => expect(calls).toContain('DELETE /u1'))
+  })
+
+  it('stops without waiting out the delay before a retry', async () => {
+    const controller = new AbortController()
+    const { calls, request } = server(10, {
+      answer: () => {
+        setTimeout(() => controller.abort(), 0)
+        return new Response(JSON.stringify({ message: 'restarting' }), { status: 503 })
+      },
+    })
+    const started = Date.now()
+    await expect(
+      uploadGpx({ ...options, sleep: undefined, file: blob(10), request, signal: controller.signal }),
+    ).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+    expect(calls.at(-1)?.method).toBe('DELETE')
+    // The first retry waits two seconds.
+    expect(Date.now() - started).toBeLessThan(1000)
   })
 
   it('says so when the server could not be told the upload stopped', async () => {

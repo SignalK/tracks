@@ -2723,11 +2723,12 @@ export class SqliteTrackStore implements TrackStore {
         if (p > 0) binned = undefined
         // A segment's span takes in the time between its slices as well.
         const span: Span = [Math.min(first, binned?.from ?? first), Math.max(last, binned?.to ?? last)]
-        let id = binned?.id
+        let entry = binned?.id === undefined ? undefined : { id: binned.id, deletedAt: binned.deletedAt ?? now }
         for (const [from, to] of subtractSpans(span, replaced)) {
-          id = this.binRecorded(context, from, to, now, state.keepEmpty, id).id ?? id
+          const { id } = this.binRecorded(context, from, to, now, state.keepEmpty, entry)
+          if (id !== undefined && id !== entry?.id) entry = { id, deletedAt: now }
         }
-        binned = { ...(id === undefined ? {} : { id }), from: span[0], to: span[1] }
+        binned = { ...(entry === undefined ? {} : entry), from: span[0], to: span[1] }
         replaced = mergeSpan(replaced, span)
       }
       days = this.fill(context, runs, mine)
@@ -2881,7 +2882,9 @@ export class SqliteTrackStore implements TrackStore {
    * `into` names an entry of the same vessel to add the positions to instead,
    * its span widened to take in this one: a sliced upload replaces one
    * segment over several writes, and makes one entry of it as a whole upload
-   * does.
+   * does. It names the entry by its time of deletion as well as its id, since
+   * a restore frees the id for the next entry, of any vessel. When the entry
+   * is gone, the positions start one of their own.
    */
   binRecorded(
     context: Context,
@@ -2889,17 +2892,17 @@ export class SqliteTrackStore implements TrackStore {
     to: number,
     deletedAt: number,
     keepEmpty: boolean,
-    into?: number,
+    entry?: { id: number; deletedAt: number },
   ): { id?: number; known: boolean } {
     const known = this.knows(context)
     const lower = from ?? Number.MIN_SAFE_INTEGER
-    // Restored or purged since: the positions start an entry of their own.
-    if (
-      into !== undefined &&
-      !this.db.prepare('SELECT 1 AS found FROM recycle_bin WHERE id = ? AND purged = 0').get(into)
-    ) {
-      into = undefined
-    }
+    const into =
+      entry &&
+      this.db
+        .prepare('SELECT 1 AS found FROM recycle_bin WHERE id = ? AND context = ? AND deleted_at = ? AND purged = 0')
+        .get(entry.id, context, entry.deletedAt)
+        ? entry.id
+        : undefined
     const id = into ?? this.newBinEntry({ context, ...(from === undefined ? {} : { from }), to, deletedAt })
     if (into !== undefined) {
       this.db

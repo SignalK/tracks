@@ -159,9 +159,10 @@ A client does the same through these routes, which need write access:
 - `GET /plugins/tracks/imports/upload` returns the last upload, and
   `DELETE /plugins/tracks/imports/upload/<id>` stops it.
 
-An `upload` carries its `id`, `filename`, `size`, `tracks`, `onOverlap`, `fingerprint`, how many bytes it has
-`received`, its `state` (`receiving`, `finished`, `aborted` or `failed`, with an `error`), and
-how many points it `imported`, left out as `overlapping`, and left out as `untimed`.
+An `upload` carries its `id`, `filename`, `size`, `tracks`, `onOverlap`, its `fingerprint` when
+the start gave one, how many bytes it has `received`, its `state` (`receiving`, `finished`,
+`aborted` or `failed`, with an `error`), and how many points it `imported`, left out as
+`overlapping`, and left out as `untimed`.
 
 ### Importing from a history provider
 

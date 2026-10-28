@@ -1490,8 +1490,14 @@ export default function ThePlugin(app: App): Plugin {
             return
           }
           current?.supersede()
-          const keepEmpty = start.onOverlap === 'replace' && (await importable(app.selfContext))
-          const saved = await store.saveGpxUpload(newUpload({ ...start, context: app.selfContext, keepEmpty }), [])
+          let saved: GpxUploadState
+          try {
+            const keepEmpty = start.onOverlap === 'replace' && (await importable(app.selfContext))
+            saved = await store.saveGpxUpload(newUpload({ ...start, context: app.selfContext, keepEmpty }), [])
+          } catch (err) {
+            current?.resume()
+            throw err
+          }
           const upload = uploadOf(store, saved)
           if (tracks === store) gpxUpload = Promise.resolve(upload)
           res.status(201).json({ upload: upload.status })
