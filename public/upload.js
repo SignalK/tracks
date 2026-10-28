@@ -43,7 +43,26 @@ export function isOtherVessel(name) {
   return /^AIS\b/.test(name) || /^\d{9}$/.test(name)
 }
 
-const TAG = /<(\/?)(?:[\w.-]+:)?([\w.-]+)[^>]*?(\/?)>/g
+const MARKUP = /(<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->)/
+
+/**
+ * An element's text from its raw content, as the parser reads it:
+ * line ends as line feeds, references decoded, a CDATA section's content as
+ * it is and a comment left out.
+ */
+function textOf(raw) {
+  return raw
+    .replace(/\r\n?/g, '\n')
+    .split(MARKUP)
+    .map((part) =>
+      part.startsWith('<![CDATA[') ? part.slice(9, -3) : part.startsWith('<!--') ? '' : decodeEntities(part),
+    )
+    .join('')
+    .trim()
+}
+
+// A CDATA section or a comment is matched whole, so that markup inside one is not taken for a tag.
+const TAG = /<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<(\/?)(?:[\w.-]+:)?([\w.-]+)[^>]*?(\/?)>/g
 
 /**
  * The tracks of a GPX file by name, `''` for one without, each with how many
@@ -66,10 +85,9 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let text = ''
   const close = (name) => {
     if (name === 'name' && capture === 'name' && track.name === undefined) {
-      // As the parser reads line ends.
-      track.name = decodeEntities(text.replace(/\r\n?/g, '\n')).trim()
+      track.name = textOf(text)
     } else if (name === 'time' && capture === 'time') {
-      const time = text.trim()
+      const time = textOf(text)
       track.group.from ??= time
       track.group.to = time
     }
@@ -84,9 +102,26 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     const chunk = carry + decoder.decode(await file.slice(at, at + chunkBytes).arrayBuffer(), { stream: true })
     let end = 0
     TAG.lastIndex = 0
+    // The next `<!` the tags have not reached, kept rather than searched for at every tag.
+    let bang = chunk.indexOf('<!')
     for (let match = TAG.exec(chunk); match; match = TAG.exec(chunk)) {
+      while (bang >= 0 && bang < end) bang = chunk.indexOf('<!', end)
+      // A CDATA section or a comment the chunk does not close: it is read whole with the next chunk.
+      while (
+        bang >= 0 &&
+        bang < match.index &&
+        !chunk.startsWith('<![CDATA[', bang) &&
+        !chunk.startsWith('<!--', bang)
+      ) {
+        bang = chunk.indexOf('<!', bang + 2)
+      }
+      if (bang >= 0 && bang < match.index) break
       if (capture) text += chunk.slice(end, match.index)
       end = TAG.lastIndex
+      if (match[2] === undefined) {
+        if (capture) text += match[0]
+        continue
+      }
       const [, closing, name, empty] = match
       if (name === 'trk') {
         if (closing) {
@@ -119,7 +154,9 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       else depth++
     }
     // A tag cut by the end of the chunk is read whole with the next one.
-    const open = chunk.lastIndexOf('<')
+    // A CDATA section or a comment the chunk does not close is carried from its start.
+    const unclosed = [chunk.indexOf('<![CDATA[', end), chunk.indexOf('<!--', end)].filter((at) => at >= 0)
+    const open = unclosed.length > 0 ? Math.min(...unclosed) : chunk.lastIndexOf('<')
     carry = open >= end ? chunk.slice(open) : ''
     if (capture) text += chunk.slice(end, open >= end ? open : chunk.length)
     onProgress(Math.min(file.size, at + chunkBytes) / file.size)
@@ -171,8 +208,9 @@ const STOP_ATTEMPTS = 5
 
 /**
  * End the upload on the server, and throw the AbortError that says so, or
- * the error that says the server was not told: it then keeps the upload
- * until IDLE_TIMEOUT_MS has passed without a slice.
+ * the error that says the server was not told: it then holds the upload
+ * until another takes its place, which it allows after IDLE_TIMEOUT_MS
+ * without a slice.
  */
 async function stopUpload(call, url, onStatus, wait) {
   let ended = false

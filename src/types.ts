@@ -138,14 +138,14 @@ export interface UploadCheckpoint {
   segments: number
 }
 
+/** From and to, both included, in milliseconds. */
+export type Span = [from: number, to: number]
+
 /**
  * A GPX file uploaded in slices into the own vessel's recording; see
  * gpxUpload.ts. Saved with each slice's points, so a restart goes on from
  * `checkpoint`.
  */
-/** From and to, both included, in milliseconds. */
-export type Span = [from: number, to: number]
-
 export interface GpxUploadState {
   id: string
   filename: string

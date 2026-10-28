@@ -1428,6 +1428,19 @@ describe('a GPX file uploaded in slices', () => {
     expect(read.untimed).toBe(2)
   })
 
+  it('reads a name in CDATA, beside references and a comment, as the server does', async () => {
+    const cdata = `<gpx xmlns="${GPX}"><trk><name> <![CDATA[Own &amp; <Co>]]> &amp;<!-- not this --> Ship </name><trkseg>${trkpt('2023-08-29T21:57:38Z')}</trkseg></trk></gpx>`
+    const names = (await scanGpx(new Blob([cdata]))).map(({ name }: { name: string }) => name)
+    expect(names).toEqual(['Own &amp; <Co> & Ship'])
+    // Cut inside the CDATA section and the comment as well.
+    expect(await scanGpx(new Blob([cdata]), () => {}, 7)).toEqual(await scanGpx(new Blob([cdata])))
+    const read = await new GpxReader(new Set(names), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(cdata),
+      true,
+    )
+    expect([...read.parts.keys()]).toEqual([1])
+  })
+
   it('reads a name across a Windows line end as the server does', async () => {
     const crlf = `<gpx xmlns="${GPX}"><trk><name>Leg\r\n2</name><trkseg>${trkpt('2023-08-29T21:57:38Z')}</trkseg></trk></gpx>`
     const names = (await scanGpx(new Blob([crlf]))).map(({ name }: { name: string }) => name)
