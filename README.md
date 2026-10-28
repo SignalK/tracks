@@ -362,12 +362,20 @@ _`from` and `to` are ISO-8601 timestamps; `to` defaults to now. `duration` is a 
 ending now. A window ending at now includes its most recent point; one ending earlier is
 half-open, so consecutive windows tile without returning the shared point twice._
 
+_Without a window these routes return the last 24 hours. The own vessel is kept
+indefinitely, and with the history import its whole track can be years of positions,
+too many for one answer; name a window to read further back. A vessel that recorded
+nothing in that day, a boat moored with recording paused for instance, gets an empty
+track. The GPX export, `/signalk/v1/api/self/track.gpx` or
+`/signalk/v1/api/vessels/<vesselId>/track.gpx`, still exports the whole recording without
+a window._
+
 _`timespan` and `timespanOffset` are also accepted for Freeboard-SK compatibility, where
 `timespan=23h&timespanOffset=1` means "23 hours ending an hour ago". They are not part of
 the proposed track API and are expected to be superseded by `from`/`to`._
 
 _A parameter these routes do not read is rejected with `400` rather than ignored, so a
-typo such as `?duratoin=6h` fails rather than quietly returning the whole retained track.
+typo such as `?duratoin=6h` fails rather than quietly returning the last 24 hours.
 `bbox` and `radius` are **not** accepted here: they select which vessels to return and so
 belong to `/tracks` below. To ask whether one vessel's track passed through a box, use the
 v2 Track API, which matches any position in the window ([being designed in
@@ -425,7 +433,9 @@ vessel that has not sent one._
 
 `/signalk/v1/api/tracks`
 
-_Every vessel the plugin holds a track for. Add `?radius=` to narrow it to vessels near your own._
+_Every vessel the plugin holds a track for in the last 24 hours, the same default window as
+above; the window parameters select another, and a vessel with nothing in the window is left
+out. Add `?radius=` to narrow it to vessels near your own._
 
 _Each entry carries `isSelf`, so the own vessel can be told from an AIS target without
 string-matching the context against the server's self-identity, and `name` for display._

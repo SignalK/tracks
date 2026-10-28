@@ -22,6 +22,7 @@ import {
   mergeSpan,
   subtractSpans,
   withinSpans,
+  withPoints,
 } from './utils.js'
 import type { LatLngTuple, TimedPosition, TrackParams } from './types.js'
 
@@ -253,6 +254,15 @@ describe('toIsoTimes', () => {
 
   it('returns nothing for an empty segment', () => {
     expect(toIsoTimes([])).toEqual([])
+  })
+})
+
+describe('withPoints', () => {
+  it('leaves out the tracks with no points and keeps the order of the rest', () => {
+    expect(withPoints({ a: [1], b: [], c: [2, 3] })).toEqual([
+      ['a', [1]],
+      ['c', [2, 3]],
+    ])
   })
 })
 

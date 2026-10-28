@@ -16,6 +16,7 @@ const MINUTE = 60 * 1000
 
 const NOW = Date.parse('2026-08-09T12:00:00Z')
 const HOUR = 60 * 60 * 1000
+const DAY = 24 * HOUR
 
 describe('parseDuration', () => {
   it('treats a bare number as seconds', () => {
@@ -37,6 +38,32 @@ describe('parseDuration', () => {
 describe('parseTrackQuery', () => {
   it('returns no window when no time parameters are given', () => {
     expect(parseTrackQuery({}, NOW).window).toBeUndefined()
+  })
+
+  it('falls back to the default window ending now when one is given', () => {
+    expect(parseTrackQuery({ resolution: '1m', times: 'true' }, NOW, [], DAY)).toEqual({
+      resolution: MINUTE,
+      times: true,
+      window: { from: NOW - DAY, to: NOW, inclusiveEnd: true },
+    })
+  })
+
+  it('reads the window the query names rather than the default', () => {
+    expect(parseTrackQuery({ duration: '2h' }, NOW, [], DAY).window).toEqual({
+      from: NOW - 2 * HOUR,
+      to: NOW,
+      inclusiveEnd: true,
+    })
+    expect(parseTrackQuery({ from: '2026-08-09T11:00:00Z' }, NOW, [], DAY).window?.from).toBe(
+      Date.parse('2026-08-09T11:00:00Z'),
+    )
+    expect(parseTrackQuery({ to: '2026-08-09T11:00:00Z' }, NOW, [], DAY).window?.from).toBe(Number.NEGATIVE_INFINITY)
+    expect(parseTrackQuery({ timespan: '1h' }, NOW, [], DAY).window?.from).toBe(NOW - HOUR)
+    expect(parseTrackQuery({ timespan: '23h', timespanOffset: '1' }, NOW, [], DAY).window).toEqual({
+      from: NOW - 24 * HOUR,
+      to: NOW - HOUR,
+      inclusiveEnd: false,
+    })
   })
 
   it('accepts exactly the parameters its schema declares, and names them when rejecting another', () => {
