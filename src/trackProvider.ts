@@ -767,7 +767,7 @@ function shapeFeature(
   // afterwards yields one-point segments, which are not drawable
   // geometry. Splitting first keeps every leg's own endpoints.
   // A track read at a tolerance to fit its budget is simplified to at least
-  // that tolerance, so the answer reports what it was read at.
+  // that tolerance, so the epsilon the answer reports is never below it.
   const asked = chooseEpsilon(points, query)
   const chosenEpsilon = minEpsilon === undefined ? asked : Math.max(asked ?? 0, minEpsilon)
   const segments = segment(points, gap).map((s) => (chosenEpsilon === undefined ? s : simplify(s, chosenEpsilon)))
