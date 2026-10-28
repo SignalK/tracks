@@ -63,7 +63,7 @@ plugin imports such an export into its own recording; see
 [Importing a large file](#importing-a-large-file).
 
 Years of a track are more than one answer of the v2 Track API can carry. A recorded track that a
-query would read as more positions than the plugin's budget for one answer is read and answered
+query would read as more positions than the plugin's budget for one track is read and answered
 simplified instead, to the smallest tolerance whose significance levels hold it within the budget.
 It is spaced in time to fit instead where the query sets `maxPoints`, which asks for spacing,
 where no tolerance holds it, or where tracks split at pauses (**Split a track after this many
