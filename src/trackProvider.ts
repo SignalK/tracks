@@ -263,8 +263,10 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         },
       )
 
-    // A box bounds a read by where the track went. Without one, each track
-    // is counted first, and one over the budget is read on its own to fit it.
+    // A read with a box is not counted: with `clip` it holds the stretches
+    // near the box, and without it a named vessel's whole track. Without a
+    // box, each track is counted first, and one over the budget is read on
+    // its own to fit it.
     // The contexts counted are read by name, so the store need not list
     // them a second time, and the answer keeps the order it holds them in.
     const { fits, counted } = bounds
