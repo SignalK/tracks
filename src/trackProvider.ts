@@ -356,7 +356,8 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
       }
       let fit: Fit | undefined
       if (query.maxPoints !== undefined) {
-        // thinToBudget's first spacing, which keeps no more than maxPoints.
+        // thinToBudget's first spacing, which keeps no more than maxPoints
+        // but for positions sharing the last time.
         // Read at it, a track of more positions than maxPoints gets the
         // answer it always got, without a resolution; with one, thinToBudget
         // spaced what was read at it.

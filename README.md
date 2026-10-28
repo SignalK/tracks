@@ -68,9 +68,10 @@ simplified instead, to the smallest tolerance whose significance levels hold it 
 It is spaced in time to fit instead where the query sets `maxPoints`, which asks for spacing,
 where no tolerance holds it, or where tracks split at pauses (**Split a track after this many
 minutes without a fix**). The answer says which in `epsilon` or `resolution`. A track within the
-budget is answered as before. A query with a box is not counted: it reads what lies near the box,
-which for a box around the whole track is all of it. The webapp's GPX export of the own vessel
-still writes every position of the whole recording.
+budget is answered as before. A query with a box is not counted. With `clip`, which the server
+sets for any box from 2.34, it reads the stretches near the box, which for a box around the whole
+track is all of it; without `clip`, a query that names a vessel reads its whole track. The
+webapp's GPX export of the own vessel still writes every position of the whole recording.
 
 ## Imported tracks
 
