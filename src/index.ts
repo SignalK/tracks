@@ -211,6 +211,8 @@ const PLUGIN_ID = 'tracks'
 
 interface TracksPluginConfig {
   resolution?: number
+  /** Whether vessels other than the own one are recorded; they are unless false. */
+  recordOtherVessels?: boolean
   /** Days another vessel's positions are kept. 0 keeps every position. */
   aisRetentionDays?: number
   /** Days a deleted track waits in the recycle bin before it is purged. */
@@ -477,6 +479,7 @@ export default function ThePlugin(app: App): Plugin {
   let binRetentionMs = DEFAULT_RECYCLE_BIN_DAYS * DAY_MS
   /** How long other vessels' positions are kept, as set; 0 keeps them. */
   let aisRetentionDays = DEFAULT_AIS_RETENTION_DAYS
+  let recordOtherVessels = true
   /** The configuration the plugin runs with, while it runs. */
   let startedWith: TracksPluginConfig | undefined
   let resetting = false
@@ -664,6 +667,7 @@ export default function ThePlugin(app: App): Plugin {
         }
       }
       otherVesselsResolution = toNumber(config.otherVesselsResolution)
+      recordOtherVessels = config.recordOtherVessels !== false
       stateGate = new StateGate(
         app.selfContext,
         Array.isArray(config.pauseWhenState) ? config.pauseWhenState : DEFAULT_PAUSE_STATES,
@@ -725,6 +729,8 @@ export default function ThePlugin(app: App): Plugin {
         app.streambundle.getBus('navigation.position').onValue((update: ContextPosition): void => {
           if (!update.value || update.value.latitude == null || update.value.longitude == null) return
           if (isFixedStation(update.context)) return
+          // Before anything is kept of it, its name and its sources included.
+          if (!recordOtherVessels && update.context !== app.selfContext) return
           sourceWatch.add(update.context, update.$source)
           // Captured here rather than by subscribing to `name`: the data model
           // already holds it by the time a position arrives, and a vessel with
@@ -1615,11 +1621,12 @@ export default function ThePlugin(app: App): Plugin {
       })
 
       // What the webapp tells its reader about the lists it shows: other
-      // vessels' tracks reach back as far as they are kept. Read access, as
-      // for the lists themselves. `aisRetentionDays` is the setting of that
-      // name, in days, with 0 for keeping them indefinitely.
+      // vessels' tracks reach back as far as they are kept, and whether they
+      // are recorded at all. Read access, as for the lists themselves.
+      // `aisRetentionDays` and `recordOtherVessels` are the settings of those
+      // names, the days with 0 for keeping them indefinitely.
       readable.get('/settings', (_req: Request, res: Response) => {
-        res.json({ aisRetentionDays })
+        res.json({ aisRetentionDays, recordOtherVessels })
       })
 
       // The webapp's danger zone: the whole database deleted, for a store gone
@@ -1811,6 +1818,13 @@ export default function ThePlugin(app: App): Plugin {
           minimum: 0,
           title: 'Track resolution (milliseconds)',
           default: DEFAULT_RESOLUTION,
+        },
+        recordOtherVessels: {
+          type: 'boolean',
+          title: 'Record other vessels (AIS)',
+          description:
+            "Records the tracks of AIS targets and every other vessel the server reports, beside the own vessel's. Turned off, only the own vessel is recorded: nothing more of another vessel is recorded, its name included, so a chart plotter that draws trails from this plugin, such as Freeboard, draws no new ones for them. What was recorded of them before stays until the days to keep them below run out, or for good with those at 0.",
+          default: true,
         },
         aisRetentionDays: {
           type: 'integer',

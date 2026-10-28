@@ -558,12 +558,19 @@ describe('the webapp renders what the API returns', () => {
     expect(lists.imported.note.textContent).toBe('No imported tracks.')
   })
 
-  // The notes say how long other vessels are kept, as the plugin is set, so
-  // the list never reads as though it kept them longer.
+  // The notes say how long other vessels are kept, and whether they are
+  // recorded, as the plugin is set, so the list never reads as though it kept
+  // them longer, or as though the receiver had heard no one.
   it.each([
     [{ aisRetentionDays: 7 }, true, 'In the last 7 days. The plugin keeps them 7 days.'],
     [{ aisRetentionDays: 1 }, false, 'None in the last 1 day. The plugin keeps them 1 day.'],
     [{ aisRetentionDays: 0 }, true, 'In the last 30 days. The plugin keeps them indefinitely.'],
+    [
+      { aisRetentionDays: 7, recordOtherVessels: false },
+      false,
+      "None in the last 7 days. The plugin keeps them 7 days. Recording them is turned off in the plugin's settings.",
+    ],
+    [{ aisRetentionDays: 7, recordOtherVessels: true }, true, 'In the last 7 days. The plugin keeps them 7 days.'],
     [undefined, true, 'In the last 30 days.'],
   ])('says how long other vessels are kept (%j)', async (settings, any, note) => {
     const { lists } = await render(

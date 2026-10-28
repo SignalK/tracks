@@ -313,6 +313,42 @@ describe('fixed stations', () => {
   })
 })
 
+// A boat that wants its own track only, not the harbour's AIS traffic.
+describe('other vessels turned off', () => {
+  it('records the own vessel and nothing of any other, its name included', async () => {
+    const { app, emit } = createApp(dir)
+    const vessel = 'vessels.urn:mrn:imo:mmsi:987654321' as ContextPosition['context']
+    const named = { ...app, getPath: (path: string): unknown => (path.endsWith('.name') ? 'Ariadne' : undefined) }
+    const plugin = ThePlugin(named)
+    try {
+      await plugin.start({ resolution: 0, recordOtherVessels: false })
+      const recordName = vi.spyOn(plugin.getTracks()!, 'recordName')
+      emit(SELF_CONTEXT, [60, 24], Date.now())
+      emit(vessel, [61, 25], Date.now())
+
+      await expect(plugin.getTracks()?.get(SELF_CONTEXT as ContextPosition['context'])).resolves.toHaveLength(1)
+      await expect(plugin.getTracks()?.get(vessel)).rejects.toThrow()
+      expect(recordName.mock.calls.map(([context]) => context)).toEqual([SELF_CONTEXT])
+    } finally {
+      await plugin.stop()
+    }
+  })
+
+  it('records other vessels unless turned off', async () => {
+    const { app, emit } = createApp(dir)
+    const vessel = 'vessels.urn:mrn:imo:mmsi:987654321' as ContextPosition['context']
+    const plugin = ThePlugin(app)
+    try {
+      await plugin.start({ resolution: 0 })
+      emit(vessel, [61, 25], Date.now())
+
+      await expect(plugin.getTracks()?.get(vessel)).resolves.toHaveLength(1)
+    } finally {
+      await plugin.stop()
+    }
+  })
+})
+
 // At anchor the swing around the anchor is the detail worth keeping, and the
 // normal resolution misses it; navigation.state says when the boat is there.
 describe('the own vessel at anchor', () => {
