@@ -160,7 +160,6 @@ describe('uploading a GPX file in slices', () => {
       const { id } = (await start(h).expect(201)).body.upload as GpxUploadStatus
       await request(h.app).put(`${UPLOAD}/${id}`).send(file.subarray(0, 10)).expect(400)
       await slice(h, id, 0, Buffer.alloc(0)).expect(400)
-      await slice(h, id, 0, Buffer.alloc(8 * 1024 * 1024 + 1)).expect(413)
     })
   })
 

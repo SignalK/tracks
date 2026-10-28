@@ -2861,15 +2861,18 @@ describe('a GPX file saved in slices', () => {
     }
   })
 
-  it('starts a recycle bin entry of its own when the one a segment began is gone', () => {
+  it.each([
+    ['restored', (store: SqliteTrackStore, id: number) => store.restoreFromBin(id)],
+    ['purged', (store: SqliteTrackStore, id: number) => store.purgeFromBin(id)],
+  ])('starts a recycle bin entry of its own when the one a segment began was %s', (_, end) => {
     const store = newStore()
     try {
       store.fillTrack(ctx, [run(60, t0, 121, SECOND, 500)])
       const points = run(61, t0, 121)
       const state = saveSlices(store, uploading('replace'), [[[1, points.slice(0, 60)]]])
-      store.restoreFromBin(state.binned!.id!)
+      end(store, state.binned!.id!)
       saveSlices(store, state, [[[1, points.slice(60)]]])
-      expect(store.binEntries()).toHaveLength(1)
+      expect(store.binEntries()).toEqual([expect.objectContaining({ pointCount: 61 })])
     } finally {
       store.close()
     }

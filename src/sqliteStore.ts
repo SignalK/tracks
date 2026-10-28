@@ -2894,7 +2894,10 @@ export class SqliteTrackStore implements TrackStore {
     const known = this.knows(context)
     const lower = from ?? Number.MIN_SAFE_INTEGER
     // Restored or purged since: the positions start an entry of their own.
-    if (into !== undefined && !this.db.prepare('SELECT 1 AS found FROM recycle_bin WHERE id = ?').get(into)) {
+    if (
+      into !== undefined &&
+      !this.db.prepare('SELECT 1 AS found FROM recycle_bin WHERE id = ? AND purged = 0').get(into)
+    ) {
       into = undefined
     }
     const id = into ?? this.newBinEntry({ context, ...(from === undefined ? {} : { from }), to, deletedAt })

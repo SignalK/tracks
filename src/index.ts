@@ -38,6 +38,7 @@ import {
   UploadConflictError,
   UploadFormatError,
 } from './gpxUpload.js'
+import type { SliceReservation } from './gpxUpload.js'
 import { parseTrackQuery, segment, TimeWindowError, TrackStream } from './timeWindow.js'
 import type { StreamedPoint, TrackQuery } from './timeWindow.js'
 import type {
@@ -1488,6 +1489,7 @@ export default function ThePlugin(app: App): Plugin {
             res.status(409).json({ message: 'Another file is being imported', upload: current.status })
             return
           }
+          current?.supersede()
           const keepEmpty = start.onOverlap === 'replace' && (await importable(app.selfContext))
           const saved = await store.saveGpxUpload(newUpload({ ...start, context: app.selfContext, keepEmpty }), [])
           const upload = uploadOf(store, saved)
@@ -1509,10 +1511,19 @@ export default function ThePlugin(app: App): Plugin {
         void (async () => {
           const upload = await namedUpload(req, res)
           if (!upload) return
+          // Before the body is read, so two requests cannot both hold a slice's worth of it.
+          let slice: SliceReservation
+          try {
+            slice = upload.reserve(offset)
+          } catch (err) {
+            uploadFailed(res, upload)(err)
+            return
+          }
           let bytes: Buffer
           try {
             bytes = await readSlice(req, MAX_SLICE_BYTES)
           } catch (err) {
+            slice.release()
             if (err instanceof UploadTooLargeError) {
               res.status(413).json({ message: err.message, upload: upload.status })
             } else if (err instanceof UploadTypeError) {
@@ -1523,10 +1534,11 @@ export default function ThePlugin(app: App): Plugin {
             return
           }
           if (bytes.length === 0) {
+            slice.release()
             res.status(400).json({ message: 'The slice is empty', upload: upload.status })
             return
           }
-          await upload.append(offset, bytes).then(() => res.json({ upload: upload.status }), uploadFailed(res, upload))
+          await slice.write(bytes).then(() => res.json({ upload: upload.status }), uploadFailed(res, upload))
         })().catch(uploadFailed(res))
       })
 

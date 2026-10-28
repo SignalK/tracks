@@ -155,6 +155,8 @@ export interface GpxUploadState {
   /** Names of the file's tracks to import, `''` for one without a name. */
   tracks: string[]
   onOverlap: OnOverlap
+  /** Tells the file from another of the same name and size, as the client reckons it; see public/upload.js. */
+  fingerprint?: string
   /** Whether a replaced span keeps its recycle bin entry where nothing was recorded; see `keepTrack`. */
   keepEmpty: boolean
   state: 'receiving' | 'finished' | 'aborted' | 'failed'

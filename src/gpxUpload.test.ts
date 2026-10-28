@@ -1,7 +1,14 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import { fromGpx } from './gpx.js'
-import { GpxReader, GpxUpload, newUpload, UploadConflictError, UploadFormatError } from './gpxUpload.js'
+import {
+  GpxReader,
+  GpxUpload,
+  MAX_PENDING_CHARS,
+  newUpload,
+  UploadConflictError,
+  UploadFormatError,
+} from './gpxUpload.js'
 import type { GpxUploadState, TimedPosition, UploadCheckpoint, UploadPart } from './types.js'
 
 const GPX_NS = 'http://www.topografix.com/GPX/1/1'
@@ -168,6 +175,28 @@ describe('reading a GPX file in slices', () => {
     const read = await new GpxReader(new Set(['Own']), START).read(bytes.subarray(0, 100), true)
     expect(read.error).toMatch(/not well-formed GPX/)
   })
+
+  it('reports a well-formed file whose root is not GPX', async () => {
+    const xml = `<kml xmlns="${GPX_NS}"><trk><name>Own</name><trkseg>${point(1, 1, t0)}</trkseg></trk></kml>`
+    const read = await new GpxReader(new Set(['Own']), START).read(new TextEncoder().encode(xml), true)
+    expect(read.error).toBe('The file is not GPX: its root is <kml>')
+    expect(read.parts.size).toBe(0)
+  })
+
+  it('reads an empty GPX file as one without tracks', async () => {
+    const read = await new GpxReader(new Set(['Own']), START).read(new TextEncoder().encode(document('')), true)
+    expect(read.error).toBeUndefined()
+  })
+
+  it('reports text that runs on without markup past what the parser may hold', async () => {
+    const reader = new GpxReader(new Set(['Own']), START)
+    const head = await reader.read(new TextEncoder().encode(`<gpx xmlns="${GPX_NS}"><trk><name>`), false)
+    expect(head.error).toBeUndefined()
+    const text = new TextEncoder().encode('x'.repeat(MAX_PENDING_CHARS / 2))
+    expect((await reader.read(text, false)).error).toBeUndefined()
+    expect((await reader.read(text, false)).error).toBeUndefined()
+    expect((await reader.read(new Uint8Array([0x78]), false)).error).toMatch(/without markup ending/)
+  })
 })
 
 describe('an upload', () => {
@@ -282,6 +311,49 @@ describe('an upload', () => {
     expect(upload.idle).toBe(false)
     now = 16 * 60_000
     expect(upload.idle).toBe(true)
+  })
+
+  it('holds itself for a slice while its body arrives', async () => {
+    const { save } = saving()
+    const upload = new GpxUpload(start(), { save, replaced: () => undefined })
+    const slice = upload.reserve(0)
+    expect(() => upload.reserve(0)).toThrow('still being written')
+    await expect(upload.abort()).rejects.toThrow('still being written')
+    slice.release()
+    await upload.reserve(0).write(bytes)
+    expect(upload.status.state).toBe('finished')
+  })
+
+  it('is idle once a slice reserved has not arrived for a while', () => {
+    let now = 0
+    const upload = new GpxUpload(
+      { ...start(), updatedAt: 0 },
+      { ...saving(), replaced: () => undefined, now: () => now },
+    )
+    now = 10 * 60_000
+    upload.reserve(0)
+    now = 20 * 60_000
+    expect(upload.idle).toBe(false)
+    now = 26 * 60_000
+    expect(upload.idle).toBe(true)
+  })
+
+  it('writes nothing more once a new upload has taken its place', async () => {
+    const { save } = saving()
+    const upload = new GpxUpload(start(), { save, replaced: () => undefined })
+    const slice = upload.reserve(0)
+    upload.supersede()
+    await expect(slice.write(bytes)).rejects.toThrow('Another file is being imported')
+    expect(save).not.toHaveBeenCalled()
+  })
+
+  it('has received the whole file once finished, after a restart too', async () => {
+    const { save } = saving()
+    const upload = new GpxUpload(start(), { save, replaced: () => undefined })
+    await upload.append(0, bytes)
+    const saved = save.mock.results.at(-1)!.value as Promise<GpxUploadState>
+    const restarted = new GpxUpload(await saved, { save, replaced: () => undefined })
+    expect(restarted.status).toMatchObject({ state: 'finished', received: bytes.length })
   })
 
   it('tells after a slice replaced part of the recording', async () => {

@@ -40,6 +40,13 @@ export const IDLE_TIMEOUT_MS = 15 * 60 * 1000
 const PARSE_CHARS = 64 * 1024
 
 /**
+ * The most characters the parser holds between two pieces of markup it has
+ * read whole: it keeps an unfinished text, tag or comment until its end
+ * arrives, which a file could put off past any slice.
+ */
+export const MAX_PENDING_CHARS = 1024 * 1024
+
+/**
  * GPX's elements from the root down to a point's time, each a child of the
  * one before. A track's `<name>` is a child of `<trk>` beside them.
  */
@@ -113,7 +120,9 @@ export class GpxReader {
   /** The end of a character a slice cut, for the next one. */
   private carry = new Uint8Array(0)
   private clean: { at: number; structure: Structure } | undefined
-  private error: Error | undefined
+  /** Where in the characters fed the parser last finished reading a piece of markup. */
+  private mark = 0
+  private error: string | undefined
   private nameText = ''
   private timeText = ''
   private point: [number, number] | undefined
@@ -133,17 +142,36 @@ export class GpxReader {
     this.path = CHAIN.slice(0, from.open.length)
     this.matched = from.open.length
     this.parser.on('error', (err) => {
-      this.error ??= err
+      this.error ??= `The file is not well-formed GPX: ${err.message}`
     })
     if (from.open.length > 0) {
       const prefix = from.open.map(startTag).join('')
       this.parser.write(prefix)
       this.fed = prefix.length
+      this.mark = prefix.length
     }
-    this.parser.on('opentag', (tag) => this.open(tag))
-    this.parser.on('closetag', () => this.close())
-    this.parser.on('text', (text) => this.text(text))
-    this.parser.on('cdata', (text) => this.text(text))
+    const read = () => {
+      this.mark = this.parser.position
+    }
+    this.parser.on('opentag', (tag) => {
+      read()
+      this.open(tag)
+    })
+    this.parser.on('closetag', () => {
+      read()
+      this.close()
+    })
+    this.parser.on('text', (text) => {
+      read()
+      this.text(text)
+    })
+    this.parser.on('cdata', (text) => {
+      read()
+      this.text(text)
+    })
+    for (const event of ['comment', 'processinginstruction', 'doctype', 'xmldecl'] as const) {
+      this.parser.on(event, read)
+    }
   }
 
   /** Read the file's next bytes; `end` says they are its last. */
@@ -166,6 +194,10 @@ export class GpxReader {
     const base = this.fed
     for (let i = 0; i < text.length && !this.error; i += PARSE_CHARS) {
       this.parser.write(text.slice(i, i + PARSE_CHARS))
+      // Counted here: the parser's own position is off between two writes.
+      if (base + Math.min(text.length, i + PARSE_CHARS) - this.mark > MAX_PENDING_CHARS) {
+        this.error ??= `The file is not GPX: more than ${MAX_PENDING_CHARS} characters without markup ending near byte ${start}`
+      }
       await yieldToLoop()
     }
     this.fed += text.length
@@ -184,7 +216,7 @@ export class GpxReader {
               ...clean.structure,
             },
           }),
-      ...(this.error === undefined ? {} : { error: `The file is not well-formed GPX: ${this.error.message}` }),
+      ...(this.error === undefined ? {} : { error: this.error }),
     }
   }
 
@@ -217,6 +249,10 @@ export class GpxReader {
       this.matched++
     }
     this.path.push(local)
+    if (this.path.length === GPX && !this.at(GPX)) {
+      this.error = `The file is not GPX: its root is <${tag.name}>`
+      return
+    }
     if (this.at(TRKPT)) {
       this.point = [decimal(tag.attributes.lat?.value), decimal(tag.attributes.lon?.value)]
       this.timeText = ''
@@ -303,6 +339,8 @@ export interface GpxUploadStatus {
   size: number
   tracks: string[]
   onOverlap: OnOverlap
+  /** What the client said tells the file from another of its name and size. */
+  fingerprint?: string
   /** Bytes taken so far: where the next slice starts. */
   received: number
   state: GpxUploadState['state']
@@ -328,7 +366,11 @@ export interface UploadStart {
   size: number
   tracks: string[]
   onOverlap: OnOverlap
+  fingerprint?: string
 }
+
+/** The longest fingerprint an upload keeps. */
+const MAX_FINGERPRINT = 256
 
 /** A request to start an upload, or why it cannot start one. */
 export function parseUploadStart(body: unknown): UploadStart | string {
@@ -337,6 +379,7 @@ export function parseUploadStart(body: unknown): UploadStart | string {
     size,
     tracks,
     onOverlap = 'keep',
+    fingerprint,
   } = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>
   if (typeof filename !== 'string' || filename === '') {
     return 'filename must name the file'
@@ -350,7 +393,10 @@ export function parseUploadStart(body: unknown): UploadStart | string {
   if (onOverlap !== 'keep' && onOverlap !== 'replace') {
     return "onOverlap must be 'keep' or 'replace'"
   }
-  return { filename, size, tracks, onOverlap }
+  if (fingerprint !== undefined && (typeof fingerprint !== 'string' || fingerprint.length > MAX_FINGERPRINT)) {
+    return `fingerprint must be a string of at most ${MAX_FINGERPRINT} characters`
+  }
+  return { filename, size, tracks, onOverlap, ...(fingerprint === undefined ? {} : { fingerprint }) }
 }
 
 /** The state of an upload about to start. */
@@ -361,6 +407,7 @@ export function newUpload(
     context: Context
     tracks: string[]
     onOverlap: OnOverlap
+    fingerprint?: string
     keepEmpty: boolean
   },
   now = Date.now(),
@@ -378,11 +425,20 @@ export function newUpload(
   }
 }
 
+/** A slice's hold on its upload; see `GpxUpload.reserve`. */
+export interface SliceReservation {
+  write: (bytes: Uint8Array) => Promise<void>
+  release: () => void
+}
+
 /** One upload: the slices it takes, one at a time, and its state as the store last saved it. */
 export class GpxUpload {
   private reader!: GpxReader
   private received = 0
   private busy = false
+  /** When the slice being received was reserved. */
+  private reservedAt = 0
+  private superseded = false
   private readonly now: () => number
 
   constructor(
@@ -401,9 +457,21 @@ export class GpxUpload {
     return this.state.state === 'receiving'
   }
 
-  /** Receiving, but nothing has arrived for IDLE_TIMEOUT_MS. */
+  /**
+   * Receiving, but nothing has arrived for IDLE_TIMEOUT_MS: no slice was
+   * written in that time, and none has been on its way for as long.
+   */
   get idle(): boolean {
-    return this.active && !this.busy && this.now() - this.state.updatedAt > IDLE_TIMEOUT_MS
+    return this.active && this.now() - (this.busy ? this.reservedAt : this.state.updatedAt) > IDLE_TIMEOUT_MS
+  }
+
+  /**
+   * Give way to a new upload: a slice of this one still on its way is
+   * refused rather than written, so it cannot write over the new upload's
+   * state in the store.
+   */
+  supersede(): void {
+    this.superseded = true
   }
 
   get status(): GpxUploadStatus {
@@ -413,6 +481,7 @@ export class GpxUpload {
       size,
       tracks,
       onOverlap,
+      fingerprint,
       state,
       error,
       imported,
@@ -427,6 +496,7 @@ export class GpxUpload {
       size,
       tracks,
       onOverlap,
+      ...(fingerprint === undefined ? {} : { fingerprint }),
       received: this.received,
       state,
       ...(error === undefined ? {} : { error }),
@@ -444,14 +514,48 @@ export class GpxUpload {
    * the upload.
    */
   async append(offset: number, bytes: Uint8Array): Promise<void> {
+    await this.reserve(offset).write(bytes)
+  }
+
+  /**
+   * Hold the upload for the slice starting at byte `offset` while its body
+   * arrives, so that no other request reads one beside it; `write` the bytes
+   * once they are in, or `release` the upload when they never come.
+   */
+  reserve(offset: number): SliceReservation {
     this.expectReceiving()
     if (offset !== this.received) {
       throw new UploadConflictError(`The next slice starts at byte ${this.received}, not ${offset}`)
     }
+    this.busy = true
+    this.reservedAt = this.now()
+    let held = true
+    const release = () => {
+      if (held) {
+        held = false
+        this.busy = false
+      }
+    }
+    return {
+      write: async (bytes) => {
+        if (!held) throw new UploadConflictError('The slice was written already')
+        try {
+          await this.write(offset, bytes)
+        } finally {
+          release()
+        }
+        if (this.state.error !== undefined && this.state.state === 'failed') {
+          throw new UploadFormatError(this.state.error)
+        }
+      },
+      release,
+    }
+  }
+
+  private async write(offset: number, bytes: Uint8Array): Promise<void> {
     if (offset + bytes.length > this.state.size) {
       throw new UploadConflictError(`The slice runs past the file's size of ${this.state.size} bytes`)
     }
-    this.busy = true
     try {
       const end = offset + bytes.length === this.state.size
       const read = await this.reader.read(bytes, end)
@@ -471,6 +575,9 @@ export class GpxUpload {
         updatedAt: this.now(),
         ...(read.error !== undefined ? { state: 'failed', error: read.error } : end ? { state: 'finished' } : {}),
       }
+      if (this.superseded) {
+        throw new UploadConflictError('Another file is being imported')
+      }
       this.state = await this.deps.save(next, parts)
       this.received += bytes.length
       if (this.state.onOverlap === 'replace' && parts.length > 0) {
@@ -480,11 +587,6 @@ export class GpxUpload {
       // Read on from what the store last saved, which the client sends again.
       this.rewind()
       throw err
-    } finally {
-      this.busy = false
-    }
-    if (this.state.error !== undefined && this.state.state === 'failed') {
-      throw new UploadFormatError(this.state.error)
     }
   }
 
@@ -510,6 +612,7 @@ export class GpxUpload {
 
   private rewind(): void {
     this.reader = new GpxReader(new Set(this.state.tracks), this.state.checkpoint)
-    this.received = this.state.checkpoint.offset
+    // The end of a file comes after its last checkpoint.
+    this.received = this.state.state === 'finished' ? this.state.size : this.state.checkpoint.offset
   }
 }

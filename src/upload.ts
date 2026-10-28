@@ -81,5 +81,9 @@ function readBytes(
     })
     req.on('end', () => resolve(Buffer.concat(chunks)))
     req.on('error', reject)
+    // A client that gave up: the body never ends.
+    req.on('close', () => {
+      if (!req.readableEnded) reject(new Error('The request was closed before its body ended'))
+    })
   })
 }

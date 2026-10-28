@@ -669,8 +669,8 @@ export function mergeSpan(spans: readonly Span[], span: Span): Span[] {
   const before = spans.filter(([, upper]) => upper + 1 < span[0])
   const after = spans.filter(([lower]) => lower > span[1] + 1)
   const joined = spans.slice(before.length, spans.length - after.length)
-  const from = Math.min(span[0], ...joined.map(([lower]) => lower))
-  const to = Math.max(span[1], ...joined.map(([, upper]) => upper))
+  const from = Math.min(span[0], joined[0]?.[0] ?? span[0])
+  const to = Math.max(span[1], joined.at(-1)?.[1] ?? span[1])
   return [...before, [from, to], ...after]
 }
 
