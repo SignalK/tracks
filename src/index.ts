@@ -1662,7 +1662,8 @@ export default function ThePlugin(app: App): Plugin {
           }
           let restarted: number
           try {
-            for (const suffix of ['', '-wal', '-shm']) {
+            // And a rewrite for a newer schema that a crash left half built.
+            for (const suffix of ['', '-wal', '-shm', '.migrating']) {
               rmSync(join(dataDir, `tracks.db${suffix}`), { force: true })
             }
           } finally {

@@ -1,4 +1,14 @@
-import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -222,7 +232,9 @@ describe('significance levels', () => {
   const visitHours = (store: SqliteTrackStore, from: number, to: number) =>
     (
       store['db']
-        .prepare('SELECT count(*) AS n FROM level_visits WHERE context = ? AND hour >= ? AND hour < ?')
+        .prepare(
+          'SELECT count(*) AS n FROM level_visits WHERE context_id = (SELECT id FROM contexts WHERE context = ?) AND hour >= ? AND hour < ?',
+        )
         .get(ctx, from / (60 * MINUTE), to / (60 * MINUTE)) as { n: number }
     ).n
   /** The levels `significant` holds the positions of a span at: none for one not refined. */
@@ -230,7 +242,7 @@ describe('significance levels', () => {
     (
       store['db']
         .prepare(
-          'SELECT DISTINCT level FROM significant WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY level',
+          'SELECT DISTINCT level FROM significant WHERE context_id = (SELECT id FROM contexts WHERE context = ?) AND timestamp >= ? AND timestamp < ? ORDER BY level',
         )
         .all(ctx, from, to) as { level: number }[]
     ).map(({ level }) => level)
@@ -306,7 +318,7 @@ describe('significance levels', () => {
       db
         .prepare(
           `SELECT count(*) AS n FROM significant s LEFT JOIN positions p ON p.rowid = s.position
-           WHERE p.rowid IS NULL OR s.context IS NOT p.context OR s.timestamp IS NOT p.timestamp
+           WHERE p.rowid IS NULL OR s.context_id IS NOT p.context_id OR s.timestamp IS NOT p.timestamp
              OR s.lat IS NOT p.lat OR s.lon IS NOT p.lon`,
         )
         .get(),
@@ -488,7 +500,11 @@ describe('significance levels', () => {
   }
   const refinedCount = (store: SqliteTrackStore) =>
     (
-      store['db'].prepare('SELECT count(*) AS n FROM significant WHERE context = ? AND level < 31').get(ctx) as {
+      store['db']
+        .prepare(
+          'SELECT count(*) AS n FROM significant WHERE context_id = (SELECT id FROM contexts WHERE context = ?) AND level < 31',
+        )
+        .get(ctx) as {
         n: number
       }
     ).n
@@ -1575,12 +1591,16 @@ describe('storage simplification', () => {
     }))
   const rows = (store: SqliteTrackStore, context: Context = ctx) =>
     store['db']
-      .prepare('SELECT timestamp, lat, lon FROM positions WHERE context = ? ORDER BY timestamp, rowid')
+      .prepare(
+        'SELECT timestamp, lat, lon FROM positions WHERE context_id = (SELECT id FROM contexts WHERE context = ?) ORDER BY timestamp, rowid',
+      )
       .all(context)
   const count = (store: SqliteTrackStore, from: number, to: number) =>
     (
       store['db']
-        .prepare('SELECT count(*) AS n FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ?')
+        .prepare(
+          'SELECT count(*) AS n FROM positions WHERE context_id = (SELECT id FROM contexts WHERE context = ?) AND timestamp >= ? AND timestamp < ?',
+        )
         .get(ctx, from, to) as { n: number }
     ).n
   const recordedAndSettled = (...runs: TimedPosition[][]) => {
@@ -2296,6 +2316,81 @@ describe('other vessels age out position by position', () => {
       store.close()
     }
   })
+
+  // Gone on there, the pass would skip the vessels between its old id and a new one it comes back under.
+  it('goes over every vessel again after the one a pass was to go on at was forgotten', () => {
+    const store = new SqliteTrackStore({ file: ':memory:', refineBudget: 500 }, debug)
+    const first = 'vessels.a' as Context
+    const gone = 'vessels.b' as Context
+    const last = 'vessels.c' as Context
+    const hour = (context: Context, start: number) => {
+      for (let i = 0; i < 3600; i++) {
+        store.newPosition(context, [60 + Math.sin(i / 400) * 0.002, 24 + i * 0.000005], start + i * 1000)
+      }
+    }
+    const refined = (context: Context) =>
+      (
+        store['db']
+          .prepare(
+            'SELECT count(*) AS n FROM significant WHERE context_id = (SELECT id FROM contexts WHERE context = ?)',
+          )
+          .get(context) as { n: number }
+      ).n
+    try {
+      const day0 = Date.UTC(2026, 5, 1)
+      const now = day0 + 2 * DAY + 1
+      hour(first, day0)
+      hour(gone, day0 - 10 * DAY)
+      hour(last, day0)
+      // The pass refines the first and, on the next call, stops at the one going.
+      store.refineLevels(now)
+      store.refineLevels(now)
+      expect(store['refineResume']).toBe(gone)
+      store.prune(5 * DAY, undefined, now)
+      store.newPosition(gone, [60, 24], now)
+      for (let i = 0; i < 100 && store.refineLevels(now); i++) {
+        // until it has nothing left
+      }
+      expect(refined(last)).toBeGreaterThan(0)
+    } finally {
+      store.close()
+    }
+  })
+
+  // Or the table of contexts would keep every vessel that ever passed.
+  it("forgets a vessel's id once nothing holds a row of it, and never gives it out again", async () => {
+    const store = new SqliteTrackStore({ file: ':memory:', resolution: 0 }, debug)
+    const passing = 'vessels.passing' as Context
+    const ids = () => store['db'].prepare('SELECT id, context FROM contexts ORDER BY id').all()
+    try {
+      const now = Date.now()
+      store.newPosition(neighbour, [60, 24], now - 40 * DAY)
+      store.newPosition(passing, [60, 24], now - 40 * DAY)
+      store.newPosition(passing, [60.1, 24], now - 39 * DAY)
+      store.newPosition(self, [61, 25], now - 40 * DAY)
+      // Its positions in the recycle bin, the passing vessel keeps its id.
+      store.binRecorded(passing, undefined, now, now, false)
+      expect(ids()).toEqual([
+        { id: 1, context: neighbour },
+        { id: 2, context: passing },
+        { id: 3, context: self },
+      ])
+      store.prune(30 * DAY, self, now)
+      expect(ids()).toEqual([
+        { id: 2, context: passing },
+        { id: 3, context: self },
+      ])
+      store.newPosition(neighbour, [60.2, 24.2], now)
+      expect(ids()).toEqual([
+        { id: 2, context: passing },
+        { id: 3, context: self },
+        { id: 4, context: neighbour },
+      ])
+      await expect(store.get(neighbour)).resolves.toEqual([[60.2, 24.2]])
+    } finally {
+      store.close()
+    }
+  })
 })
 
 // The store's `retention` trims the kept context's own rows. The plugin no
@@ -2536,8 +2631,8 @@ describe('the position index', () => {
     expect(
       plan(
         store,
-        'SELECT timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp',
-        ctx,
+        'SELECT timestamp, lat, lon FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp',
+        1,
         t0,
         t0 + 1,
       ),
@@ -2545,27 +2640,37 @@ describe('the position index', () => {
     expect(
       plan(
         store,
-        'SELECT context, COUNT(*), MIN(lat), MAX(lon) FROM positions WHERE timestamp >= ? GROUP BY context',
+        'SELECT context_id, COUNT(*), MIN(lat), MAX(lon) FROM positions WHERE timestamp >= ? GROUP BY context_id',
         t0,
       ),
     ).toContain('COVERING INDEX idx_context_time_position')
     store.close()
   })
 
+  // How a database before contexts had ids named each position's context.
+  const OLD_POSITIONS =
+    'CREATE TABLE positions (context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);'
+  const indexesOf = (store: SqliteTrackStore) =>
+    (
+      store['db']
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'positions' ORDER BY name")
+        .all() as { name: string }[]
+    ).map(({ name }) => name)
+
   it.each([
     ['the narrower index', 'CREATE INDEX idx_context_timestamp ON positions(context, timestamp);'],
     ['no index by vessel and time', ''],
-  ])('builds the indexes on a database an older version wrote with %s', async (_, index) => {
+  ])('rewrites a database an older version wrote with %s', async (_, index) => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
     try {
       const file = join(dir, 'tracks.db')
       const older = new DatabaseSync(file)
       older.exec(`
-        CREATE TABLE positions (context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);
+        PRAGMA journal_mode = WAL;
+        ${OLD_POSITIONS}
         CREATE INDEX idx_s2cell ON positions(s2cell);
         ${index}
       `)
-      // Enough rows for the old index to fill pages the new one can take over.
       const insert = older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)')
       older.exec('BEGIN')
       for (let i = 0; i < 5000; i++) {
@@ -2575,19 +2680,309 @@ describe('the position index', () => {
       older.close()
 
       const store = new SqliteTrackStore({ file }, debug)
-      const indexes = store['db']
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'positions' ORDER BY name")
-        .all() as { name: string }[]
-      expect(indexes.map(({ name }) => name)).toEqual(['idx_context_s2cell', 'idx_context_time_position', 'idx_s2cell'])
-      // Next to positions, empty until the first refinement.
-      expect(store['db'].prepare('SELECT count(*) AS n FROM significant').get()).toEqual({ n: 0 })
-      // Built over the old index's pages, so none of them are left over, and
-      // the write-ahead log the build went through is emptied.
-      expect(store['db'].prepare('PRAGMA freelist_count').get()).toEqual({ freelist_count: 0 })
-      expect(statSync(`${file}-wal`).size).toBe(0)
+      const db = store['db']
+      expect(indexesOf(store)).toEqual(['idx_context_s2cell', 'idx_context_time_position', 'idx_s2cell'])
+      expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      expect(db.prepare('SELECT context FROM contexts').all()).toEqual([{ context: ctx }])
+      // A new file, built whole: nothing left over, and nothing beside it.
+      expect(db.prepare('PRAGMA freelist_count').get()).toEqual({ freelist_count: 0 })
+      expect(existsSync(`${file}.migrating`)).toBe(false)
       const track = await store.getTimed(ctx)
       expect(track).toHaveLength(5000)
       expect(track[0]).toEqual({ position: [60.1, 24.9], timestamp: t0 })
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  /** Rewrite a store's file as a version before contexts had ids wrote it. */
+  const asOlder = (file: string): void => {
+    const db = new DatabaseSync(file)
+    db.exec(`
+      BEGIN;
+      CREATE TABLE named_positions (context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);
+      INSERT INTO named_positions (rowid, context, timestamp, lat, lon, s2cell)
+        SELECT p.rowid, c.context, p.timestamp, p.lat, p.lon, p.s2cell FROM positions p JOIN contexts c ON c.id = p.context_id;
+      DROP TABLE positions;
+      ALTER TABLE named_positions RENAME TO positions;
+      CREATE INDEX idx_s2cell ON positions(s2cell);
+      CREATE INDEX idx_context_time_position ON positions(context, timestamp, lat, lon);
+      CREATE INDEX idx_context_s2cell ON positions(context, s2cell);
+      CREATE TABLE named_significant (position INTEGER NOT NULL, context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, level INTEGER NOT NULL);
+      INSERT INTO named_significant SELECT s.position, c.context, s.timestamp, s.lat, s.lon, s.level FROM significant s JOIN contexts c ON c.id = s.context_id;
+      DROP TABLE significant;
+      ALTER TABLE named_significant RENAME TO significant;
+      CREATE INDEX idx_significant_time ON significant(context, level, timestamp);
+      CREATE TABLE named_visits (context TEXT NOT NULL, lat_cell INTEGER NOT NULL, lon_cell INTEGER NOT NULL, hour INTEGER NOT NULL, PRIMARY KEY (context, lat_cell, lon_cell, hour)) WITHOUT ROWID;
+      INSERT INTO named_visits SELECT c.context, v.lat_cell, v.lon_cell, v.hour FROM level_visits v JOIN contexts c ON c.id = v.context_id;
+      DROP TABLE level_visits;
+      ALTER TABLE named_visits RENAME TO level_visits;
+      CREATE INDEX idx_level_visits_hour ON level_visits(context, hour);
+      CREATE TABLE named_binned (bin_id INTEGER NOT NULL, context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);
+      INSERT INTO named_binned SELECT b.bin_id, c.context, b.timestamp, b.lat, b.lon, b.s2cell FROM binned_positions b JOIN contexts c ON c.id = b.context_id;
+      DROP TABLE binned_positions;
+      ALTER TABLE named_binned RENAME TO binned_positions;
+      CREATE INDEX idx_binned_positions ON binned_positions(bin_id);
+      DROP TABLE contexts;
+      PRAGMA user_version = 0;
+      COMMIT;
+      VACUUM;
+    `)
+    db.close()
+  }
+
+  it('carries every table of a database an older version wrote over, and reads it as before', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const MINUTE = 60_000
+      const DAY_MS = 24 * 60 * MINUTE
+      const day0 = Date.UTC(2026, 5, 1)
+      const box: GeoBounds = { sw: [59.99, 23.99], ne: [60.01, 24.03] }
+      const reads = async (store: SqliteTrackStore) => ({
+        whole: await store.getTimed(ctx),
+        byLevel: await store.getTimed(ctx, undefined, undefined, 20),
+        boxByLevel: await store.getFilteredTimedTracks(
+          { bbox: box, radius: null, intersects: true, contexts: [ctx], clip: true },
+          undefined,
+          undefined,
+          { tolerance: 20 },
+        ),
+        every: await store.getFilteredTimedTracks({ bbox: box, radius: null, intersects: true, clip: true }),
+        summaries: store.summarize(undefined),
+        bin: store.binEntries(),
+        name: store.nameFor(other),
+        imported: store.getImport('imported:a'),
+        history: store.historyImport(ctx),
+        // State with nothing to read it by but the tables themselves.
+        detail: store['db'].prepare('SELECT context, span_start, span_end FROM detail_spans ORDER BY id').all(),
+        simplified: store['db'].prepare('SELECT context, through, tolerance FROM simplify_frontier').all(),
+      })
+      const config = { file, resolution: 60_000, storageTolerance: 0.5 }
+      const first = new SqliteTrackStore(config, debug)
+      // One commit: written to a file one by one, this many positions take a Windows runner most of a minute.
+      first.transaction(() => {
+        // At anchor, finer than the store's resolution.
+        for (let i = 0; i < 3 * 3600; i++) {
+          first.newPosition(ctx, [60 + Math.sin(i / 400) * 0.002, 24 + i * 0.000002], day0 + i * 1000, 1000)
+        }
+        for (let i = 0; i < 600; i++) {
+          first.newPosition(other, [60.005, 24.01 + i * 0.00001], day0 + i * 1000)
+        }
+        first.recordName(other, 'Ariadne', day0)
+        first.storeImport({
+          id: 'imported:a',
+          context: other,
+          name: 'Passage',
+          metadata: { colour: 'red' },
+          segments: [[{ position: [60, 24], timestamp: day0 }]],
+        })
+        first.saveHistoryImport({ context: ctx, startedAt: day0 + DAY_MS, filled: 60 }, [
+          Array.from({ length: 60 }, (_, i) => ({
+            position: [59.9, 24 + i * 0.0001],
+            timestamp: day0 - DAY_MS + i * MINUTE,
+          })),
+        ])
+      })
+      const otherWhole = await first.getTimed(other)
+      first.transaction(() => first.binRecorded(other, day0 + 300_000, day0 + 599_000, day0 + DAY_MS, false))
+      for (let more = true; more;) {
+        first.transaction(() => {
+          more = first.refineLevels(day0 + 3 * DAY_MS)
+        })
+      }
+      const before = await reads(first)
+      // Each read holds something for the rewrite to keep.
+      expect(before.byLevel.length).toBeLessThan(before.whole.length / 10)
+      expect(before.boxByLevel[ctx]?.length).toBeGreaterThan(0)
+      expect(Object.keys(before.every).sort()).toEqual([ctx, other].sort())
+      expect(before.bin).toHaveLength(1)
+      expect(before.name).toBe('Ariadne')
+      expect(before.imported?.name).toBe('Passage')
+      expect(before.history?.filled).toBe(60)
+      expect(before.detail.length).toBeGreaterThan(0)
+      expect(before.simplified.length).toBeGreaterThan(0)
+      first.close()
+      asOlder(file)
+      const size = statSync(file).size
+
+      const store = new SqliteTrackStore(config, debug)
+      expect(await reads(store)).toEqual(before)
+      expect(store['db'].prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      // A level refers to its position by row, which the rewrite keeps.
+      expect(
+        store['db']
+          .prepare(
+            `SELECT count(*) AS n FROM significant s LEFT JOIN positions p ON p.rowid = s.position
+             WHERE p.rowid IS NULL OR s.context_id IS NOT p.context_id OR s.timestamp IS NOT p.timestamp`,
+          )
+          .get(),
+      ).toEqual({ n: 0 })
+      expect(store.restoreFromBin(before.bin[0]!.id)).toBe('restored')
+      expect(await store.getTimed(other)).toEqual(otherWhole)
+      store.close()
+      expect(statSync(file).size).toBeLessThan(size)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // What a crash leaves: rows committed to the log, not yet written back.
+  it('rewrites the rows an older database still holds in its write-ahead log', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const crashed = join(dir, 'crashed.db')
+      const older = new DatabaseSync(file)
+      older.exec(`PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; ${OLD_POSITIONS}`)
+      const insert = older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)')
+      for (let i = 0; i < 100; i++) {
+        insert.run(ctx, t0 + i * 1000, 60.1, 24.9)
+      }
+      // Copied while still open, as a power cut would leave them.
+      for (const suffix of ['', '-wal']) {
+        writeFileSync(`${crashed}${suffix}`, readFileSync(`${file}${suffix}`))
+      }
+      older.close()
+      expect(statSync(`${crashed}-wal`).size).toBeGreaterThan(0)
+
+      const store = new SqliteTrackStore({ file: crashed }, debug)
+      expect(await store.getTimed(ctx)).toHaveLength(100)
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // Out of WAL mode already, as a rewrite that failed leaves it, the file takes no lock to switch.
+  it('leaves an older database out of WAL mode as it is while another connection reads it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const reader = new DatabaseSync(file)
+      reader.exec(OLD_POSITIONS)
+      reader.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+      reader.exec('BEGIN')
+      reader.prepare('SELECT COUNT(*) FROM positions').get()
+
+      expect(() => new SqliteTrackStore({ file }, debug)).toThrow(/another connection holds it open/)
+      expect(existsSync(`${file}.migrating`)).toBe(false)
+      reader.exec('COMMIT')
+      reader.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  // Left empty by another tool's TRUNCATE or PERSIST journal, or a crash, it
+  // is no write: SQLite leaves it there and passes over it.
+  it('rewrites an older database beside a journal left empty', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const older = new DatabaseSync(file)
+      older.exec(OLD_POSITIONS)
+      older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+      older.close()
+      writeFileSync(`${file}-journal`, '')
+
+      const store = new SqliteTrackStore({ file }, debug)
+      expect(await store.getTimed(ctx)).toHaveLength(1)
+      expect(store['db'].prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('gives the rewritten file the mode the old one had', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const older = new DatabaseSync(file)
+      older.exec(OLD_POSITIONS)
+      older.close()
+      // A mode no umask gives a new file.
+      chmodSync(file, 0o604)
+
+      new SqliteTrackStore({ file }, debug).close()
+      expect(statSync(file).mode & 0o777).toBe(0o604)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // A link to a file elsewhere, on a disk of its own say, which must stay a link.
+  it.skipIf(process.platform === 'win32')('rewrites the file a link to an older database points to', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const target = join(dir, 'elsewhere.db')
+      const file = join(dir, 'tracks.db')
+      const older = new DatabaseSync(target)
+      older.exec(OLD_POSITIONS)
+      older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+      older.close()
+      symlinkSync(target, file)
+
+      const store = new SqliteTrackStore({ file }, debug)
+      expect(await store.getTimed(ctx)).toHaveLength(1)
+      store.close()
+      expect(lstatSync(file).isSymbolicLink()).toBe(true)
+      const rewritten = new DatabaseSync(target)
+      expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      rewritten.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // A new database set up only in part before a crash, its version not yet written.
+  it('opens a database of this version whose version was never written', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const first = new SqliteTrackStore({ file }, debug)
+      first.newPosition(ctx, [60.1, 24.9], t0)
+      first['db'].exec('PRAGMA user_version = 0')
+      first.close()
+
+      const store = new SqliteTrackStore({ file }, debug)
+      expect(await store.getTimed(ctx)).toHaveLength(1)
+      expect(store['db'].prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a database a newer version wrote', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const newer = new DatabaseSync(file)
+      newer.exec('PRAGMA user_version = 2')
+      newer.close()
+
+      expect(() => new SqliteTrackStore({ file }, debug)).toThrow(/written by a newer version/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('builds the rewrite again where a crash left it half built', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const older = new DatabaseSync(file)
+      older.exec(OLD_POSITIONS)
+      older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+      older.close()
+      writeFileSync(`${file}.migrating`, 'not a database')
+
+      const store = new SqliteTrackStore({ file }, debug)
+      expect(await store.getTimed(ctx)).toEqual([{ position: [60.1, 24.9], timestamp: t0 }])
+      expect(existsSync(`${file}.migrating`)).toBe(false)
       store.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -2618,27 +3013,27 @@ describe('the position index', () => {
     }
   })
 
-  // Waits out the store's 5 s busy timeout before the checkpoint gives up.
-  it('reports a write-ahead log another connection keeps from being truncated', () => {
+  // Waits out the tries to take it out of WAL mode, about 5 s, before giving up.
+  it('leaves a database an older version wrote as it is while another connection holds it', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
     try {
       const file = join(dir, 'tracks.db')
       const reader = new DatabaseSync(file)
-      reader.exec(`
-        PRAGMA journal_mode = WAL;
-        CREATE TABLE positions (context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);
-        CREATE INDEX idx_context_timestamp ON positions(context, timestamp);
-      `)
+      reader.exec(`PRAGMA journal_mode = WAL; ${OLD_POSITIONS}`)
       reader.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
       // A read in progress, as a backup or an sqlite3 shell can hold one.
       reader.exec('BEGIN')
       reader.prepare('SELECT COUNT(*) FROM positions').get()
 
-      const log = Object.assign(vi.fn(), { enabled: false })
-      const store = new SqliteTrackStore({ file }, log)
-      expect(log).toHaveBeenCalledWith(expect.stringContaining('kept the write-ahead log from being truncated'))
+      expect(() => new SqliteTrackStore({ file }, debug)).toThrow(/another connection holds it open/)
+      expect(existsSync(`${file}.migrating`)).toBe(false)
       reader.exec('COMMIT')
+      expect(reader.prepare('SELECT context FROM positions').all()).toEqual([{ context: ctx }])
       reader.close()
+
+      // Rewritten once it is free.
+      const store = new SqliteTrackStore({ file }, debug)
+      expect(await store.getTimed(ctx)).toHaveLength(1)
       store.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })

@@ -45,6 +45,17 @@ rarely what anybody wants. Space freed by removing positions is reused for new o
 the file's growth, but the file never shrinks on its own: only an SQLite `VACUUM` returns that
 space to the file system.
 
+Each position names its vessel by a number, which a table in the file turns back into the vessel,
+rather than in full: the file takes about half the space an older version's did. The first start
+after updating from such a version rewrites `tracks.db` once, as a new file beside it that then
+replaces it. That takes about 8 seconds for two million positions on a Raspberry Pi 5, while the
+plugin waits, and needs room on the disk for the new file, about half the old one, and in the
+temporary directory for sorting its largest index, about an eighth of the old file. A program that
+holds the file open when the plugin starts, an `sqlite3` shell say, keeps it from being rewritten:
+the plugin then does not start, says why, and tries again at its next start. What a program writes
+to the file while it is being rewritten is lost. An older version cannot read the rewritten file;
+to go back to one, restore a backup of `tracks.db` taken before updating.
+
 ### Keeping tracks for years
 
 The own vessel's track is kept here indefinitely. For a track recorded before Signal K, or while

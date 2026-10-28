@@ -1,4 +1,4 @@
-import { rmSync, writeFileSync } from 'node:fs'
+import { existsSync, rmSync, writeFileSync } from 'node:fs'
 import { get } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
@@ -1032,6 +1032,15 @@ describe('DELETE /plugins/tracks/database', () => {
     h.emit(SELF_CONTEXT, [60.3, 24.7])
     const after = await request(h.app).get(`${API}/self/track`).expect(200)
     expect(after.body.coordinates).toEqual([[[24.7, 60.3]]])
+  })
+
+  it('deletes a rewrite of the database a crash left half built', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    writeFileSync(join(h.dataDir, 'tracks.db.migrating'), 'half built')
+
+    await request(h.app).delete(DELETE_URL).expect(200)
+
+    expect(existsSync(join(h.dataDir, 'tracks.db.migrating'))).toBe(false)
   })
 
   it('answers 409 to a second delete while the first waits for the store to close', async () => {
