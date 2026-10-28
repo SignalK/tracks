@@ -521,6 +521,16 @@ describe('significance levels', () => {
     store.close()
   })
 
+  it('lets a vessel stop waiting once the recycle bin holds every position of it', () => {
+    const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5 }, debug)
+    seedHour(store, day0 + 60 * MINUTE)
+    store.refineLevels(day0 + DAY + 3 * 60 * MINUTE)
+    expect(store['refineWaiting'].has(ctx)).toBe(true)
+    store.binRecorded(ctx, undefined, day0 + DAY, day0 + DAY, false)
+    expect(store['refineWaiting'].has(ctx)).toBe(false)
+    store.close()
+  })
+
   it('goes over the vessels again when a cutoff moved while the pass went on', async () => {
     const store = new SqliteTrackStore({ file: ':memory:', storageTolerance: 0.5, refineBudget: 500 }, debug)
     const first = 'vessels.a' as Context

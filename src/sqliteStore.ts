@@ -3151,6 +3151,11 @@ export class SqliteTrackStore implements TrackStore {
     // between are empty now, and their significant positions go with them.
     if (moved > 0) {
       this.invalidateLevels(context, lower, to)
+      // One the bin took every position of waits on no day, and no pass
+      // comes to it to say so.
+      if (!this.knows(context)) {
+        this.refineWaiting.delete(context)
+      }
     }
     return { id, known }
   }
