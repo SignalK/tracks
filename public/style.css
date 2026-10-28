@@ -103,6 +103,11 @@ h2 {
   margin: 0;
 }
 
+/* `display: grid` would otherwise show it while hidden. */
+#import-tracks[hidden] {
+  display: none;
+}
+
 #bin-status,
 #import-status,
 #history-status,

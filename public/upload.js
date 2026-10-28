@@ -127,6 +127,36 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   return [...tracks.values()]
 }
 
+/** Bytes at each end of the file its fingerprint reads. */
+const FINGERPRINT_BYTES = 64 * 1024
+
+/** cyrb53, a fast 53-bit string hash: enough to tell two files apart by chance, not against intent. */
+function hash53(bytes) {
+  let h1 = 0xdeadbeef
+  let h2 = 0x41c6ce57
+  for (const byte of bytes) {
+    h1 = Math.imul(h1 ^ byte, 2654435761)
+    h2 = Math.imul(h2 ^ byte, 1597334677)
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36)
+}
+
+/**
+ * What tells `file` from another of its name and size, so that an upload
+ * broken off goes on only with the file it began with: its time of change,
+ * and a hash of its first and last bytes. Not a digest of the whole file,
+ * which would mean reading a gigabyte before every resume; and not
+ * SubtleCrypto, which a page served over plain http, as most boats serve
+ * it, does not have.
+ */
+export async function fingerprintOf(file) {
+  const head = new Uint8Array(await file.slice(0, FINGERPRINT_BYTES).arrayBuffer())
+  const tail = new Uint8Array(await file.slice(Math.max(0, file.size - FINGERPRINT_BYTES)).arrayBuffer())
+  return `${file.lastModified ?? 0}:${hash53(head)}:${hash53(tail)}`
+}
+
 /** The answer's body, or what it says in place of one. */
 async function bodyOf(response) {
   try {
@@ -136,6 +166,31 @@ async function bodyOf(response) {
   }
 }
 
+/** Tries at ending an upload, a retry delay apart: a slice still being written holds it. */
+const STOP_ATTEMPTS = 5
+
+/**
+ * End the upload on the server, and throw the AbortError that says so, or
+ * the error that says the server was not told: it then keeps the upload
+ * until IDLE_TIMEOUT_MS has passed without a slice.
+ */
+async function stopUpload(call, url, onStatus, wait) {
+  let ended = false
+  for (let attempt = 0; attempt < STOP_ATTEMPTS && !ended; attempt++) {
+    if (attempt > 0) await wait(RETRY_DELAY_MS)
+    const response = await call(url, { method: 'DELETE' }).catch(() => undefined)
+    const upload = response && (await bodyOf(response)).upload
+    if (upload) onStatus(upload)
+    ended = response?.ok === true || (upload !== undefined && upload.state !== 'receiving')
+  }
+  if (!ended) {
+    throw new Error(
+      'Stopped sending, but the server could not be told. It ends the import by itself after 15 minutes without a slice.',
+    )
+  }
+  throw new DOMException('The import was stopped', 'AbortError')
+}
+
 /** Refusals no second try changes. */
 const FINAL = new Set([400, 401, 403, 413, 415, 422])
 
@@ -143,8 +198,9 @@ const FINAL = new Set([400, 401, 403, 413, 415, 422])
  * Send `file` into the own vessel's recording, resolving to the finished
  * upload's status; `onStatus` hears each one on the way. An upload of the
  * same file with the same choices that a dropped connection or a restart
- * broke off goes on from where the server got to. Aborting `signal` ends the
- * upload on the server once the slice in flight is written.
+ * broke off goes on from where the server got to. Aborting `signal` gives
+ * up the slice on its way and ends the upload on the server; what the server
+ * wrote stays.
  */
 export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, request = fetch, sleep }) {
   const wait = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
@@ -154,11 +210,13 @@ export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, req
     return response.ok ? (await bodyOf(response)).upload : undefined
   }
 
+  const fingerprint = await fingerprintOf(file)
   let status = await current().catch(() => undefined)
   const same =
     status?.state === 'receiving' &&
     status.filename === file.name &&
     status.size === file.size &&
+    status.fingerprint === fingerprint &&
     status.onOverlap === onOverlap &&
     status.tracks.length === tracks.length &&
     status.tracks.every((name) => tracks.includes(name))
@@ -166,7 +224,7 @@ export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, req
     const response = await call(UPLOAD_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: file.name, size: file.size, tracks, onOverlap }),
+      body: JSON.stringify({ filename: file.name, size: file.size, tracks, onOverlap, fingerprint }),
     })
     const body = await bodyOf(response)
     if (!response.ok || !body.upload) {
@@ -184,10 +242,7 @@ export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, req
   }
   while (status.state === 'receiving') {
     if (signal?.aborted) {
-      const response = await call(url, { method: 'DELETE' }).catch(() => undefined)
-      const body = response?.ok ? await bodyOf(response) : undefined
-      if (body?.upload) onStatus(body.upload)
-      throw new DOMException('The import was stopped', 'AbortError')
+      await stopUpload(call, url, onStatus, wait)
     }
     const offset = status.received
     let response
@@ -196,8 +251,12 @@ export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, req
         method: 'PUT',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: file.slice(offset, offset + SLICE_BYTES),
+        // Stop does not wait for a slice that is stuck on its way: the
+        // server goes on from what it wrote either way.
+        signal,
       })
     } catch {
+      if (signal?.aborted) continue
       await retry(new Error('Could not reach the server.'))
       // The slice may have arrived though its answer did not.
       const now = await current().catch(() => undefined)

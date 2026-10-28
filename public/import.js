@@ -153,7 +153,7 @@ export function start() {
   let stopping
   stop.addEventListener('click', () => {
     stopping?.abort()
-    show('Stopping once the slice on its way is written…')
+    show('Stopping…')
   })
 
   async function uploadOwn(file) {

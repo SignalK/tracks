@@ -138,7 +138,8 @@ file again fills in the rest.
 A slice that does not get through, on a boat's Wi-Fi say, is sent again from where the server got
 to. A restart of the plugin breaks the import off only until the page sends again: the server goes
 on from the last point it saved. Reloading the page and importing the same file with the same
-choices goes on where it stopped. One file is imported at a time; one nobody has sent to for 15
+choices goes on where it stopped; another file of the same name and size starts anew, told apart
+by its time of change and its first and last bytes. One file is imported at a time; one nobody has sent to for 15
 minutes gives way to the next.
 
 A file of another vessel stays at 25 MiB, since an imported track is read whole.
@@ -147,8 +148,10 @@ A client does the same through these routes, which need write access:
 
 - `POST /plugins/tracks/imports/upload` with a JSON body of `filename` and `size`, the file's
   name and size in bytes, `tracks`, the names of the tracks to import (`""` for a track without
-  one, the name it has before its first `<trkseg>`), and `onOverlap`, `keep` or `replace`. It
-  answers `201` with the `upload`.
+  one, the name it has before its first `<trkseg>`), `onOverlap`, `keep` or `replace`, and
+  optionally a `fingerprint` of up to 256 characters that tells the file from another of its name
+  and size, kept to decide whether an upload broken off is the same file. It answers `201` with
+  the `upload`.
 - `PUT /plugins/tracks/imports/upload/<id>?offset=<byte>` with the next slice of at most 8 MiB as
   `application/octet-stream`, answered once its points are written. A slice that does not start at
   the upload's `received` is answered `409`, with the upload, to go on from there. The slice that
@@ -156,7 +159,7 @@ A client does the same through these routes, which need write access:
 - `GET /plugins/tracks/imports/upload` returns the last upload, and
   `DELETE /plugins/tracks/imports/upload/<id>` stops it.
 
-An `upload` carries its `id`, `filename`, `size`, `tracks`, `onOverlap`, how many bytes it has
+An `upload` carries its `id`, `filename`, `size`, `tracks`, `onOverlap`, `fingerprint`, how many bytes it has
 `received`, its `state` (`receiving`, `finished`, `aborted` or `failed`, with an `error`), and
 how many points it `imported`, left out as `overlapping`, and left out as `untimed`.
 

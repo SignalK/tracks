@@ -7,7 +7,7 @@ import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { imported, progress, start as startImport, trackChoice, uploaded } from '../public/import.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
-import { scanGpx, SLICE_BYTES, uploadGpx } from '../public/upload.js'
+import { fingerprintOf, scanGpx, SLICE_BYTES, uploadGpx } from '../public/upload.js'
 import { GpxReader } from './gpxUpload.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
 import { confirmed, start as startDanger } from '../public/danger.js'
@@ -1439,7 +1439,7 @@ describe('a GPX file uploaded in slices', () => {
     expect([...read.parts.keys()]).toEqual([1])
   })
 
-  type Call = { url: string; method: string; offset?: number; size?: number }
+  type Call = { url: string; method: string; offset?: number; size?: number; signal?: AbortSignal | null | undefined }
 
   /**
    * A server taking an upload: `answer` may stand in for its answer to a
@@ -1447,7 +1447,11 @@ describe('a GPX file uploaded in slices', () => {
    */
   const server = (
     size: number,
-    over: { current?: object; answer?: (call: Call, take: () => Response) => Response | Promise<Response> } = {},
+    over: {
+      current?: object
+      answer?: (call: Call, take: () => Response) => Response | Promise<Response>
+      stop?: () => Response
+    } = {},
   ) => {
     const calls: Call[] = []
     let upload = {
@@ -1463,7 +1467,7 @@ describe('a GPX file uploaded in slices', () => {
     const request = vi.fn(async (url: string, init: RequestInit = {}) => {
       const method = init.method ?? 'GET'
       const offset = /offset=(\d+)/.exec(url)?.[1]
-      const call: Call = { url, method }
+      const call: Call = { url, method, signal: init.signal }
       if (offset !== undefined) {
         call.offset = Number(offset)
         call.size = (init.body as Blob).size
@@ -1471,6 +1475,7 @@ describe('a GPX file uploaded in slices', () => {
       calls.push(call)
       if (method === 'GET') return json({ upload: over.current ?? null })
       if (method === 'POST') return json({ upload }, 201)
+      if (method === 'DELETE' && over.stop) return over.stop()
       if (method === 'DELETE') return json({ upload: (upload = { ...upload, state: 'aborted' }) })
       const take = () => {
         const received = upload.received + call.size!
@@ -1507,6 +1512,7 @@ describe('a GPX file uploaded in slices', () => {
       filename: 'f.gpx',
       tracks: ['Own'],
       onOverlap: 'keep',
+      fingerprint: await fingerprintOf(blob(size)),
     }
     const { calls, request } = server(size, {
       current,
@@ -1517,6 +1523,25 @@ describe('a GPX file uploaded in slices', () => {
       'GET ',
       `PUT /u0?offset=${SLICE_BYTES}`,
     ])
+  })
+
+  it('starts anew with another file of the same name and size', async () => {
+    const size = SLICE_BYTES + 5
+    const other = Object.assign(new Blob([new Uint8Array(size).fill(1)]), { name: 'f.gpx' })
+    const current = {
+      id: 'u0',
+      state: 'receiving',
+      received: SLICE_BYTES,
+      size,
+      filename: 'f.gpx',
+      tracks: ['Own'],
+      onOverlap: 'keep',
+      fingerprint: await fingerprintOf(blob(size)),
+    }
+    const { calls, request } = server(size, { current })
+    await uploadGpx({ ...options, file: other, request })
+    expect(calls.map(({ method }) => method).slice(0, 3)).toEqual(['GET', 'POST', 'PUT'])
+    expect(calls[2]).toMatchObject({ offset: 0 })
   })
 
   it('sends a slice again after a dropped connection, from where the server got to', async () => {
@@ -1553,6 +1578,39 @@ describe('a GPX file uploaded in slices', () => {
       uploadGpx({ ...options, file: blob(2 * SLICE_BYTES), request, signal: controller.signal }),
     ).rejects.toMatchObject({ name: 'AbortError' })
     expect(calls.map(({ method }) => method)).toEqual(['GET', 'POST', 'PUT', 'DELETE'])
+  })
+
+  it('gives up a slice stuck on its way when stopped', async () => {
+    const controller = new AbortController()
+    const { calls, request } = server(10, {
+      answer: ({ signal }) => {
+        setTimeout(() => controller.abort(), 0)
+        return new Promise((_, reject) => {
+          signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        })
+      },
+    })
+    await expect(uploadGpx({ ...options, file: blob(10), request, signal: controller.signal })).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+    expect(calls.map(({ method }) => method)).toEqual(['GET', 'POST', 'PUT', 'DELETE'])
+  })
+
+  it('says so when the server could not be told the upload stopped', async () => {
+    const controller = new AbortController()
+    const { calls, request } = server(2 * SLICE_BYTES, {
+      answer: (_call, take) => {
+        controller.abort()
+        return take()
+      },
+      stop: () => {
+        throw new TypeError('Failed to fetch')
+      },
+    })
+    await expect(
+      uploadGpx({ ...options, file: blob(2 * SLICE_BYTES), request, signal: controller.signal }),
+    ).rejects.toThrow('the server could not be told')
+    expect(calls.filter(({ method }) => method === 'DELETE')).toHaveLength(5)
   })
 })
 
