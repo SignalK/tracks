@@ -9,6 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -3327,18 +3328,28 @@ describe('the position index', () => {
         older.exec(OLD_POSITIONS)
         older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
         older.close()
+        // Asked for by another process: one in this process is answered
+        // from SQLite's own record of its locks, which closing a descriptor
+        // of the file would leave as it was while dropping the lock itself.
+        const tryWrite = `
+          const { DatabaseSync } = require('node:sqlite')
+          const writer = new DatabaseSync(process.argv[1])
+          writer.exec('PRAGMA busy_timeout = 0')
+          try {
+            writer.exec('BEGIN IMMEDIATE')
+            writer.exec('ROLLBACK')
+            console.log(0)
+          } catch (error) {
+            console.log(error.errcode & 0xff)
+          }
+          writer.close()
+        `
         const refused: number[] = []
         rewriting.beforeRename = () => {
           rewriting.beforeRename = undefined
-          const writer = new DatabaseSync(file)
-          try {
-            writer.exec('PRAGMA busy_timeout = 0')
-            writer.exec('BEGIN IMMEDIATE')
-          } catch (error) {
-            refused.push(((error as { errcode?: number }).errcode ?? 0) & 0xff)
-          } finally {
-            writer.close()
-          }
+          refused.push(
+            Number(execFileSync(process.execPath, ['--no-warnings', '-e', tryWrite, file], { encoding: 'utf8' })),
+          )
         }
         try {
           const store = new SqliteTrackStore({ file }, debug)

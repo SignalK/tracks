@@ -63,7 +63,9 @@ about an eighth of the old file. Close other programs that have the file open, a
 say, before updating. One that holds a lock on it when the plugin starts keeps it from being
 rewritten: the plugin then does not start, says why, and tries again at its next start. A write
 to the file while it is being rewritten either fails, as SQLite answers that the database is
-locked, or stops the rewrite the same way, and the old file stays as it was. On Linux and macOS,
+locked, or stops the rewrite the same way, and the old file stays as it was. On Windows, a
+program that opens the file, writes to it and closes it again in the instant before the new file
+replaces the old one loses that write. On Linux and macOS,
 one that holds no lock, as a shell left idle may, does not keep the file from being rewritten,
 and still has the old file open once the new one has replaced it: what it reads then is no longer
 the database, and a write from it can damage the new file, so close it before it writes anything.
