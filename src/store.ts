@@ -166,8 +166,9 @@ export interface TrackStore {
 
   /**
    * How many positions the read of `query` returns for each context, the
-   * one `getFilteredTimedTracks()` makes without a box: its window, at its
-   * tolerance, thinned to its resolution. Each is counted only up to
+   * one `getFilteredTimedTracks()` makes without a box, or for named
+   * contexts with a box but no `clip`: its window, at its tolerance,
+   * thinned to its resolution. Each is counted only up to
    * `limit`, for those of `contexts` the store holds, or every one. A store
    * that keeps no significance levels reads every position whatever the
    * tolerance, and counts them so. Optional: a caller without it cannot tell
