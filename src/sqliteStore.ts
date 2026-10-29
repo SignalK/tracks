@@ -832,16 +832,24 @@ function migrate(path: string, debug: Debug): void {
     // renames nothing over a file that is open, this connection's included,
     // and so refuses the rename while another program has it open.
     const lock = process.platform === 'win32' ? undefined : new DatabaseSync(file)
-    // Opened before the lock and closed after it, as for the probe above.
-    const header = openSync(file, 'r')
+    // Opened before the lock and closed after it, as for the probe above;
+    // without one, before the rename, which Windows refuses over a file this
+    // process has open too.
+    let header: number | undefined = openSync(file, 'r')
     try {
       if (lock) {
         lock.exec('PRAGMA busy_timeout = 0')
         lockExclusive(lock, file)
       }
+      const moved = changeCounter(header) !== changes
+      if (!lock) {
+        const fd = header
+        header = undefined
+        closeSync(fd)
+      }
       // A write by another program while this one read the file, which the
       // rename would lose, or whose log SQLite would replay into the new file.
-      if (changeCounter(header) !== changes || hotLog(`${file}-journal`) || hotLog(`${file}-wal`)) {
+      if (moved || hotLog(`${file}-journal`) || hotLog(`${file}-wal`)) {
         throw new Error(`${file} was written to while it was rewritten for this version`)
       }
       for (let attempt = 1; ; attempt++) {
@@ -861,7 +869,9 @@ function migrate(path: string, debug: Debug): void {
         lock.exec('ROLLBACK')
       }
       lock?.close()
-      closeSync(header)
+      if (header !== undefined) {
+        closeSync(header)
+      }
     }
   } catch (error) {
     // Up to half the old file, which on a full disk would keep it full.
