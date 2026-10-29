@@ -1020,8 +1020,8 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
     expect(streams).toHaveLength(1)
     expect(waits).toBeGreaterThan(1)
     expect(readAhead).toBe(0)
-    // Fewer than one a wait: they do not pile up.
-    expect(streams[0]!.listenerCount('drain')).toBeLessThan(waits)
+    // The route's one listener for the whole response; compression adds none to its stream.
+    expect(streams[0]!.listenerCount('drain')).toBe(1)
   })
 
   // The GPX and JSON routes share one read pipeline, so a window read by one
