@@ -8,10 +8,11 @@ install and needs no configuration to start recording.
 
 Requires Signal K server >= 2.33.0 for the v2 Track API; older servers get the v1 routes only.
 
-| Setting                               | Behaviour                                                                                                   |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Track resolution                      | Minimum spacing between recorded positions.                                                                 |
-| Days to keep other vessels' positions | Drops other vessels' positions older than this, even while a vessel stays in range. 0 keeps every position. |
+| Setting                               | Behaviour                                                                                                      |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Track resolution                      | Minimum spacing between recorded positions.                                                                    |
+| Record other vessels (AIS)            | On by default. Off records the own vessel only.                                                                |
+| Days to keep other vessels' positions | Drops other vessels' positions older than this, even while a vessel stays in range. 0 keeps them indefinitely. |
 
 The plugin's configuration page shows the current defaults, and is the authority on them.
 
@@ -44,6 +45,12 @@ puts hundreds of AIS targets past a receiver in a day, and keeping every one of 
 rarely what anybody wants. Space freed by removing positions is reused for new ones, which slows
 the file's growth, but the file never shrinks on its own: only an SQLite `VACUUM` returns that
 space to the file system.
+
+With **Record other vessels (AIS)** turned off, the plugin records the own vessel only: nothing
+more of another vessel is recorded, its name included, so a chart plotter that draws trails from
+this plugin, such as Freeboard, draws no new ones for AIS targets. What was recorded of them
+before stays until those days run out, or for good when they are set to 0. The webapp says that
+they are not being recorded. Another vessel's track can still be imported.
 
 ### Keeping tracks for years
 
