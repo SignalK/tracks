@@ -338,13 +338,19 @@ const errorDetail = (err: unknown): string => (err instanceof Error && err.stack
  * there, so that the two compare equal. Throws for one that cannot be
  * reached, such as a link into a disk not mounted, or past a directory the
  * server's user may not enter.
+ *
+ * With the system's own realpath, which follows links as SQLite's open
+ * does, and spells the file as the asynchronous one does. Node's
+ * `realpathSync` takes a `..` in a link's target before the links it
+ * passes, and so can name another file, and on Windows it keeps the short
+ * names the system's expands.
  */
 const followLinks = (file: string): string => {
   try {
-    return realpathSync(file)
+    return realpathSync.native(file)
   } catch (err) {
     if (lstatSync(file, { throwIfNoEntry: false }) !== undefined) throw err
-    return join(realpathSync(dirname(file)), basename(file))
+    return join(realpathSync.native(dirname(file)), basename(file))
   }
 }
 

@@ -1112,6 +1112,42 @@ describe('DELETE /plugins/tracks/database', () => {
     },
   )
 
+  // The system follows `d` before it takes the `..`, as SQLite does. Taken
+  // the other way round, the path names a file in `data` instead.
+  it.skipIf(process.platform === 'win32')(
+    'deletes the file a link reaches past a linked directory and `..`, not the one its path reads as',
+    async () => {
+      const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+      await h.stop()
+      const root = mkdtempSync(join(tmpdir(), 'sk-tracks-target-'))
+      try {
+        mkdirSync(join(root, 'disk', 'x', 'y'), { recursive: true })
+        mkdirSync(join(root, 'data'))
+        symlinkSync(join(root, 'disk', 'x', 'y'), join(root, 'data', 'd'))
+        const other = join(root, 'data', 'tracks.db')
+        writeFileSync(other, 'another file')
+        const target = join(root, 'disk', 'x', 'tracks.db')
+        renameSync(join(h.dataDir, 'tracks.db'), target)
+        // Not `join`, which would take the `..` away.
+        symlinkSync(`${join(root, 'data', 'd')}/../tracks.db`, join(h.dataDir, 'tracks.db'))
+        await h.restart()
+        await request(h.app).get(`${API}/self/track`).expect(200)
+
+        await request(h.app).delete(DELETE_URL).expect(200)
+
+        await request(h.app).get(`${API}/self/track`).expect(404)
+        expect(existsSync(other)).toBe(true)
+        h.emit(SELF_CONTEXT, [60.3, 24.7])
+        const after = await request(h.app).get(`${API}/self/track`).expect(200)
+        expect(after.body.coordinates).toEqual([[[24.7, 60.3]]])
+        expect(existsSync(`${target}-wal`)).toBe(true)
+      } finally {
+        await h.stop()
+        rmSync(root, { recursive: true, force: true })
+      }
+    },
+  )
+
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'deletes nothing, and records on, when the files a link points to may not be deleted',
     async () => {
