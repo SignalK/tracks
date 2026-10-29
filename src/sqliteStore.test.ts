@@ -3135,6 +3135,83 @@ describe('the position index', () => {
     }
   })
 
+  /**
+   * An older database at `target`, linked from `file`, left as a crash leaves
+   * it with a log beside the link: one position written back to the file, a
+   * hundred more only in the log. On Windows, SQLite keeps the log of a
+   * database opened through a link beside the link.
+   */
+  function crashedBehindLink(dir: string) {
+    const target = join(dir, 'elsewhere.db')
+    const file = join(dir, 'tracks.db')
+    const open = join(dir, 'open.db')
+    const older = new DatabaseSync(open)
+    older.exec(OLD_POSITIONS)
+    older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+    older.exec('PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0')
+    const insert = older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)')
+    for (let i = 1; i <= 100; i++) {
+      insert.run(ctx, t0 + i * 1000, 60.1, 24.9)
+    }
+    // Copied while still open, as a power cut would leave them.
+    writeFileSync(target, readFileSync(open))
+    writeFileSync(`${file}-wal`, readFileSync(`${open}-wal`))
+    older.close()
+    symlinkSync(target, file)
+    return { target, file }
+  }
+
+  // Where SQLite follows the link, the log beside it is not one it reads, so
+  // the rewrite cannot write it back: it stops instead.
+  it.skipIf(process.platform === 'win32')(
+    'leaves an older database as it is with Windows faked when a log is left beside the link to it',
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+      try {
+        const { target, file } = crashedBehindLink(dir)
+        Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+        try {
+          expect(() => new SqliteTrackStore({ file }, debug)).toThrow(/was written to while it was rewritten/)
+        } finally {
+          if (platform) Object.defineProperty(process, 'platform', platform)
+        }
+        expect(existsSync(`${target}.migrating`)).toBe(false)
+        const kept = new DatabaseSync(target)
+        expect(kept.prepare('PRAGMA user_version').get()).toEqual({ user_version: 0 })
+        kept.close()
+      } finally {
+        if (platform) Object.defineProperty(process, 'platform', platform)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  it.runIf(process.platform === 'win32')(
+    'rewrites the rows an older database holds in a log beside the link to it',
+    async (context) => {
+      const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+      try {
+        let file: string
+        try {
+          ;({ file } = crashedBehindLink(dir))
+        } catch (error) {
+          // Making a link needs extra rights on Windows.
+          if ((error as { code?: string }).code === 'EPERM') {
+            context.skip()
+          }
+          throw error
+        }
+        const store = new SqliteTrackStore({ file }, debug)
+        expect(await store.getTimed(ctx)).toHaveLength(101)
+        store.close()
+        expect(existsSync(`${file}-wal`)).toBe(false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+
   // Out of WAL mode already, as a rewrite that failed leaves it, the file takes no lock to switch.
   it('leaves an older database out of WAL mode as it is while another connection reads it', () => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
