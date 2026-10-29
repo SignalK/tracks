@@ -733,7 +733,9 @@ const LEAVE_WAL_WAIT_MS = 500
  * which writes a copy of the whole database to the temporary directory,
  * memory on many a Raspberry Pi. The old database is first taken out of WAL
  * mode, which writes back and removes its log, so no log is ever left beside
- * the new file to be replayed into it. That cannot be done while another
+ * the new file to be replayed into it. It is opened through the link where
+ * there is one, as the store opens it, so that on Windows, where the logs
+ * are beside the link, that log is the one written back. That cannot be done while another
  * connection holds it, which a few tries wait out; the store then does not
  * open. The new file replaces the old one under a lock on it, so that a write
  * another program began meanwhile stops the rewrite rather than being lost.
@@ -759,7 +761,11 @@ function migrate(path: string, debug: Debug): void {
   // The file's change counter as the lock found it, to tell a write that
   // came in while the rewrite read it.
   let changes: number | undefined
-  const old = new DatabaseSync(file)
+  // Through the link, as the store opens it. On Windows, SQLite names the
+  // logs after the path a database is opened by, link or not, so an older
+  // version's log is beside the link there; elsewhere SQLite follows the
+  // link itself.
+  const old = new DatabaseSync(path)
   try {
     old.exec('PRAGMA busy_timeout = 5000')
     const { user_version: version } = old.prepare('PRAGMA user_version').get() as { user_version: number }
@@ -840,6 +846,7 @@ function migrate(path: string, debug: Debug): void {
     // renames nothing over a file that is open, this connection's included,
     // and so refuses the rename while another program has it open.
     const lock = process.platform === 'win32' ? undefined : new DatabaseSync(file)
+    const logs = process.platform === 'win32' ? [...new Set([file, path])] : [file]
     // Opened before the lock and closed after it, as for the probe above;
     // without one, at each try and closed before the rename, which Windows
     // refuses over a file this process has open too.
@@ -862,8 +869,9 @@ function migrate(path: string, debug: Debug): void {
           }
           // A write by another program while this one read the file, which the
           // rename would lose, or whose log SQLite would replay into the new
-          // file.
-          if (moved || hotLog(`${file}-journal`) || hotLog(`${file}-wal`)) {
+          // file. On Windows beside the link too, for a program that opened the
+          // database through it.
+          if (moved || logs.some((base) => hotLog(`${base}-journal`) || hotLog(`${base}-wal`))) {
             throw new Error(`${file} was written to while it was rewritten for this version`)
           }
           renameSync(next, file)
