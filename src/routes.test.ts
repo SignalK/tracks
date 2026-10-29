@@ -1,6 +1,7 @@
-import { rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { get } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -1035,6 +1036,174 @@ describe('DELETE /plugins/tracks/database', () => {
     const after = await request(h.app).get(`${API}/self/track`).expect(200)
     expect(after.body.coordinates).toEqual([[[24.7, 60.3]]])
   })
+
+  /**
+   * Moves the harness's database to a directory of its own and leaves a link
+   * to it in the data directory, as a user does to keep it on another disk.
+   * `then` runs with the plugin started again on the link; the directory goes
+   * after the plugin has stopped.
+   */
+  async function linkedElsewhere(h: TestHarness, then: (target: string, elsewhere: string) => Promise<void>) {
+    await h.stop()
+    const elsewhere = mkdtempSync(join(tmpdir(), 'sk-tracks-target-'))
+    try {
+      const target = join(elsewhere, 'tracks.db')
+      renameSync(join(h.dataDir, 'tracks.db'), target)
+      symlinkSync(target, join(h.dataDir, 'tracks.db'))
+      await h.restart()
+      await then(target, elsewhere)
+    } finally {
+      await h.stop()
+      rmSync(elsewhere, { recursive: true, force: true })
+    }
+  }
+
+  it.skipIf(process.platform === 'win32')(
+    'deletes the file a link to the database points to, and keeps the link',
+    async () => {
+      const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+      await linkedElsewhere(h, async (target) => {
+        expect(existsSync(`${target}-wal`)).toBe(true)
+        // Where SQLite on Windows keeps them, which it does not read here.
+        writeFileSync(join(h.dataDir, 'tracks.db-wal'), 'beside the link')
+
+        await request(h.app).delete(DELETE_URL).expect(200)
+
+        await request(h.app).get(`${API}/self/track`).expect(404)
+        expect(lstatSync(join(h.dataDir, 'tracks.db')).isSymbolicLink()).toBe(true)
+        // The new database is created where the link points.
+        h.emit(SELF_CONTEXT, [60.3, 24.7])
+        const after = await request(h.app).get(`${API}/self/track`).expect(200)
+        expect(after.body.coordinates).toEqual([[[24.7, 60.3]]])
+        expect(existsSync(`${target}-wal`)).toBe(true)
+        expect(existsSync(join(h.dataDir, 'tracks.db-wal'))).toBe(false)
+      })
+    },
+  )
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'deletes nothing, and records on, when the files a link points to may not be deleted',
+    async () => {
+      const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+      await linkedElsewhere(h, async (target, elsewhere) => {
+        chmodSync(elsewhere, 0o555)
+        try {
+          const res = await request(h.app).delete(DELETE_URL).expect(500)
+
+          expect(res.body.message).toBe('Could not delete the track database')
+          expect(h.errors.flat().join('\n')).toContain('EACCES')
+          expect(existsSync(target)).toBe(true)
+          expect(lstatSync(join(h.dataDir, 'tracks.db')).isSymbolicLink()).toBe(true)
+          h.emit(SELF_CONTEXT, [60.3, 24.7])
+          const kept = await request(h.app).get(`${API}/self/track`).expect(200)
+          expect(kept.body.coordinates).toEqual([
+            [
+              [24.9, 60.1],
+              [24.7, 60.3],
+            ],
+          ])
+        } finally {
+          chmodSync(elsewhere, 0o755)
+        }
+      })
+    },
+  )
+
+  const UNREACHABLE =
+    'The track database, or the file a link to it points to, cannot be reached, so nothing was deleted. The server log says why.'
+
+  it.skipIf(process.platform === 'win32')(
+    'deletes nothing when the database is a link into a directory that is not there',
+    async () => {
+      const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+      await h.stop()
+      for (const suffix of ['', '-wal', '-shm']) rmSync(join(h.dataDir, `tracks.db${suffix}`), { force: true })
+      // Such as a disk not mounted, where the database may come back.
+      symlinkSync(join(h.dataDir, 'gone', 'tracks.db'), join(h.dataDir, 'tracks.db'))
+      await h.restart()
+      expect(h.store()).toBeUndefined()
+
+      const res = await request(h.app).delete(DELETE_URL).expect(409)
+
+      expect(res.body.message).toBe(UNREACHABLE)
+      expect(h.errors.flat().join('\n')).toContain('ENOENT')
+      expect(lstatSync(join(h.dataDir, 'tracks.db')).isSymbolicLink()).toBe(true)
+    },
+  )
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'deletes nothing, and records on, when the file a link points to cannot be reached',
+    async () => {
+      const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+      await linkedElsewhere(h, async (target, elsewhere) => {
+        chmodSync(elsewhere, 0o600)
+        try {
+          const res = await request(h.app).delete(DELETE_URL).expect(409)
+
+          expect(res.body.message).toBe(UNREACHABLE)
+          expect(h.errors.flat().join('\n')).toContain('EACCES')
+          expect(lstatSync(join(h.dataDir, 'tracks.db')).isSymbolicLink()).toBe(true)
+          // The store the plugin had open is left as it was.
+          h.emit(SELF_CONTEXT, [60.3, 24.7])
+        } finally {
+          chmodSync(elsewhere, 0o755)
+        }
+        expect(existsSync(target)).toBe(true)
+        const kept = await request(h.app).get(`${API}/self/track`).expect(200)
+        expect(kept.body.coordinates).toEqual([
+          [
+            [24.9, 60.1],
+            [24.7, 60.3],
+          ],
+        ])
+      })
+    },
+  )
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'deletes nothing, and answers why, when the data directory cannot be entered',
+    async () => {
+      const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+      chmodSync(h.dataDir, 0o600)
+      try {
+        const res = await request(h.app).delete(DELETE_URL).expect(409)
+
+        expect(res.body.message).toBe(UNREACHABLE)
+        expect(h.errors.flat().join('\n')).toContain('EACCES')
+      } finally {
+        chmodSync(h.dataDir, 0o755)
+      }
+      const kept = await request(h.app).get(`${API}/self/track`).expect(200)
+      expect(kept.body.coordinates).toEqual([[[24.9, 60.1]]])
+    },
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'deletes nothing, and leaves the plugin running, when the data directory is a link that points nowhere',
+    async () => {
+      const h = (harness = createHarness({ selfPosition: [60, 24], makesDataDir: true }))
+      h.emit(SELF_CONTEXT, [60.1, 24.9])
+      const running = h.store()
+      // Moved while the store has it open: the server then fails to make the
+      // directory the link is in the way of.
+      const moved = `${h.dataDir}-moved`
+      renameSync(h.dataDir, moved)
+      try {
+        symlinkSync(join(moved, 'gone'), h.dataDir)
+
+        const res = await request(h.app).delete(DELETE_URL).expect(409)
+
+        expect(res.body.message).toBe(UNREACHABLE)
+        expect(h.errors.flat().join('\n')).toContain('EEXIST')
+        expect(h.store()).toBe(running)
+      } finally {
+        rmSync(h.dataDir, { force: true })
+        renameSync(moved, h.dataDir)
+      }
+      const kept = await request(h.app).get(`${API}/self/track`).expect(200)
+      expect(kept.body.coordinates).toEqual([[[24.9, 60.1]]])
+    },
+  )
 
   it('answers 409 to a second delete while the first waits for the store to close', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])

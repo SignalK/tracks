@@ -15,7 +15,7 @@
 
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
-import { rmSync } from 'node:fs'
+import { lstatSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { createTrackProvider } from './trackProvider.js'
 import type { TrackProvider } from './trackProvider.js'
@@ -331,6 +331,20 @@ const notAvailable = (res: Response) => {
 }
 
 const errorDetail = (err: unknown): string => (err instanceof Error && err.stack ? err.stack : String(err))
+
+/**
+ * The file `file` is once links are followed, or `file` itself when nothing
+ * is there. Throws for one that cannot be reached, such as a link into a disk
+ * not mounted, or past a directory the server's user may not enter.
+ */
+const followLinks = (file: string): string => {
+  try {
+    return realpathSync(file)
+  } catch (err) {
+    if (lstatSync(file, { throwIfNoEntry: false }) === undefined) return file
+    throw err
+  }
+}
 
 /**
  * Reject once `ms` has passed.
@@ -1646,11 +1660,42 @@ export default function ThePlugin(app: App): Plugin {
           res.status(409).json({ message: 'The track database is being deleted already.' })
           return
         }
+        // A database that cannot be reached deletes nothing: one on a disk not
+        // mounted would be left behind.
+        const unreachable = (err: unknown) => {
+          app.error(`Not deleting the track database, which cannot be reached: ${errorDetail(err)}`)
+          res.status(409).json({
+            message:
+              'The track database, or the file a link to it points to, cannot be reached, so nothing was deleted. The server log says why.',
+          })
+        }
         const config = startedWith
-        const dataDir = app.getDataDirPath?.()
         // Not `tracks`: a store that will not open is the case this is for.
-        if (!config || !dataDir) {
+        if (!config) {
           notAvailable(res)
+          return
+        }
+        let dataDir: string | undefined
+        try {
+          // The server makes the directory as it is asked for it, which
+          // throws for one that is a link that points nowhere.
+          dataDir = app.getDataDirPath?.()
+        } catch (err) {
+          unreachable(err)
+          return
+        }
+        if (!dataDir) {
+          notAvailable(res)
+          return
+        }
+        // A link to the database stays, and the file it points to goes, so
+        // that the empty database is created where the user put the old one.
+        const file = join(dataDir, 'tracks.db')
+        let target: string
+        try {
+          target = followLinks(file)
+        } catch (err) {
+          unreachable(err)
           return
         }
         resetting = true
@@ -1669,9 +1714,14 @@ export default function ThePlugin(app: App): Plugin {
           }
           let restarted: number
           try {
-            for (const suffix of ['', '-wal', '-shm']) {
-              rmSync(join(dataDir, `tracks.db${suffix}`), { force: true })
+            // SQLite keeps the -wal and -shm beside the file a link points
+            // to, and on Windows beside the link. They go first: refused part
+            // way, the delete then leaves a database that opens, rather than a
+            // stray -wal beside an empty one.
+            for (const base of new Set([target, file])) {
+              for (const suffix of ['-wal', '-shm']) rmSync(`${base}${suffix}`, { force: true })
             }
+            rmSync(target, { force: true })
           } finally {
             // Started again whatever the delete did, so a file that would not
             // go leaves the plugin recording to it rather than stopped.
