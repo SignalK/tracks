@@ -1,11 +1,13 @@
 import {
   chmodSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -1210,7 +1212,13 @@ describe('DELETE /plugins/tracks/database', () => {
         const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
         await linkedElsewhere(h, async (target, elsewhere) => {
           const other = existing ? join(elsewhere, 'other.db') : join(elsewhere, 'gone', 'tracks.db')
-          if (existing) writeFileSync(other, '')
+          // A second name keeps the file's inode from being given to a new
+          // one: the restart would make a new file where one was deleted.
+          const secondName = `${other}-kept`
+          if (existing) {
+            writeFileSync(other, '')
+            linkSync(other, secondName)
+          }
           const gate = holdClose()
           const answer = request(h.app)
             .delete(DELETE_URL)
@@ -1226,6 +1234,9 @@ describe('DELETE /plugins/tracks/database', () => {
             'The track database changed or could no longer be reached while the delete waited; nothing was deleted.',
           )
           expect(existsSync(target)).toBe(true)
+          if (existing) {
+            expect(statSync(other, { bigint: true }).ino).toBe(statSync(secondName, { bigint: true }).ino)
+          }
           if (!existing) {
             expect(h.errors.flat().join('\n')).toMatch(
               /Not deleting the track database, which can no longer be reached: .*ENOENT/,
@@ -1257,7 +1268,9 @@ describe('DELETE /plugins/tracks/database', () => {
       try {
         await request(h.app).get(`${API}/self/track`).expect(200)
         for (const suffix of ['', '-wal', '-shm']) rmSync(join(h.dataDir, `tracks.db${suffix}`), { force: true })
-        const gate = holdClose(() => writeFileSync(join(h.dataDir, 'tracks.db'), ''))
+        // Not a database: one kept would not open, and the plugin would not
+        // start again.
+        const gate = holdClose(() => writeFileSync(join(h.dataDir, 'tracks.db'), 'not a database'))
         const answer = request(h.app)
           .delete(DELETE_URL)
           .then((res) => res)
