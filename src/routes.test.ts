@@ -1,4 +1,14 @@
-import { chmodSync, existsSync, lstatSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { get } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -1108,6 +1118,61 @@ describe('DELETE /plugins/tracks/database', () => {
       })
     },
   )
+
+  it.skipIf(process.platform === 'win32')('keeps the database when a file beside the link will not go', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    await linkedElsewhere(h, async (target) => {
+      writeFileSync(join(h.dataDir, 'tracks.db-wal'), 'beside the link')
+      // A directory, which rmSync refuses without `recursive`: the delete
+      // stops after the stray -wal has gone, before the database.
+      mkdirSync(join(h.dataDir, 'tracks.db-shm'))
+
+      const res = await request(h.app).delete(DELETE_URL).expect(500)
+
+      expect(res.body.message).toBe('Could not delete the track database')
+      expect(existsSync(join(h.dataDir, 'tracks.db-wal'))).toBe(false)
+      expect(existsSync(target)).toBe(true)
+      h.emit(SELF_CONTEXT, [60.3, 24.7])
+      const kept = await request(h.app).get(`${API}/self/track`).expect(200)
+      expect(kept.body.coordinates).toEqual([
+        [
+          [24.9, 60.1],
+          [24.7, 60.3],
+        ],
+      ])
+    })
+  })
+
+  for (const [where, existing] of [
+    ['another file', true],
+    ['nowhere', false],
+  ] as const) {
+    it.skipIf(process.platform === 'win32')(
+      `deletes nothing when the link to the database is pointed at ${where} while the delete waits`,
+      async () => {
+        const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+        await linkedElsewhere(h, async (target, elsewhere) => {
+          const other = existing ? join(elsewhere, 'other.db') : join(elsewhere, 'gone', 'tracks.db')
+          if (existing) writeFileSync(other, '')
+          const gate = holdClose()
+          const answer = request(h.app)
+            .delete(DELETE_URL)
+            .then((res) => res)
+          await gate.waiting()
+          rmSync(join(h.dataDir, 'tracks.db'))
+          symlinkSync(other, join(h.dataDir, 'tracks.db'))
+          gate.release()
+
+          const res = await answer
+          expect(res.status).toBe(409)
+          expect(res.body.message).toBe(
+            'The track database changed or could no longer be reached while the delete waited; nothing was deleted.',
+          )
+          expect(existsSync(target)).toBe(true)
+        })
+      },
+    )
+  }
 
   const UNREACHABLE =
     'The track database, or the file a link to it points to, cannot be reached, so nothing was deleted. The server log says why.'

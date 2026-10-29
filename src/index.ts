@@ -1713,21 +1713,41 @@ export default function ThePlugin(app: App): Plugin {
             return
           }
           let restarted: number
+          let moved: boolean
           try {
-            // SQLite keeps the -wal and -shm beside the file a link points
-            // to, and on Windows beside the link. They go first: refused part
-            // way, the delete then leaves a database that opens, rather than a
-            // stray -wal beside an empty one.
-            for (const base of new Set([target, file])) {
-              for (const suffix of ['-wal', '-shm']) rmSync(`${base}${suffix}`, { force: true })
+            // Followed again now that the plugin has stopped: a link changed
+            // meanwhile deletes nothing, rather than a file it no longer
+            // points to.
+            let now: string | undefined
+            try {
+              now = followLinks(file)
+            } catch (err) {
+              app.error(`Not deleting the track database, which can no longer be reached: ${errorDetail(err)}`)
             }
-            rmSync(target, { force: true })
+            moved = now !== target
+            if (!moved) {
+              // SQLite keeps the -wal and -shm beside the file a link points
+              // to, and on Windows beside the link. They go first: refused
+              // part way, the delete then leaves a database that opens, rather
+              // than a stray -wal beside an empty one.
+              for (const base of new Set([target, file])) {
+                for (const suffix of ['-wal', '-shm']) rmSync(`${base}${suffix}`, { force: true })
+              }
+              rmSync(target, { force: true })
+            }
           } finally {
             // Started again whatever the delete did, so a file that would not
             // go leaves the plugin recording to it rather than stopped.
             const starting = plugin.start(config)
             restarted = lifecycle
             await starting
+          }
+          if (moved) {
+            res.status(409).json({
+              message:
+                'The track database changed or could no longer be reached while the delete waited; nothing was deleted.',
+            })
+            return
           }
           // A store the server stopped or replaced meanwhile is not one that
           // failed to open.
