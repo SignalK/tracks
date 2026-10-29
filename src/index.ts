@@ -1771,9 +1771,11 @@ export default function ThePlugin(app: App): Plugin {
               // SQLite keeps the -wal and -shm beside the file a link points
               // to, and on Windows beside the link. They go first: refused
               // part way, the delete then leaves a database that opens, rather
-              // than a stray -wal beside an empty one.
+              // than a stray -wal beside an empty one. And before them a
+              // rewrite for a newer schema that a crash left half built, which
+              // is built beside the file a link points to too.
               for (const base of new Set([target, file])) {
-                for (const suffix of ['-wal', '-shm']) rmSync(`${base}${suffix}`, { force: true })
+                for (const suffix of ['.migrating', '-wal', '-shm']) rmSync(`${base}${suffix}`, { force: true })
               }
               rmSync(target, { force: true })
             }

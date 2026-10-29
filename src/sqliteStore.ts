@@ -1,3 +1,17 @@
+import {
+  closeSync,
+  existsSync,
+  fchmodSync,
+  fchownSync,
+  fsyncSync,
+  openSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from 'node:fs'
+import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { StatementSync } from 'node:sqlite'
 import { s2, geojson } from 's2js'
@@ -49,7 +63,7 @@ import type {
 
 export class TransactionStateError extends Error {}
 
-const toTimed = ({ lat, lon, timestamp }: Omit<PositionRow, 'context'>): TimedPosition => ({
+const toTimed = ({ lat, lon, timestamp }: PositionRow): TimedPosition => ({
   position: [lat, lon],
   timestamp,
 })
@@ -131,10 +145,14 @@ const coveringFor = (bounds: GeoBounds, maxCells: number): bigint[] => {
 }
 
 interface PositionRow {
-  context: string
   timestamp: number
   lat: number
   lon: number
+}
+
+/** A row read for more than one context, with the id of its own. */
+interface ContextRow extends PositionRow {
+  context_id: number
 }
 
 /** A row with its rowid, which tells apart two fixes sharing a timestamp. */
@@ -247,7 +265,7 @@ const KEEP_LEVEL = 31
 const MIN_READ_LEVEL = 4
 /**
  * The levels from `lowest` up, for a query to name one by one: each is then a
- * seek on (context, level, timestamp), where a range of levels would walk them.
+ * seek on (context_id, level, timestamp), where a range of levels would walk them.
  */
 const levelsUp = (lowest: number): number[] => Array.from({ length: KEEP_LEVEL - lowest + 1 }, (_, i) => lowest + i)
 const SIGNIFICANT_LEVELS = levelsUp(MIN_READ_LEVEL).join(', ')
@@ -475,6 +493,529 @@ class KeptRuns {
 }
 
 /**
+ * The schema version `PRAGMA user_version` holds; 0 is a database written
+ * before contexts had ids, which `migrate()` rewrites.
+ */
+const SCHEMA_VERSION = 1
+
+/** An id no context has: bound for one the store does not know, it matches no row, as its name did. */
+const NO_CONTEXT = -1
+
+/** Every table, and the indexes of the small ones; see INDEXES for the rest. */
+const TABLES = `
+  -- The tables with a row per position name its context by an id here: the
+  -- context is some 40 bytes of text, which positions, its indexes and
+  -- significant held nearly half the file in. Never reused, since a deleted
+  -- context's id could otherwise come back for another vessel.
+  CREATE TABLE IF NOT EXISTS contexts (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    context   TEXT    NOT NULL UNIQUE
+  );
+  CREATE TABLE IF NOT EXISTS positions (
+    context_id INTEGER NOT NULL,
+    timestamp  INTEGER NOT NULL,
+    lat        REAL    NOT NULL,
+    lon        REAL    NOT NULL,
+    s2cell     INTEGER NOT NULL
+  );
+  -- A separate table rather than a column on positions: short of rewriting
+  -- the whole file (see migrate()), a new table appears harmlessly on a
+  -- database written by an older version, where an ALTER TABLE would not.
+  CREATE TABLE IF NOT EXISTS names (
+    context   TEXT PRIMARY KEY,
+    name      TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
+  );
+  -- Imported tracks, apart from positions: they are never merged into a
+  -- recording or pruned with one. The extent is kept per track so a query
+  -- can skip an import without reading its points.
+  CREATE TABLE IF NOT EXISTS imported_tracks (
+    id          TEXT PRIMARY KEY,
+    context     TEXT,
+    name        TEXT,
+    metadata    TEXT    NOT NULL,
+    first_time  INTEGER,
+    last_time   INTEGER,
+    west        REAL    NOT NULL,
+    south       REAL    NOT NULL,
+    east        REAL    NOT NULL,
+    north       REAL    NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_imported_context ON imported_tracks(context);
+  -- When each import was kept. Its own table, like names, so a database
+  -- written before it existed opens unchanged; it stays while the import
+  -- is in the recycle bin, for a restore, and goes when that is purged.
+  CREATE TABLE IF NOT EXISTS import_times (
+    id          TEXT PRIMARY KEY,
+    imported_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS imported_points (
+    track_id  TEXT    NOT NULL,
+    seq       INTEGER NOT NULL,
+    segment   INTEGER NOT NULL,
+    timestamp INTEGER,
+    lat       REAL    NOT NULL,
+    lon       REAL    NOT NULL,
+    PRIMARY KEY (track_id, seq)
+  ) WITHOUT ROWID;
+  -- The recycle bin. A delete moves rows here rather than removing them,
+  -- so the tables every read uses stay as they are and a restore moves
+  -- them back. A purged recorded span keeps its row: the history import
+  -- would otherwise fill the deleted window back in.
+  CREATE TABLE IF NOT EXISTS recycle_bin (
+    id          INTEGER PRIMARY KEY,
+    context     TEXT,
+    import_id   TEXT,
+    name        TEXT,
+    whole       INTEGER NOT NULL,
+    span_from   INTEGER,
+    span_to     INTEGER,
+    deleted_at  INTEGER NOT NULL,
+    purged      INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS binned_positions (
+    bin_id     INTEGER NOT NULL,
+    context_id INTEGER NOT NULL,
+    timestamp  INTEGER NOT NULL,
+    lat        REAL    NOT NULL,
+    lon        REAL    NOT NULL,
+    s2cell     INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_binned_positions ON binned_positions(bin_id);
+  -- Whether the bin holds a context, which forgetContexts() asks of every one.
+  CREATE INDEX IF NOT EXISTS idx_binned_context ON binned_positions(context_id);
+  CREATE TABLE IF NOT EXISTS binned_imported_tracks (
+    bin_id      INTEGER PRIMARY KEY,
+    id          TEXT    NOT NULL,
+    context     TEXT,
+    name        TEXT,
+    metadata    TEXT    NOT NULL,
+    first_time  INTEGER,
+    last_time   INTEGER,
+    west        REAL    NOT NULL,
+    south       REAL    NOT NULL,
+    east        REAL    NOT NULL,
+    north       REAL    NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS binned_imported_points (
+    bin_id    INTEGER NOT NULL,
+    track_id  TEXT    NOT NULL,
+    seq       INTEGER NOT NULL,
+    segment   INTEGER NOT NULL,
+    timestamp INTEGER,
+    lat       REAL    NOT NULL,
+    lon       REAL    NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_binned_imported_points ON binned_imported_points(bin_id);
+  -- Stretches recorded finer than the store's resolution, thinned back to
+  -- it once they are old; see noteDetail and prune.
+  CREATE TABLE IF NOT EXISTS detail_spans (
+    id          INTEGER PRIMARY KEY,
+    context     TEXT    NOT NULL,
+    span_start  INTEGER NOT NULL,
+    span_end    INTEGER NOT NULL
+  );
+  -- The positions of refined days from MIN_READ_LEVEL up, copied with
+  -- their level: what a read at a tolerance reads instead of positions.
+  -- A table of its own rather than a column, so refining writes only the
+  -- few positions that carry a track's shape and never a row of
+  -- positions or its indexes. position is the row in positions, which
+  -- orders positions recorded at the same time.
+  CREATE TABLE IF NOT EXISTS significant (
+    position    INTEGER NOT NULL,
+    context_id  INTEGER NOT NULL,
+    timestamp   INTEGER NOT NULL,
+    lat         REAL    NOT NULL,
+    lon         REAL    NOT NULL,
+    level       INTEGER NOT NULL
+  );
+  -- The hours of refined days each context had a position in each cell
+  -- of VISIT_CELL_DEG: where a box read at a tolerance finds a vessel,
+  -- since the positions a level keeps in the box can be none at all.
+  CREATE TABLE IF NOT EXISTS level_visits (
+    context_id  INTEGER NOT NULL,
+    lat_cell    INTEGER NOT NULL,
+    lon_cell    INTEGER NOT NULL,
+    hour        INTEGER NOT NULL,
+    PRIMARY KEY (context_id, lat_cell, lon_cell, hour)
+  ) WITHOUT ROWID;
+  -- Per context, the last day refineLevels() has refined, and the refined
+  -- days a change has since sent back to it.
+  CREATE TABLE IF NOT EXISTS level_frontier (
+    context     TEXT    PRIMARY KEY,
+    through     INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS level_stale (
+    context     TEXT    NOT NULL,
+    day         INTEGER NOT NULL,
+    PRIMARY KEY (context, day)
+  ) WITHOUT ROWID;
+  -- Per context, the last refined day simplifyStored() has gone
+  -- through and the tolerance it did so at, and the days a change has
+  -- since sent back to it.
+  CREATE TABLE IF NOT EXISTS simplify_frontier (
+    context     TEXT    PRIMARY KEY,
+    through     INTEGER NOT NULL,
+    tolerance   REAL    NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS simplify_pending (
+    context     TEXT    NOT NULL,
+    day         INTEGER NOT NULL,
+    PRIMARY KEY (context, day)
+  ) WITHOUT ROWID;
+  -- Days an import wrote simplified already (see simplifyUnrecorded()),
+  -- with the tolerance and how many positions they held then, which
+  -- simplifyStored() passes over rather than simplifies again.
+  CREATE TABLE IF NOT EXISTS simplified_days (
+    context     TEXT    NOT NULL,
+    day         INTEGER NOT NULL,
+    tolerance   REAL    NOT NULL,
+    positions   INTEGER NOT NULL,
+    PRIMARY KEY (context, day)
+  ) WITHOUT ROWID;
+  -- How far the import of a vessel's track from a history provider got,
+  -- so a restart goes on from there; see historyImport.ts.
+  CREATE TABLE IF NOT EXISTS history_imports (
+    context     TEXT PRIMARY KEY,
+    started_at  INTEGER NOT NULL,
+    first_day   INTEGER,
+    next_day    INTEGER,
+    filled      INTEGER NOT NULL,
+    in_gap      INTEGER,
+    finished_at INTEGER,
+    error       TEXT
+  );
+  -- The last GPX file uploaded in slices, so a restart goes on with it;
+  -- see gpxUpload.ts. A new upload replaces the row.
+  CREATE TABLE IF NOT EXISTS gpx_uploads (
+    id    TEXT PRIMARY KEY,
+    state TEXT NOT NULL
+  );
+`
+
+/**
+ * The indexes of the tables with a row per position, which `migrate()` builds
+ * once their rows are in rather than row by row.
+ */
+const INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_s2cell ON positions(s2cell);
+  -- The position rides along with the vessel and time, so a read of a track
+  -- is answered from the index alone, without a lookup in the table for
+  -- every row.
+  CREATE INDEX IF NOT EXISTS idx_context_time_position ON positions(context_id, timestamp, lat, lon);
+  -- Reads a box for one vessel without its whole window: the cell index
+  -- alone mixes every vessel near the box, and the index above finds the
+  -- vessel but orders its rows by time.
+  CREATE INDEX IF NOT EXISTS idx_context_s2cell ON positions(context_id, s2cell);
+  CREATE INDEX IF NOT EXISTS idx_significant_time ON significant(context_id, level, timestamp);
+  -- A refined day's visits are cleared by hour, which the key, led by the
+  -- cells a box read asks for, cannot seek.
+  CREATE INDEX IF NOT EXISTS idx_level_visits_hour ON level_visits(context_id, hour);
+`
+
+/** The tables that name a position's context by its id, which a database before SCHEMA_VERSION named in full. */
+const BY_CONTEXT_ID = ['positions', 'binned_positions', 'significant', 'level_visits']
+
+/** SQLITE_BUSY and SQLITE_LOCKED, which node:sqlite reports as extended codes: another connection holds the database. */
+const HELD = new Set([5, 6])
+/** What Windows answers a rename, or an open of the old file, with while a scanner or an indexer has a file open, and what retrying it waits out. */
+const RENAME_BUSY = new Set(['EPERM', 'EBUSY', 'EACCES'])
+/** How often, and how long apart, migrate() tries to take a database out of WAL mode or lock it, or to rename the new one over it. */
+const LEAVE_WAL_TRIES = 10
+const LEAVE_WAL_WAIT_MS = 500
+
+/**
+ * Rewrite a database an older version wrote, if it is one, to SCHEMA_VERSION,
+ * and refuse one a newer version wrote, which this one cannot read.
+ *
+ * Built as a new file next to it and then renamed over it, rather than in
+ * place: changed in place, the file would keep its size until a VACUUM,
+ * which writes a copy of the whole database to the temporary directory,
+ * memory on many a Raspberry Pi. The old database is first taken out of WAL
+ * mode, which writes back and removes its log, so no log is ever left beside
+ * the new file to be replayed into it. That cannot be done while another
+ * connection holds it, which a few tries wait out; the store then does not
+ * open. The new file replaces the old one under a lock on it, so that a write
+ * another program began meanwhile stops the rewrite rather than being lost.
+ * A crash anywhere leaves either database whole, and a new file left half
+ * built is built again.
+ */
+function migrate(path: string, debug: Debug): void {
+  if (!existsSync(path)) {
+    return
+  }
+  // Through a link, the file it points to, which the new one must replace
+  // rather than the link. With the system's realpath, which follows links
+  // as SQLite's open does: Node's own takes a `..` in a link's target before
+  // the links it passes, and so can name another file. Node's where the
+  // system's fails, as it does on some RAM disks on Windows.
+  let file: string
+  try {
+    file = realpathSync.native(path)
+  } catch {
+    file = realpathSync(path)
+  }
+  const started = performance.now()
+  // The file's change counter as the lock found it, to tell a write that
+  // came in while the rewrite read it.
+  let changes: number | undefined
+  const old = new DatabaseSync(file)
+  try {
+    old.exec('PRAGMA busy_timeout = 5000')
+    const { user_version: version } = old.prepare('PRAGMA user_version').get() as { user_version: number }
+    if (version > SCHEMA_VERSION) {
+      throw new Error(`${file} was written by a newer version of this plugin, which this one cannot read`)
+    }
+    // By its columns rather than its version: a new database set up only in
+    // part, before its version was written, has the new ones.
+    const named = (old.prepare('PRAGMA table_info(positions)').all() as { name: string }[]).some(
+      ({ name }) => name === 'context',
+    )
+    if (!named) {
+      return
+    }
+    // Waited out by the tries below, not by every statement in them.
+    old.exec('PRAGMA busy_timeout = 0')
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const { journal_mode: mode } = old.prepare('PRAGMA journal_mode = DELETE').get() as { journal_mode: string }
+        // Out of WAL mode already, after a rewrite that failed say, the
+        // switch takes no lock: the lock is asked for on its own.
+        if (mode === 'delete') {
+          // Opened before the lock and closed after it: on Linux and macOS,
+          // closing any descriptor of a file drops the process's locks on it.
+          const header = openSync(file, 'r')
+          try {
+            old.exec('BEGIN EXCLUSIVE')
+            changes = changeCounter(header)
+            old.exec('COMMIT')
+          } finally {
+            closeSync(header)
+          }
+          break
+        }
+      } catch (error) {
+        if (!HELD.has(((error as { errcode?: number }).errcode ?? 0) & 0xff)) {
+          throw error
+        }
+      }
+      if (attempt === LEAVE_WAL_TRIES) {
+        throw new Error(`${file} needs rewriting for this version, but another connection holds it open`)
+      }
+      pause(LEAVE_WAL_WAIT_MS)
+    }
+  } finally {
+    old.close()
+  }
+  const next = `${file}.migrating`
+  rmSync(next, { force: true })
+  try {
+    rewrite(file, next)
+    const { mode, uid, gid } = statSync(file)
+    const fd = openSync(next, 'r+')
+    try {
+      // Readable and owned as the old one was, for whoever else reads it, a
+      // backup say. Only root can give it to another user; anyone may try
+      // to keep the group. The mode first, while the file is still this
+      // process's own, and neither is worth failing the rewrite for.
+      try {
+        fchmodSync(fd, mode & 0o777)
+      } catch {
+        // kept as created
+      }
+      try {
+        fchownSync(fd, process.getuid?.() === 0 ? uid : -1, gid)
+      } catch {
+        // kept as created
+      }
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+    // The last checks and the rename under an exclusive lock on the old file.
+    // A write another program began on it meanwhile is then in the change
+    // counter already, or holds a lock that keeps this one from being taken.
+    // A program that keeps the old file open past the rename is beyond any
+    // lock, and the README asks for it to be closed. Not on Windows, which
+    // renames nothing over a file that is open, this connection's included,
+    // and so refuses the rename while another program has it open.
+    const lock = process.platform === 'win32' ? undefined : new DatabaseSync(file)
+    // Opened before the lock and closed after it, as for the probe above;
+    // without one, at each try and closed before the rename, which Windows
+    // refuses over a file this process has open too.
+    let header = lock ? openSync(file, 'r') : undefined
+    try {
+      if (lock) {
+        lock.exec('PRAGMA busy_timeout = 0')
+        lockExclusive(lock, file)
+      }
+      for (let attempt = 1; ; attempt++) {
+        try {
+          // Checked again before each try at the rename: without the lock, a
+          // program may have written to the file while the last one waited.
+          header ??= openSync(file, 'r')
+          const moved = changeCounter(header) !== changes
+          if (!lock) {
+            const fd = header
+            header = undefined
+            closeSync(fd)
+          }
+          // A write by another program while this one read the file, which the
+          // rename would lose, or whose log SQLite would replay into the new
+          // file.
+          if (moved || hotLog(`${file}-journal`) || hotLog(`${file}-wal`)) {
+            throw new Error(`${file} was written to while it was rewritten for this version`)
+          }
+          renameSync(next, file)
+          break
+        } catch (error) {
+          const busy = process.platform === 'win32' && RENAME_BUSY.has((error as { code?: string }).code ?? '')
+          if (attempt === LEAVE_WAL_TRIES || !busy) {
+            throw error
+          }
+          pause(LEAVE_WAL_WAIT_MS)
+        }
+      }
+    } finally {
+      if (lock?.isTransaction) {
+        lock.exec('ROLLBACK')
+      }
+      lock?.close()
+      if (header !== undefined) {
+        closeSync(header)
+      }
+    }
+  } catch (error) {
+    // Up to half the old file, which on a full disk would keep it full.
+    try {
+      rmSync(next, { force: true, recursive: true, maxRetries: 5, retryDelay: 200 })
+    } catch {
+      // left for the next start, which removes it first
+    }
+    throw error
+  }
+  // The rename itself, where the directory can be synced; Windows cannot open one.
+  try {
+    const dir = openSync(dirname(file), 'r')
+    try {
+      fsyncSync(dir)
+    } finally {
+      closeSync(dir)
+    }
+  } catch {
+    // nothing to sync it with
+  }
+  debug(`rewrote ${file} for schema ${SCHEMA_VERSION} in ${Math.round(performance.now() - started)} ms`)
+}
+
+/** The file change counter in the header of the database open at `fd`, which every write moves on. */
+function changeCounter(fd: number): number {
+  const header = Buffer.alloc(4)
+  readSync(fd, header, 0, 4, 24)
+  return header.readUInt32BE(0)
+}
+
+/**
+ * Whether a database's log beside it holds something SQLite would replay or
+ * roll back into it, as SQLite judges a journal: there, and its first byte
+ * set. One left empty or zeroed stays there harmlessly.
+ */
+function hotLog(log: string): boolean {
+  if (!existsSync(log)) {
+    return false
+  }
+  const fd = openSync(log, 'r')
+  try {
+    const first = Buffer.alloc(1)
+    return readSync(fd, first, 0, 1, 0) === 1 && first[0] !== 0
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/**
+ * Take an exclusive lock on the database `db` has open at `file`, waiting out
+ * another connection that holds one for a few tries.
+ */
+function lockExclusive(db: DatabaseSync, file: string): void {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      db.exec('BEGIN EXCLUSIVE')
+      return
+    } catch (error) {
+      if (!HELD.has(((error as { errcode?: number }).errcode ?? 0) & 0xff)) {
+        throw error
+      }
+    }
+    if (attempt === LEAVE_WAL_TRIES) {
+      throw new Error(`${file} needs rewriting for this version, but another connection holds it open`)
+    }
+    pause(LEAVE_WAL_WAIT_MS)
+  }
+}
+
+/** Block this thread for `ms`: migrate() runs before the store answers anything. */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/** migrate()'s new file `next`, built from the database at `file`. */
+function rewrite(file: string, next: string): void {
+  const db = new DatabaseSync(next)
+  try {
+    db.exec('PRAGMA busy_timeout = 5000')
+    // A file nothing reads until it is renamed, so nothing is journaled or
+    // synced until it is whole.
+    db.exec('PRAGMA journal_mode = OFF')
+    db.exec('PRAGMA synchronous = OFF')
+    db.exec(TABLES)
+    db.prepare('ATTACH DATABASE ? AS old').run(file)
+    const columns = (schema: string, table: string) =>
+      (db.prepare(`PRAGMA ${schema}.table_info(${table})`).all() as { name: string }[]).map(({ name }) => name)
+    const held = new Set(
+      (db.prepare("SELECT name FROM old.sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(
+        ({ name }) => name,
+      ),
+    )
+    const byId = BY_CONTEXT_ID.filter((table) => held.has(table))
+    db.exec('BEGIN')
+    // Each table's own, which its index by context gives without sorting
+    // every row in the temporary directory.
+    db.exec(
+      `INSERT INTO contexts (context) ${byId.map((table) => `SELECT DISTINCT context FROM old.${table}`).join(' UNION ')} ORDER BY 1`,
+    )
+    for (const table of byId) {
+      const rest = columns('main', table).filter((column) => column !== 'context_id')
+      // A position keeps its rowid, which significant refers to it by.
+      const rowid = table === 'positions' ? ['rowid'] : []
+      db.exec(
+        `INSERT INTO main.${table} (${[...rowid, 'context_id', ...rest].join(', ')})
+         SELECT ${[...rowid.map((r) => `t.${r}`), 'c.id', ...rest.map((column) => `t.${column}`)].join(', ')}
+         FROM old.${table} AS t JOIN contexts AS c ON c.context = t.context${rowid.length > 0 ? ' ORDER BY t.rowid' : ''}`,
+      )
+    }
+    const others = (
+      db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as {
+        name: string
+      }[]
+    )
+      .map(({ name }) => name)
+      .filter((table) => table !== 'contexts' && !BY_CONTEXT_ID.includes(table) && held.has(table))
+    for (const table of others) {
+      const kept = new Set(columns('old', table))
+      const shared = columns('main', table).filter((column) => kept.has(column))
+      db.exec(`INSERT INTO main.${table} (${shared.join(', ')}) SELECT ${shared.join(', ')} FROM old.${table}`)
+    }
+    db.exec(INDEXES)
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+    db.exec('COMMIT')
+    db.exec('DETACH DATABASE old')
+  } finally {
+    db.close()
+  }
+}
+
+/**
  * A position store backed by SQLite, so tracks survive a restart.
  *
  * Uses node:sqlite rather than better-sqlite3: it is built into Node >= 22, so
@@ -519,6 +1060,10 @@ export class SqliteTrackStore implements TrackStore {
   private readonly lastThin = new Map<number, { spacing: number; cutoff: number }>()
   /** The detail span each context is in, if any; see `noteDetail`. */
   private readonly detail = new Map<string, { id: number; end: number; saved: number }>()
+  /** Each context's id, which the tables in BY_CONTEXT_ID name it by; a copy of contexts. */
+  private readonly contextIds = new Map<Context, number>()
+  /** The context of each id; see contextIds. */
+  private readonly contextNames = new Map<number, Context>()
   /** Per context, the last day refineLevels() has refined; a copy of level_frontier. */
   private readonly levelFrontier = new Map<string, number>()
   /** The last refinable day as of the newest pass over every context. */
@@ -594,6 +1139,9 @@ export class SqliteTrackStore implements TrackStore {
     this.stretchGap = Math.max(CLIP_STRETCH_GAP, 2 * this.resolution)
     this.debug = debug
 
+    if (config.file !== ':memory:') {
+      migrate(config.file, debug)
+    }
     this.db = new DatabaseSync(config.file)
     // WAL keeps a reader from blocking the writer, which matters because
     // positions arrive continuously while a query is being served.
@@ -607,224 +1155,13 @@ export class SqliteTrackStore implements TrackStore {
     // A lock held by another connection, a backup or an sqlite3 shell say, is
     // waited out rather than failing the write at once.
     this.db.exec('PRAGMA busy_timeout = 5000')
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS positions (
-        context   TEXT    NOT NULL,
-        timestamp INTEGER NOT NULL,
-        lat       REAL    NOT NULL,
-        lon       REAL    NOT NULL,
-        s2cell    INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_s2cell ON positions(s2cell);
-      -- A separate table rather than a column on positions: this store has no
-      -- migration mechanism, so a new table appears harmlessly on a database
-      -- written by an older version, where an ALTER TABLE would not.
-      CREATE TABLE IF NOT EXISTS names (
-        context   TEXT PRIMARY KEY,
-        name      TEXT NOT NULL,
-        timestamp INTEGER NOT NULL
-      );
-      -- Imported tracks, apart from positions: they are never merged into a
-      -- recording or pruned with one. The extent is kept per track so a query
-      -- can skip an import without reading its points.
-      CREATE TABLE IF NOT EXISTS imported_tracks (
-        id          TEXT PRIMARY KEY,
-        context     TEXT,
-        name        TEXT,
-        metadata    TEXT    NOT NULL,
-        first_time  INTEGER,
-        last_time   INTEGER,
-        west        REAL    NOT NULL,
-        south       REAL    NOT NULL,
-        east        REAL    NOT NULL,
-        north       REAL    NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_imported_context ON imported_tracks(context);
-      -- When each import was kept. Its own table, like names, so a database
-      -- written before it existed opens unchanged; it stays while the import
-      -- is in the recycle bin, for a restore, and goes when that is purged.
-      CREATE TABLE IF NOT EXISTS import_times (
-        id          TEXT PRIMARY KEY,
-        imported_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS imported_points (
-        track_id  TEXT    NOT NULL,
-        seq       INTEGER NOT NULL,
-        segment   INTEGER NOT NULL,
-        timestamp INTEGER,
-        lat       REAL    NOT NULL,
-        lon       REAL    NOT NULL,
-        PRIMARY KEY (track_id, seq)
-      ) WITHOUT ROWID;
-      -- The recycle bin. A delete moves rows here rather than removing them,
-      -- so the tables every read uses stay as they are and a restore moves
-      -- them back. A purged recorded span keeps its row: the history import
-      -- would otherwise fill the deleted window back in.
-      CREATE TABLE IF NOT EXISTS recycle_bin (
-        id          INTEGER PRIMARY KEY,
-        context     TEXT,
-        import_id   TEXT,
-        name        TEXT,
-        whole       INTEGER NOT NULL,
-        span_from   INTEGER,
-        span_to     INTEGER,
-        deleted_at  INTEGER NOT NULL,
-        purged      INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE TABLE IF NOT EXISTS binned_positions (
-        bin_id    INTEGER NOT NULL,
-        context   TEXT    NOT NULL,
-        timestamp INTEGER NOT NULL,
-        lat       REAL    NOT NULL,
-        lon       REAL    NOT NULL,
-        s2cell    INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_binned_positions ON binned_positions(bin_id);
-      CREATE TABLE IF NOT EXISTS binned_imported_tracks (
-        bin_id      INTEGER PRIMARY KEY,
-        id          TEXT    NOT NULL,
-        context     TEXT,
-        name        TEXT,
-        metadata    TEXT    NOT NULL,
-        first_time  INTEGER,
-        last_time   INTEGER,
-        west        REAL    NOT NULL,
-        south       REAL    NOT NULL,
-        east        REAL    NOT NULL,
-        north       REAL    NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS binned_imported_points (
-        bin_id    INTEGER NOT NULL,
-        track_id  TEXT    NOT NULL,
-        seq       INTEGER NOT NULL,
-        segment   INTEGER NOT NULL,
-        timestamp INTEGER,
-        lat       REAL    NOT NULL,
-        lon       REAL    NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_binned_imported_points ON binned_imported_points(bin_id);
-      -- Stretches recorded finer than the store's resolution, thinned back to
-      -- it once they are old; see noteDetail and prune.
-      CREATE TABLE IF NOT EXISTS detail_spans (
-        id          INTEGER PRIMARY KEY,
-        context     TEXT    NOT NULL,
-        span_start  INTEGER NOT NULL,
-        span_end    INTEGER NOT NULL
-      );
-      -- The positions of refined days from MIN_READ_LEVEL up, copied with
-      -- their level: what a read at a tolerance reads instead of positions.
-      -- A table of its own rather than a column, so refining writes only the
-      -- few positions that carry a track's shape and never a row of
-      -- positions or its indexes. position is the row in positions, which
-      -- orders positions recorded at the same time.
-      CREATE TABLE IF NOT EXISTS significant (
-        position    INTEGER NOT NULL,
-        context     TEXT    NOT NULL,
-        timestamp   INTEGER NOT NULL,
-        lat         REAL    NOT NULL,
-        lon         REAL    NOT NULL,
-        level       INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_significant_time ON significant(context, level, timestamp);
-      -- The hours of refined days each context had a position in each cell
-      -- of VISIT_CELL_DEG: where a box read at a tolerance finds a vessel,
-      -- since the positions a level keeps in the box can be none at all.
-      CREATE TABLE IF NOT EXISTS level_visits (
-        context     TEXT    NOT NULL,
-        lat_cell    INTEGER NOT NULL,
-        lon_cell    INTEGER NOT NULL,
-        hour        INTEGER NOT NULL,
-        PRIMARY KEY (context, lat_cell, lon_cell, hour)
-      ) WITHOUT ROWID;
-      -- A refined day's visits are cleared by hour, which the key, led by the
-      -- cells a box read asks for, cannot seek.
-      CREATE INDEX IF NOT EXISTS idx_level_visits_hour ON level_visits(context, hour);
-      -- Per context, the last day refineLevels() has refined, and the refined
-      -- days a change has since sent back to it.
-      CREATE TABLE IF NOT EXISTS level_frontier (
-        context     TEXT    PRIMARY KEY,
-        through     INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS level_stale (
-        context     TEXT    NOT NULL,
-        day         INTEGER NOT NULL,
-        PRIMARY KEY (context, day)
-      ) WITHOUT ROWID;
-      -- Per context, the last refined day simplifyStored() has gone
-      -- through and the tolerance it did so at, and the days a change has
-      -- since sent back to it.
-      CREATE TABLE IF NOT EXISTS simplify_frontier (
-        context     TEXT    PRIMARY KEY,
-        through     INTEGER NOT NULL,
-        tolerance   REAL    NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS simplify_pending (
-        context     TEXT    NOT NULL,
-        day         INTEGER NOT NULL,
-        PRIMARY KEY (context, day)
-      ) WITHOUT ROWID;
-      -- Days an import wrote simplified already (see simplifyUnrecorded()),
-      -- with the tolerance and how many positions they held then, which
-      -- simplifyStored() passes over rather than simplifies again.
-      CREATE TABLE IF NOT EXISTS simplified_days (
-        context     TEXT    NOT NULL,
-        day         INTEGER NOT NULL,
-        tolerance   REAL    NOT NULL,
-        positions   INTEGER NOT NULL,
-        PRIMARY KEY (context, day)
-      ) WITHOUT ROWID;
-      -- How far the import of a vessel's track from a history provider got,
-      -- so a restart goes on from there; see historyImport.ts.
-      CREATE TABLE IF NOT EXISTS history_imports (
-        context     TEXT PRIMARY KEY,
-        started_at  INTEGER NOT NULL,
-        first_day   INTEGER,
-        next_day    INTEGER,
-        filled      INTEGER NOT NULL,
-        in_gap      INTEGER,
-        finished_at INTEGER,
-        error       TEXT
-      );
-      -- The last GPX file uploaded in slices, so a restart goes on with it;
-      -- see gpxUpload.ts. A new upload replaces the row.
-      CREATE TABLE IF NOT EXISTS gpx_uploads (
-        id    TEXT PRIMARY KEY,
-        state TEXT NOT NULL
-      );
-    `)
-    this.loadLevels()
-    // The position rides along with the vessel and time, so a read of a track
-    // is answered from the index alone, without a lookup in the table for
-    // every row. It replaces the (context, timestamp) index of older
-    // versions, which it serves for every query. That one is dropped first
-    // and in the same transaction, so the new one reuses its pages rather
-    // than growing the file by both, and a build that fails leaves it as it
-    // was.
-    //
-    // (context, s2cell) reads a box for one vessel without its whole window:
-    // the cell index alone mixes every vessel near the box, and the index
-    // above finds the vessel but orders its rows by time.
-    const building = ['idx_context_time_position', 'idx_context_s2cell'].some(
-      (name) => !this.db.prepare('SELECT 1 AS found FROM sqlite_master WHERE name = ?').get(name),
-    )
-    this.transaction(() =>
-      this.db.exec(`
-        DROP INDEX IF EXISTS idx_context_timestamp;
-        CREATE INDEX IF NOT EXISTS idx_context_time_position ON positions(context, timestamp, lat, lon);
-        CREATE INDEX IF NOT EXISTS idx_context_s2cell ON positions(context, s2cell);
-      `),
-    )
-    if (building) {
-      // The build went through the write-ahead log, which keeps its size,
-      // that of the whole index, until a checkpoint truncates it. A reader
-      // on another connection can hold that off past the busy timeout; the
-      // log then stays until the last connection closes and SQLite removes
-      // it.
-      const { busy } = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number }
-      if (busy) {
-        this.debug('position indexes built; another connection kept the write-ahead log from being truncated')
-      }
+    this.db.exec(TABLES)
+    this.db.exec(INDEXES)
+    if ((this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version === 0) {
+      this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
     }
+    this.loadContexts()
+    this.loadLevels()
     // Imports kept before their time was: dated to the first start that knew to.
     const now = Date.now()
     this.db
@@ -833,7 +1170,9 @@ export class SqliteTrackStore implements TrackStore {
          SELECT id, ? FROM imported_tracks UNION SELECT id, ? FROM binned_imported_tracks`,
       )
       .run(now, now)
-    this.insert = this.db.prepare('INSERT INTO positions (context, timestamp, lat, lon, s2cell) VALUES (?, ?, ?, ?, ?)')
+    this.insert = this.db.prepare(
+      'INSERT INTO positions (context_id, timestamp, lat, lon, s2cell) VALUES (?, ?, ?, ?, ?)',
+    )
     // Newer wins: a corrected or changed name replaces what is stored, while
     // an older observation arriving late leaves it alone.
     this.insertName = this.db.prepare(
@@ -916,17 +1255,18 @@ export class SqliteTrackStore implements TrackStore {
     }
     const statements = (this.neighbourStatements ??= {
       before: this.db.prepare(
-        'SELECT timestamp, lat, lon FROM positions WHERE context = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT 1',
+        'SELECT timestamp, lat, lon FROM positions WHERE context_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT 1',
       ),
       after: this.db.prepare(
-        'SELECT timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
+        'SELECT timestamp, lat, lon FROM positions WHERE context_id = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
       ),
     })
-    const after = statements.after.get(context, timestamp) as PositionRow | undefined
+    const id = this.idOf(context)
+    const after = statements.after.get(id, timestamp) as PositionRow | undefined
     if (after === undefined) {
       return false
     }
-    const before = statements.before.get(context, timestamp) as PositionRow | undefined
+    const before = statements.before.get(id, timestamp) as PositionRow | undefined
     const fix: Fix = { position, timestamp }
     const stored = (row: PositionRow): Fix => ({ position: [row.lat, row.lon], timestamp: row.timestamp })
     // One stored at the same instant, from a second receiver say, is measured
@@ -966,13 +1306,13 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   private store(context: Context, position: LatLngTuple, timestamp: number): void {
-    this.insert.run(context, timestamp, position[0], position[1], toSigned(cellIdFor(position)))
+    this.insert.run(this.idFor(context), timestamp, position[0], position[1], toSigned(cellIdFor(position)))
   }
 
   initialTrack(context: Context, track: LatLngTuple[], timestamps?: number[]): void {
     // Replaces the context's history, matching the in-memory store: a caller
     // installing a known track is authoritative for the window it covers.
-    this.db.prepare('DELETE FROM positions WHERE context = ?').run(context)
+    this.db.prepare('DELETE FROM positions WHERE context_id = ?').run(this.idOf(context))
     this.clearLevels(context)
     // Bypasses the throttle: these points are already at whatever resolution
     // the caller recorded them at, and they are back-dated, so throttling
@@ -984,8 +1324,8 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   private rowsFor(context: Context, window?: TimeWindow): PositionRow[] {
-    const clauses = ['context = ?']
-    const params: (string | number)[] = [context]
+    const clauses = ['context_id = ?']
+    const params: number[] = [this.idOf(context)]
     if (window) {
       clauses.push('timestamp >= ?', window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?')
       params.push(window.from, window.to)
@@ -994,14 +1334,12 @@ export class SqliteTrackStore implements TrackStore {
     // track is stored at timestamp 0 throughout, and the index alone would
     // order those by position.
     return this.db
-      .prepare(
-        `SELECT context, timestamp, lat, lon FROM positions WHERE ${clauses.join(' AND ')} ORDER BY timestamp, rowid`,
-      )
+      .prepare(`SELECT timestamp, lat, lon FROM positions WHERE ${clauses.join(' AND ')} ORDER BY timestamp, rowid`)
       .all(...params) as unknown as PositionRow[]
   }
 
   private knows(context: Context): boolean {
-    const row = this.db.prepare('SELECT 1 AS found FROM positions WHERE context = ? LIMIT 1').get(context)
+    const row = this.db.prepare('SELECT 1 AS found FROM positions WHERE context_id = ? LIMIT 1').get(this.idOf(context))
     return row !== undefined
   }
 
@@ -1051,15 +1389,15 @@ export class SqliteTrackStore implements TrackStore {
     }
     // The end as getTimed() reads it, so the two agree on what lies inside.
     const end = !window || window.inclusiveEnd === true ? '<=' : '<'
-    // Two seeks on the (context, timestamp) index, rather than MIN and MAX in
+    // Two seeks on the (context_id, timestamp) index, rather than MIN and MAX in
     // one statement, which reads the whole window.
     const at = (order: 'ASC' | 'DESC') =>
       this.db
         .prepare(
-          `SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp ${end} ?
+          `SELECT timestamp FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp ${end} ?
            ORDER BY timestamp ${order} LIMIT 1`,
         )
-        .get(context, window?.from ?? Number.NEGATIVE_INFINITY, window?.to ?? Number.POSITIVE_INFINITY) as
+        .get(this.idOf(context), window?.from ?? Number.NEGATIVE_INFINITY, window?.to ?? Number.POSITIVE_INFINITY) as
         { timestamp: number } | undefined
     const first = at('ASC')
     const last = at('DESC')
@@ -1095,42 +1433,43 @@ export class SqliteTrackStore implements TrackStore {
 
   /** daysOf() counted rather than read, up to `limit`. */
   private countDays(context: Context, range: TimeRange, levels: number[] | undefined, limit: number): number {
-    const counted = (statement: StatementSync, ...params: (number | string)[]) =>
-      (statement.get(context, ...params) as { n: number }).n
+    const contextId = this.idOf(context)
+    const counted = (statement: StatementSync, ...params: number[]) =>
+      (statement.get(contextId, ...params) as { n: number }).n
     const positions = (where: string) =>
-      this.db.prepare(`SELECT count(*) AS n FROM (SELECT 1 FROM positions WHERE context = ?${where} LIMIT ?)`)
+      this.db.prepare(`SELECT count(*) AS n FROM (SELECT 1 FROM positions WHERE context_id = ?${where} LIMIT ?)`)
     const refined = levels ? this.refinedDays(context) : undefined
     if (!levels || !refined) {
       return counted(positions(inRange(range)), range.from, range.to, limit)
     }
     const next = this.db.prepare(
-      `SELECT timestamp FROM positions WHERE context = ?${inRange(range)} ORDER BY timestamp LIMIT 1`,
+      `SELECT timestamp FROM positions WHERE context_id = ?${inRange(range)} ORDER BY timestamp LIMIT 1`,
     )
     const day = ' AND timestamp >= ? AND timestamp < ?'
     const whole = { day: positions(day), last: positions(inRange(range)) }
     const significant = (where: string) =>
       this.db.prepare(
-        `SELECT count(*) AS n FROM (SELECT 1 FROM significant INDEXED BY idx_significant_time WHERE context = ? AND level IN (${levels.join(', ')})${where} LIMIT ?)`,
+        `SELECT count(*) AS n FROM (SELECT 1 FROM significant INDEXED BY idx_significant_time WHERE context_id = ? AND level IN (${levels.join(', ')})${where} LIMIT ?)`,
       )
     const byLevel = { day: significant(day), last: significant(inRange(range)) }
     // The window's first and last position, which getTimed() adds to a
     // refined day where the levels leave them out.
     const kept = this.db.prepare(
-      `SELECT 1 AS found FROM significant INDEXED BY idx_significant_time WHERE context = ? AND level IN (${levels.join(', ')}) AND timestamp = ? AND position = ?`,
+      `SELECT 1 AS found FROM significant INDEXED BY idx_significant_time WHERE context_id = ? AND level IN (${levels.join(', ')}) AND timestamp = ? AND position = ?`,
     )
     const edge = (order: string) =>
       this.db
         .prepare(
-          `SELECT rowid AS id, timestamp FROM positions WHERE context = ?${inRange(range)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`,
+          `SELECT rowid AS id, timestamp FROM positions WHERE context_id = ?${inRange(range)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`,
         )
-        .get(context, range.from, range.to) as unknown as { id: number; timestamp: number } | undefined
+        .get(contextId, range.from, range.to) as unknown as { id: number; timestamp: number } | undefined
     const edges = [edge('ASC'), edge('DESC')].filter(
       (found, i, both): found is { id: number; timestamp: number } =>
         found !== undefined && (i === 0 || found.id !== both[0]?.id),
     )
     let n = 0
     for (let from = range.from; n < limit;) {
-      const row = next.get(context, from, range.to) as { timestamp: number } | undefined
+      const row = next.get(contextId, from, range.to) as { timestamp: number } | undefined
       if (!row) {
         break
       }
@@ -1141,7 +1480,7 @@ export class SqliteTrackStore implements TrackStore {
       if (isRefined(refined, dayOf(start))) {
         n += last ? counted(byLevel.last, start, range.to, left) : counted(byLevel.day, start, end, left)
         for (const { id, timestamp } of edges) {
-          if (dayOf(timestamp) === dayOf(start) && kept.get(context, timestamp, id) === undefined) {
+          if (dayOf(timestamp) === dayOf(start) && kept.get(contextId, timestamp, id) === undefined) {
             n++
           }
         }
@@ -1192,11 +1531,8 @@ export class SqliteTrackStore implements TrackStore {
    * rowsFor() keeps. With `levels`, the days `significant` holds come from
    * it, only the positions at those levels; every other day is read whole.
    */
-  private *daysOf(
-    context: Context,
-    range: TimeRange,
-    levels: number[] | undefined,
-  ): Generator<Omit<PositionRow, 'context'>> {
+  private *daysOf(context: Context, range: TimeRange, levels: number[] | undefined): Generator<PositionRow> {
+    const id = this.idOf(context)
     const refined = levels ? this.refinedDays(context) : undefined
     // One bound per side in every statement: given a second lower bound on
     // timestamp, SQLite enters the index at the first and filters on the other,
@@ -1205,11 +1541,11 @@ export class SqliteTrackStore implements TrackStore {
     // Each read starts at the next recorded time, so a window spanning years
     // of gaps costs one seek per day that has positions, not one per day.
     const next = this.db.prepare(
-      `SELECT timestamp FROM positions WHERE context = ?${inRange(range)} ORDER BY timestamp LIMIT 1`,
+      `SELECT timestamp FROM positions WHERE context_id = ?${inRange(range)} ORDER BY timestamp LIMIT 1`,
     )
     const day = ' AND timestamp >= ? AND timestamp < ?'
     // Ordered as rowsFor() orders them, so equal times keep the order they were stored in.
-    const positions = 'SELECT timestamp, lat, lon FROM positions WHERE context = ?'
+    const positions = 'SELECT timestamp, lat, lon FROM positions WHERE context_id = ?'
     const whole = {
       day: this.db.prepare(`${positions}${day} ORDER BY timestamp, rowid`),
       last: this.db.prepare(`${positions}${inRange(range)} ORDER BY timestamp, rowid`),
@@ -1217,7 +1553,7 @@ export class SqliteTrackStore implements TrackStore {
     // Sorted below: read level by level, they come in level order.
     const significant =
       levels &&
-      `SELECT position AS id, timestamp, lat, lon FROM significant INDEXED BY idx_significant_time WHERE context = ? AND level IN (${levels.join(', ')})`
+      `SELECT position AS id, timestamp, lat, lon FROM significant INDEXED BY idx_significant_time WHERE context_id = ? AND level IN (${levels.join(', ')})`
     const byLevel =
       significant && refined
         ? { day: this.db.prepare(`${significant}${day}`), last: this.db.prepare(`${significant}${inRange(range)}`) }
@@ -1229,12 +1565,12 @@ export class SqliteTrackStore implements TrackStore {
     const edge = (order: string) =>
       this.db
         .prepare(
-          `SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context = ?${inRange(range)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`,
+          `SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context_id = ?${inRange(range)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`,
         )
-        .get(context, range.from, range.to) as unknown as (Omit<PositionRow, 'context'> & { id: number }) | undefined
+        .get(id, range.from, range.to) as unknown as (PositionRow & { id: number }) | undefined
     const edges = byLevel ? [edge('ASC'), edge('DESC')] : []
     for (let from = range.from; ;) {
-      const row = next.get(context, from, range.to) as { timestamp: number } | undefined
+      const row = next.get(id, from, range.to) as { timestamp: number } | undefined
       if (!row) {
         return
       }
@@ -1246,8 +1582,8 @@ export class SqliteTrackStore implements TrackStore {
       const last = end > range.to
       if (byLevel && isRefined(refined, dayOf(start))) {
         const rows = (last
-          ? byLevel.last.all(context, start, range.to)
-          : byLevel.day.all(context, start, end)) as unknown as (Omit<PositionRow, 'context'> & { id: number })[]
+          ? byLevel.last.all(id, start, range.to)
+          : byLevel.day.all(id, start, end)) as unknown as (PositionRow & { id: number })[]
         for (const edge of edges) {
           if (edge && dayOf(edge.timestamp) === dayOf(start) && !rows.some(({ id }) => id === edge.id)) {
             rows.push(edge)
@@ -1255,9 +1591,7 @@ export class SqliteTrackStore implements TrackStore {
         }
         yield* rows.sort((a, b) => a.timestamp - b.timestamp || a.id - b.id)
       } else {
-        yield* (last
-          ? whole.last.all(context, start, range.to)
-          : whole.day.all(context, start, end)) as unknown as Omit<PositionRow, 'context'>[]
+        yield* (last ? whole.last.all(id, start, range.to) : whole.day.all(id, start, end)) as unknown as PositionRow[]
       }
       if (last) {
         return
@@ -1266,15 +1600,32 @@ export class SqliteTrackStore implements TrackStore {
     }
   }
 
+  /** The contexts the store holds positions for, in the order of their names. */
   private contexts(): Context[] {
-    const rows = this.db.prepare('SELECT DISTINCT context FROM positions').all() as unknown as { context: Context }[]
+    const rows = this.db
+      .prepare(
+        'SELECT context FROM contexts AS c WHERE EXISTS (SELECT 1 FROM positions WHERE context_id = c.id) ORDER BY context',
+      )
+      .all() as unknown as { context: Context }[]
     return rows.map(({ context }) => context)
+  }
+
+  /**
+   * For a pass over the contexts in the order of their ids: the first one
+   * after an id that the store holds positions for, as a seek per context.
+   */
+  private contextsAfter(): (id: number) => Context | undefined {
+    const after = this.db.prepare('SELECT context_id FROM positions WHERE context_id > ? ORDER BY context_id LIMIT 1')
+    return (id) => {
+      const row = after.get(id) as { context_id: number } | undefined
+      return row && this.nameOf(row.context_id)
+    }
   }
 
   /** Those of `contexts` the store holds positions for, each found by an index seek. */
   private stored(contexts: Iterable<Context>): Context[] {
-    const held = this.db.prepare('SELECT 1 AS found FROM positions WHERE context = ? LIMIT 1')
-    return [...contexts].filter((context) => held.get(context) !== undefined)
+    const held = this.db.prepare('SELECT 1 AS found FROM positions WHERE context_id = ? LIMIT 1')
+    return [...contexts].filter((context) => held.get(this.idOf(context)) !== undefined)
   }
 
   /**
@@ -1285,8 +1636,8 @@ export class SqliteTrackStore implements TrackStore {
   summarize(contexts: Context[] | undefined, window?: TimeWindow): TrackSummary[] {
     const inWindow = window ? ['timestamp >= ?', window.inclusiveEnd ? 'timestamp <= ?' : 'timestamp < ?'] : []
     const windowParams = window ? [window.from, window.to] : []
-    const clauses = [...(contexts ? [`context IN (${contexts.map(() => '?').join(', ')})`] : []), ...inWindow]
-    const params = [...(contexts ?? []), ...windowParams]
+    const clauses = [...(contexts ? [`context_id IN (${contexts.map(() => '?').join(', ')})`] : []), ...inWindow]
+    const params = [...(contexts ?? []).map((context) => this.idOf(context)), ...windowParams]
     // A list of every vessel reads every row of the window from the index, in
     // vessel order and without touching the table: 0.6 s over 1.17 M rows,
     // against 1.5 s for one pass over the table.
@@ -1298,13 +1649,13 @@ export class SqliteTrackStore implements TrackStore {
     // position, nearly.
     const groups = this.db
       .prepare(
-        `SELECT context, COUNT(*) AS count, MIN(timestamp) AS first, MAX(timestamp) AS last,
+        `SELECT context_id, COUNT(*) AS count, MIN(timestamp) AS first, MAX(timestamp) AS last,
                 MIN(lat) AS south, MAX(lat) AS north, MIN(lon) AS lowest, MAX(lon) AS highest,
                 MIN(lon) FILTER (WHERE lon >= 0) AS lowestEast, MAX(lon) FILTER (WHERE lon < 0) AS highestWest
-         ${rows} GROUP BY context`,
+         ${rows} GROUP BY context_id`,
       )
       .all(...params) as unknown as ({
-      context: Context
+      context_id: number
       count: number
       first: number
       last: number
@@ -1315,14 +1666,18 @@ export class SqliteTrackStore implements TrackStore {
     // worker's connection makes every write and this runs without yielding,
     // so the two statements read the same rows.
     const longitudes = this.db.prepare(
-      `SELECT DISTINCT lon FROM positions WHERE ${['context = ?', ...inWindow].join(' AND ')}`,
+      `SELECT DISTINCT lon FROM positions WHERE ${['context_id = ?', ...inWindow].join(' AND ')}`,
     )
-    return groups.map(({ context, count, first, last, south, north, ...extremes }) => {
+    const summaries = groups.map(({ context_id: id, count, first, last, south, north, ...extremes }): TrackSummary => {
       const [west, east] =
         longitudeSpanOf(extremes) ??
-        longitudeSpan((longitudes.all(context, ...windowParams) as unknown as { lon: number }[]).map(({ lon }) => lon))
-      return { context, pointCount: count, first, last, bbox: [west, south, east, north] }
+        longitudeSpan((longitudes.all(id, ...windowParams) as unknown as { lon: number }[]).map(({ lon }) => lon))
+      return { context: this.nameOf(id), pointCount: count, first, last, bbox: [west, south, east, north] }
     })
+    // By name, in the order of their UTF-8 bytes that SQLite sorts text in,
+    // as contexts() lists them: grouped by id, they come in the order of
+    // their ids.
+    return summaries.sort((a, b) => Buffer.compare(Buffer.from(a.context), Buffer.from(b.context)))
   }
 
   getAllTracks(query?: TrackQuery): Promise<{ context: string; track: LatLngTuple[] }[]> {
@@ -1455,13 +1810,13 @@ export class SqliteTrackStore implements TrackStore {
     }
     const { where, params, cells } = clause
 
-    const stmt = this.db.prepare(`SELECT DISTINCT context, lat, lon FROM positions WHERE ${where}`)
-    const rows = stmt.all(...params) as unknown as { context: string; lat: number; lon: number }[]
+    const stmt = this.db.prepare(`SELECT DISTINCT context_id, lat, lon FROM positions WHERE ${where}`)
+    const rows = stmt.all(...params) as unknown as { context_id: number; lat: number; lon: number }[]
 
     const inBounds = createInBounds(bounds)
-    for (const { context, lat, lon } of rows) {
+    for (const { context_id: id, lat, lon } of rows) {
       if (inBounds([lat, lon])) {
-        found.add(context)
+        found.add(this.nameOf(id))
       }
     }
     if (this.debug.enabled) {
@@ -1491,41 +1846,42 @@ export class SqliteTrackStore implements TrackStore {
     clause: { where: string; params: bigint[] },
     inWindow: string,
     timeParams: number[],
-  ): Generator<PositionRow> {
+  ): Generator<ContextRow> {
     const boxCount = this.db.prepare(
-      'SELECT count(*) AS n FROM (SELECT 1 FROM positions INDEXED BY idx_context_s2cell WHERE context = ? AND s2cell BETWEEN ? AND ? LIMIT ?)',
+      'SELECT count(*) AS n FROM (SELECT 1 FROM positions INDEXED BY idx_context_s2cell WHERE context_id = ? AND s2cell BETWEEN ? AND ? LIMIT ?)',
     )
     const windowCount = this.db.prepare(
-      `SELECT count(*) AS n FROM (SELECT 1 FROM positions INDEXED BY idx_context_time_position WHERE context = ?${inWindow} LIMIT ?)`,
+      `SELECT count(*) AS n FROM (SELECT 1 FROM positions INDEXED BY idx_context_time_position WHERE context_id = ?${inWindow} LIMIT ?)`,
     )
     let byTime: StatementSync | undefined
     let byCell: StatementSync | undefined
     for (const context of contexts) {
+      const id = this.idOf(context)
       let boxRows = 0
       let windowRows = 0
       for (const limit of [this.readProbeLimit, 8 * this.readProbeLimit]) {
         boxRows = 0
         for (let i = 0; i < clause.params.length && boxRows < limit; i += 2) {
           const left = limit - boxRows
-          boxRows += (boxCount.get(context, clause.params[i]!, clause.params[i + 1]!, left) as { n: number }).n
+          boxRows += (boxCount.get(id, clause.params[i]!, clause.params[i + 1]!, left) as { n: number }).n
         }
-        windowRows = boxRows > 0 ? (windowCount.get(context, ...timeParams, boxRows) as { n: number }).n : 0
+        windowRows = boxRows > 0 ? (windowCount.get(id, ...timeParams, boxRows) as { n: number }).n : 0
         if (boxRows < limit || windowRows < boxRows) {
           break
         }
       }
       if (windowRows < boxRows) {
         byTime ??= this.db.prepare(
-          `SELECT context, timestamp, lat, lon FROM positions INDEXED BY idx_context_time_position WHERE context = ? AND (${clause.where})${inWindow}`,
+          `SELECT context_id, timestamp, lat, lon FROM positions INDEXED BY idx_context_time_position WHERE context_id = ? AND (${clause.where})${inWindow}`,
         )
-        yield* byTime.all(context, ...clause.params, ...timeParams) as unknown as PositionRow[]
+        yield* byTime.all(id, ...clause.params, ...timeParams) as unknown as ContextRow[]
         continue
       }
       byCell ??= this.db.prepare(
-        `SELECT context, timestamp, lat, lon FROM positions INDEXED BY idx_context_s2cell WHERE context = ? AND s2cell BETWEEN ? AND ?${inWindow}`,
+        `SELECT context_id, timestamp, lat, lon FROM positions INDEXED BY idx_context_s2cell WHERE context_id = ? AND s2cell BETWEEN ? AND ?${inWindow}`,
       )
       for (let i = 0; i < clause.params.length; i += 2) {
-        yield* byCell.all(context, clause.params[i]!, clause.params[i + 1]!, ...timeParams) as unknown as PositionRow[]
+        yield* byCell.all(id, clause.params[i]!, clause.params[i + 1]!, ...timeParams) as unknown as ContextRow[]
       }
     }
   }
@@ -1571,24 +1927,24 @@ export class SqliteTrackStore implements TrackStore {
     const inWindow = timeClauses.map((c) => ` AND ${c}`).join('')
     const named = contexts ? [...contexts] : []
 
-    const inside: Iterable<PositionRow> = contexts
+    const inside: Iterable<ContextRow> = contexts
       ? this.namedNearBounds(named, clause, inWindow, timeParams)
       : (this.db
           .prepare(
-            `SELECT context, timestamp, lat, lon FROM positions WHERE (${clause.where})${inWindow} ORDER BY context, timestamp`,
+            `SELECT context_id, timestamp, lat, lon FROM positions WHERE (${clause.where})${inWindow} ORDER BY context_id, timestamp`,
           )
-          .all(...clause.params, ...timeParams) as unknown as PositionRow[])
+          .all(...clause.params, ...timeParams) as unknown as ContextRow[])
     const inBounds = createInBounds(bounds)
-    const times = new Map<Context, number[]>()
+    const times = new Map<number, number[]>()
     let insideRows = 0
-    for (const { context, timestamp, lat, lon } of inside) {
+    for (const { context_id: id, timestamp, lat, lon } of inside) {
       insideRows++
       if (inBounds([lat, lon])) {
-        const list = times.get(context)
+        const list = times.get(id)
         if (list) {
           list.push(timestamp)
         } else {
-          times.set(context, [timestamp])
+          times.set(id, [timestamp])
         }
       }
     }
@@ -1599,7 +1955,7 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
 
-    const columns = 'SELECT rowid AS id, context, timestamp, lat, lon FROM positions WHERE context = ?'
+    const columns = 'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context_id = ?'
     const between = this.db.prepare(`${columns} AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp, rowid`)
     const before = this.db.prepare(
       `${columns} AND timestamp < ?${inWindow} ORDER BY timestamp DESC, rowid DESC LIMIT 1`,
@@ -1608,23 +1964,23 @@ export class SqliteTrackStore implements TrackStore {
     // The row after one in the order rows are kept: by time, then by row
     // among those recorded at the same time.
     const sameTime = this.db.prepare(`${columns} AND timestamp = ? AND rowid > ? ORDER BY rowid LIMIT 1`)
-    const nextAfter = (row: NumberedRow) =>
-      (sameTime.get(row.context, row.timestamp, row.id) ??
-        after.get(row.context, row.timestamp, ...timeParams)) as unknown as NumberedRow | undefined
-    for (const [context, list] of times) {
+    const nextAfter = (id: number, row: NumberedRow) =>
+      (sameTime.get(id, row.timestamp, row.id) ?? after.get(id, row.timestamp, ...timeParams)) as unknown as
+        NumberedRow | undefined
+    for (const [id, list] of times) {
       const rows = new Map<number, NumberedRow>()
       let last: NumberedRow | undefined
       for (const [start, end] of stretchesOf(list, this.stretchGap)) {
         const read = [
-          ...(before.all(context, start, ...timeParams) as unknown as NumberedRow[]),
-          ...(between.all(context, start, end) as unknown as NumberedRow[]),
-          ...(after.all(context, end, ...timeParams) as unknown as NumberedRow[]),
+          ...(before.all(id, start, ...timeParams) as unknown as NumberedRow[]),
+          ...(between.all(id, start, end) as unknown as NumberedRow[]),
+          ...(after.all(id, end, ...timeParams) as unknown as NumberedRow[]),
         ]
         // A stretch read apart from the one before leaves out what was
         // recorded between them. Marked, so the clip draws no line from one
         // to the other: across the box, it would be one never sailed.
         const first = read[0]
-        if (last && first && !rows.has(first.id) && nextAfter(last)?.id !== first.id) {
+        if (last && first && !rows.has(first.id) && nextAfter(id, last)?.id !== first.id) {
           first.breakBefore = true
         }
         // Keyed by row: where nothing was recorded between two stretches, one's
@@ -1635,7 +1991,7 @@ export class SqliteTrackStore implements TrackStore {
         last = read.at(-1)
       }
       near.set(
-        context,
+        this.nameOf(id),
         [...rows.values()].sort((a, b) => a.timestamp - b.timestamp || a.id - b.id),
       )
     }
@@ -1709,11 +2065,11 @@ export class SqliteTrackStore implements TrackStore {
       }
       return statement
     }
-    const fromSignificant = `SELECT position AS id, context, timestamp, lat, lon FROM significant INDEXED BY idx_significant_time WHERE context = ?`
-    const fromPositions = 'SELECT rowid AS id, context, timestamp, lat, lon FROM positions WHERE context = ?'
+    const fromSignificant = `SELECT position AS id, timestamp, lat, lon FROM significant INDEXED BY idx_significant_time WHERE context_id = ?`
+    const fromPositions = 'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context_id = ?'
     const visited = this.db.prepare(
       `SELECT DISTINCT hour FROM level_visits
-       WHERE context = ? AND lat_cell BETWEEN ? AND ? AND lon_cell BETWEEN ? AND ? AND hour >= ? AND hour <= ?`,
+       WHERE context_id = ? AND lat_cell BETWEEN ? AND ? AND lon_cell BETWEEN ? AND ? AND hour >= ? AND hour <= ?`,
     )
     const cells = splitAtAntimeridian(bounds).map(({ sw, ne }) => [
       visitCell(sw[0]),
@@ -1725,6 +2081,7 @@ export class SqliteTrackStore implements TrackStore {
       a.timestamp > b.timestamp || (a.timestamp === b.timestamp && a.id > b.id)
     let insideRows = 0
     for (const context of contexts) {
+      const id = this.idOf(context)
       const refined = this.refinedDays(context)
 
       const times: number[] = []
@@ -1744,7 +2101,7 @@ export class SqliteTrackStore implements TrackStore {
         const first = Math.floor(held.from / VISIT_HOUR_MS)
         const last = Math.floor(held.to / VISIT_HOUR_MS)
         for (const [south, north, west, east] of cells) {
-          for (const { hour } of visited.all(context, south!, north!, west!, east!, first, last) as unknown as {
+          for (const { hour } of visited.all(id, south!, north!, west!, east!, first, last) as unknown as {
             hour: number
           }[]) {
             insideRows++
@@ -1762,7 +2119,7 @@ export class SqliteTrackStore implements TrackStore {
 
       const edge = (order: string) =>
         query(`${fromPositions}${inRange(range)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`).get(
-          context,
+          id,
           range.from,
           range.to,
         ) as unknown as NumberedRow | undefined
@@ -1781,7 +2138,7 @@ export class SqliteTrackStore implements TrackStore {
         const parts = unrefinedIn(refined, side)
         for (const part of before ? parts.reverse() : parts) {
           found = query(`${fromPositions}${inRange(part)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`).get(
-            context,
+            id,
             part.from,
             part.to,
           ) as unknown as NumberedRow | undefined
@@ -1795,7 +2152,7 @@ export class SqliteTrackStore implements TrackStore {
             `${fromSignificant} AND level = ?${inRange(held)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`,
           )
           for (const level of levels) {
-            const row = seek.get(context, level, held.from, held.to) as unknown as NumberedRow | undefined
+            const row = seek.get(id, level, held.from, held.to) as unknown as NumberedRow | undefined
             if (row && nearer(row, found)) {
               found = row
             }
@@ -1825,7 +2182,7 @@ export class SqliteTrackStore implements TrackStore {
         const held = refinedIn(refined, stretch)
         if (held) {
           const read = query(`${fromSignificant} AND level IN (${levels.join(', ')})${inRange(held)}`).all(
-            context,
+            id,
             held.from,
             held.to,
           ) as unknown as NumberedRow[]
@@ -1835,7 +2192,7 @@ export class SqliteTrackStore implements TrackStore {
         }
         for (const part of unrefinedIn(refined, stretch)) {
           for (const row of query(`${fromPositions}${inRange(part)}`).all(
-            context,
+            id,
             part.from,
             part.to,
           ) as unknown as NumberedRow[]) {
@@ -1947,10 +2304,10 @@ export class SqliteTrackStore implements TrackStore {
     if (this.refinedThrough === lastDay && this.refinedSettled === settledDay) {
       return this.simplifyStored(settledDay, budget)
     }
-    const nextContext = this.db.prepare('SELECT context FROM positions WHERE context > ? ORDER BY context LIMIT 1')
-    let context: string | undefined = this.refineResume
+    const contextAfter = this.contextsAfter()
+    let context: Context | undefined = this.refineResume
     if (context === undefined) {
-      context = (nextContext.get('') as { context: string } | undefined)?.context
+      context = contextAfter(0)
       this.refinePass = { through: lastDay, settled: settledDay }
     }
     this.refineResume = undefined
@@ -1960,7 +2317,7 @@ export class SqliteTrackStore implements TrackStore {
         this.refineResume = context
         return true
       }
-      context = (nextContext.get(context) as { context: string } | undefined)?.context
+      context = contextAfter(this.idOf(context))
     }
     // A cutoff that moved while the pass went on, or a change it may have
     // gone past, sends it round again.
@@ -1988,14 +2345,14 @@ export class SqliteTrackStore implements TrackStore {
     for (;;) {
       const through = this.levelFrontier.get(context)
       const row = firstAt.get(
-        context,
+        this.idOf(context),
         through === undefined ? Number.NEGATIVE_INFINITY : (through + 1) * LEVEL_DAY_MS,
       ) as { timestamp: number } | undefined
       if (!row || dayOf(row.timestamp) > lastDay) {
         return budget
       }
       const day = dayOf(row.timestamp)
-      if (day > settledDay && !firstAt.get(context, (day + 1) * LEVEL_DAY_MS + REFINE_MARGIN)) {
+      if (day > settledDay && !firstAt.get(this.idOf(context), (day + 1) * LEVEL_DAY_MS + REFINE_MARGIN)) {
         this.refineWaiting.set(context, day)
         return budget
       }
@@ -2034,11 +2391,9 @@ export class SqliteTrackStore implements TrackStore {
           : (through + 1) * LEVEL_DAY_MS
       this.deleteSignificant(context, clearFrom, dayEnd)
     }
+    const id = this.idOf(context)
     const read = (limit: number) =>
-      statements.select.all(context, Math.max(from, dayStart), dayEnd, limit) as unknown as (Omit<
-        PositionRow,
-        'context'
-      > & {
+      statements.select.all(id, Math.max(from, dayStart), dayEnd, limit) as unknown as (PositionRow & {
         id: number
       })[]
     const limit = budget + LEVEL_PIECE_MAX
@@ -2075,7 +2430,7 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     for (const key of visits) {
-      statements.visit.run(context, ...key.split(' ').map(Number))
+      statements.visit.run(id, ...key.split(' ').map(Number))
     }
     if (stopped) {
       return budget
@@ -2098,14 +2453,14 @@ export class SqliteTrackStore implements TrackStore {
   private refining() {
     return (this.refineStatements ??= {
       select: this.db.prepare(
-        'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?',
+        'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?',
       ),
       copy: this.db.prepare(
-        `INSERT INTO significant (position, context, timestamp, lat, lon, level)
-         SELECT rowid, context, timestamp, lat, lon, ? FROM positions WHERE rowid = ?`,
+        `INSERT INTO significant (position, context_id, timestamp, lat, lon, level)
+         SELECT rowid, context_id, timestamp, lat, lon, ? FROM positions WHERE rowid = ?`,
       ),
       visit: this.db.prepare(
-        'INSERT OR IGNORE INTO level_visits (context, lat_cell, lon_cell, hour) VALUES (?, ?, ?, ?)',
+        'INSERT OR IGNORE INTO level_visits (context_id, lat_cell, lon_cell, hour) VALUES (?, ?, ?, ?)',
       ),
       unstale: this.db.prepare('DELETE FROM level_stale WHERE context = ? AND day = ?'),
       frontier: this.db.prepare(
@@ -2113,12 +2468,12 @@ export class SqliteTrackStore implements TrackStore {
       ),
       // Every level named, so each is a seek on the time index, not a walk over the context's rows.
       deleteSignificant: this.db.prepare(
-        `DELETE FROM significant WHERE context = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
+        `DELETE FROM significant WHERE context_id = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
       ),
-      deleteVisits: this.db.prepare('DELETE FROM level_visits WHERE context = ? AND hour >= ? AND hour < ?'),
+      deleteVisits: this.db.prepare('DELETE FROM level_visits WHERE context_id = ? AND hour >= ? AND hour < ?'),
       // A context's first position from a time on, for the pass over the contexts.
       firstAt: this.db.prepare(
-        'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
+        'SELECT timestamp FROM positions WHERE context_id = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
       ),
     })
   }
@@ -2172,21 +2527,18 @@ export class SqliteTrackStore implements TrackStore {
     if (this.simplifiedThrough === lastDay) {
       return false
     }
-    const nextContext = this.db.prepare('SELECT context FROM positions WHERE context > ? ORDER BY context LIMIT 1')
+    const contextAfter = this.contextsAfter()
     const firstAt = this.db.prepare(
-      'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
+      'SELECT timestamp FROM positions WHERE context_id = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
     )
-    let context: string | undefined = this.simplifyResume
-    if (context === undefined) {
-      context = (nextContext.get('') as { context: string } | undefined)?.context
-    }
+    let context = this.simplifyResume ?? contextAfter(0)
     this.simplifyResume = undefined
     while (context !== undefined) {
       const refined = this.levelFrontier.get(context)
       for (;;) {
         const through = this.simplifiedDay(context)
         const row = firstAt.get(
-          context,
+          this.idOf(context),
           through === undefined ? Number.NEGATIVE_INFINITY : (through + 1) * LEVEL_DAY_MS,
         ) as { timestamp: number } | undefined
         // Refining runs ahead of it with a storageTolerance; see refineLevels().
@@ -2199,7 +2551,7 @@ export class SqliteTrackStore implements TrackStore {
           return true
         }
       }
-      context = (nextContext.get(context) as { context: string } | undefined)?.context
+      context = contextAfter(this.idOf(context))
     }
     this.simplifiedThrough = lastDay
     return false
@@ -2222,6 +2574,7 @@ export class SqliteTrackStore implements TrackStore {
     const statements = this.simplifying()
     const dayStart = day * LEVEL_DAY_MS
     const dayEnd = dayStart + LEVEL_DAY_MS
+    const id = this.idOf(context)
     if (from === Number.NEGATIVE_INFINITY) {
       const written = statements.written.get(context, day) as { tolerance: number; positions: number } | undefined
       if (written) {
@@ -2233,7 +2586,7 @@ export class SqliteTrackStore implements TrackStore {
         // does.
         if (
           written.tolerance >= this.storageTolerance &&
-          (statements.count.get(context, dayStart, dayEnd) as { n: number }).n === written.positions
+          (statements.count.get(id, dayStart, dayEnd) as { n: number }).n === written.positions
         ) {
           this.simplifiedDayDone(context, day, pending)
           return budget
@@ -2241,10 +2594,7 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     const read = (limit: number) =>
-      statements.select.all(context, Math.max(from, dayStart), dayEnd, limit) as unknown as (Omit<
-        PositionRow,
-        'context'
-      > & {
+      statements.select.all(id, Math.max(from, dayStart), dayEnd, limit) as unknown as (PositionRow & {
         id: number
       })[]
     const limit = budget + LEVEL_PIECE_MAX
@@ -2258,9 +2608,7 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     const held = new Set(
-      (statements.held.all(context, dayStart, dayEnd) as unknown as { position: number }[]).map(
-        ({ position }) => position,
-      ),
+      (statements.held.all(id, dayStart, dayEnd) as unknown as { position: number }[]).map(({ position }) => position),
     )
     let stopped = false
     for (let p = 1; p < cuts.length; p++) {
@@ -2302,16 +2650,16 @@ export class SqliteTrackStore implements TrackStore {
   private simplifying() {
     return (this.simplifyStatements ??= {
       select: this.db.prepare(
-        'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?',
+        'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?',
       ),
       held: this.db.prepare(
-        `SELECT position FROM significant WHERE context = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
+        `SELECT position FROM significant WHERE context_id = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
       ),
       remove: this.db.prepare('DELETE FROM positions WHERE rowid = ?'),
       written: this.db.prepare('SELECT tolerance, positions FROM simplified_days WHERE context = ? AND day = ?'),
       unwritten: this.db.prepare('DELETE FROM simplified_days WHERE context = ? AND day = ?'),
       count: this.db.prepare(
-        'SELECT count(*) AS n FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ?',
+        'SELECT count(*) AS n FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ?',
       ),
       mark: this.db.prepare(
         `INSERT INTO simplified_days (context, day, tolerance, positions) VALUES (?, ?, ?, ?)
@@ -2321,12 +2669,13 @@ export class SqliteTrackStore implements TrackStore {
       // delete, never both, and its span can reach over days it left alone.
       unwrite: this.db.prepare(
         `DELETE FROM simplified_days WHERE context = ? AND day >= ? AND day <= ? AND positions !=
-           (SELECT count(*) FROM positions p WHERE p.context = simplified_days.context
+           (SELECT count(*) FROM positions p
+              WHERE p.context_id = (SELECT id FROM contexts WHERE context = simplified_days.context)
               AND p.timestamp >= simplified_days.day * ${LEVEL_DAY_MS}
               AND p.timestamp < (simplified_days.day + 1) * ${LEVEL_DAY_MS})`,
       ),
       recorded: this.db.prepare(
-        'SELECT 1 AS found FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? LIMIT 1',
+        'SELECT 1 AS found FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ? LIMIT 1',
       ),
       done: this.db.prepare('DELETE FROM simplify_pending WHERE context = ? AND day = ?'),
       frontier: this.db.prepare(
@@ -2405,7 +2754,7 @@ export class SqliteTrackStore implements TrackStore {
     this.deleteSignificant(context, first * LEVEL_DAY_MS, end)
     // Queued only where positions are left: a day emptied has nothing to refine.
     const next = this.db.prepare(
-      'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp LIMIT 1',
+      'SELECT timestamp FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp LIMIT 1',
     )
     const queue = this.db.prepare('INSERT OR IGNORE INTO level_stale (context, day) VALUES (?, ?)')
     // A day simplified already is simplified again once refined again, for
@@ -2413,7 +2762,7 @@ export class SqliteTrackStore implements TrackStore {
     const simplified = this.simplifiedDay(context)
     const resimplify = this.db.prepare('INSERT OR IGNORE INTO simplify_pending (context, day) VALUES (?, ?)')
     for (let day = first; day <= last;) {
-      const row = next.get(context, day * LEVEL_DAY_MS, end) as { timestamp: number } | undefined
+      const row = next.get(this.idOf(context), day * LEVEL_DAY_MS, end) as { timestamp: number } | undefined
       if (!row) {
         break
       }
@@ -2435,14 +2784,15 @@ export class SqliteTrackStore implements TrackStore {
   /** Take a context's significant positions, and its visits, from `from` until `to` out. */
   private deleteSignificant(context: Context, from: number, to: number): void {
     const statements = this.refining()
-    statements.deleteSignificant.run(context, from, to)
-    statements.deleteVisits.run(context, Math.floor(from / VISIT_HOUR_MS), Math.ceil(to / VISIT_HOUR_MS))
+    const id = this.idOf(context)
+    statements.deleteSignificant.run(id, from, to)
+    statements.deleteVisits.run(id, Math.floor(from / VISIT_HOUR_MS), Math.ceil(to / VISIT_HOUR_MS))
   }
 
   /** Forget a context's levels, for one whose positions are all gone or replaced. */
   private clearLevels(context: Context): void {
-    this.db.prepare('DELETE FROM significant WHERE context = ?').run(context)
-    this.db.prepare('DELETE FROM level_visits WHERE context = ?').run(context)
+    this.db.prepare('DELETE FROM significant WHERE context_id = ?').run(this.idOf(context))
+    this.db.prepare('DELETE FROM level_visits WHERE context_id = ?').run(this.idOf(context))
     this.db.prepare('DELETE FROM level_frontier WHERE context = ?').run(context)
     this.db.prepare('DELETE FROM level_stale WHERE context = ?').run(context)
     this.db.prepare('DELETE FROM simplify_frontier WHERE context = ?').run(context)
@@ -2516,17 +2866,21 @@ export class SqliteTrackStore implements TrackStore {
    */
   prune(maxAge: number, keep?: Context, now = Date.now()): void {
     const cutoff = now - maxAge
-    // Per context through the (context, timestamp) index rather than one
+    // Per context through the (context_id, timestamp) index rather than one
     // DELETE over the table: that index cannot seek on a timestamp alone, so a
     // single statement would scan every row each hour even with nothing to
     // drop. The grouping below reads only the index.
-    const spans = this.db
-      .prepare('SELECT context, MIN(timestamp) AS oldest, MAX(timestamp) AS newest FROM positions GROUP BY context')
-      .all() as { context: string; oldest: number; newest: number }[]
+    const spans = (
+      this.db
+        .prepare(
+          'SELECT context_id, MIN(timestamp) AS oldest, MAX(timestamp) AS newest FROM positions GROUP BY context_id',
+        )
+        .all() as { context_id: number; oldest: number; newest: number }[]
+    ).map(({ context_id: id, oldest, newest }) => ({ id, context: this.nameOf(id), oldest, newest }))
     const aged = spans.filter(({ context, oldest }) => context !== keep && oldest < cutoff)
-    const trim = this.db.prepare('DELETE FROM positions WHERE context = ? AND timestamp < ?')
-    for (const { context } of aged) {
-      trim.run(context, cutoff)
+    const trim = this.db.prepare('DELETE FROM positions WHERE context_id = ? AND timestamp < ?')
+    for (const { id, context } of aged) {
+      trim.run(id, cutoff)
       this.invalidateLevels(context, Number.NEGATIVE_INFINITY, cutoff)
     }
     const dropped = aged.filter(({ newest }) => newest < cutoff)
@@ -2566,7 +2920,7 @@ export class SqliteTrackStore implements TrackStore {
       if (keep === undefined) {
         this.db.prepare('DELETE FROM positions WHERE timestamp < ?').run(oldest)
       } else {
-        this.db.prepare('DELETE FROM positions WHERE timestamp < ? AND context IS ?').run(oldest, keep)
+        this.db.prepare('DELETE FROM positions WHERE timestamp < ? AND context_id = ?').run(oldest, this.idOf(keep))
       }
       for (const { context, oldest: first } of spans) {
         if (first < oldest && (keep === undefined || context === keep)) {
@@ -2575,6 +2929,35 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     this.thinOldDetail(now)
+    this.forgetContexts()
+  }
+
+  /**
+   * Take the contexts no table holds a row of any more out of `contexts`, or
+   * it would keep every vessel that ever passed: a seek per table each.
+   */
+  private forgetContexts(): void {
+    const gone = this.db
+      .prepare(
+        `DELETE FROM contexts
+         WHERE NOT EXISTS (SELECT 1 FROM positions WHERE context_id = contexts.id)
+           AND NOT EXISTS (SELECT 1 FROM significant WHERE context_id = contexts.id)
+           AND NOT EXISTS (SELECT 1 FROM level_visits WHERE context_id = contexts.id)
+           AND NOT EXISTS (SELECT 1 FROM binned_positions WHERE context_id = contexts.id)
+         RETURNING id, context`,
+      )
+      .all() as unknown as { id: number; context: Context }[]
+    for (const { id, context } of gone) {
+      this.contextIds.delete(context)
+      this.contextNames.delete(id)
+      // A pass to go on at it would go on from the first id instead.
+      if (this.refineResume === context) {
+        this.refineResume = undefined
+      }
+      if (this.simplifyResume === context) {
+        this.simplifyResume = undefined
+      }
+    }
   }
 
   /**
@@ -2613,10 +2996,10 @@ export class SqliteTrackStore implements TrackStore {
     // minimum, so this keeps the first row of each bucket. Bound as an
     // integer, or SQLite divides as REAL and every row is its own bucket.
     const thin = this.db.prepare(
-      `DELETE FROM positions WHERE context = ?1 AND timestamp >= ?2 AND timestamp <= ?3 AND rowid NOT IN (
+      `DELETE FROM positions WHERE context_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3 AND rowid NOT IN (
          SELECT id FROM (
            SELECT rowid AS id, min(timestamp) FROM positions
-           WHERE context = ?1 AND timestamp >= ?2 AND timestamp <= ?3
+           WHERE context_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3
            GROUP BY timestamp / CAST(?4 AS INTEGER)
          )
        )`,
@@ -2624,7 +3007,7 @@ export class SqliteTrackStore implements TrackStore {
     const done = this.db.prepare('DELETE FROM detail_spans WHERE id = ?')
     for (const { id, context, start, end } of spans) {
       if (end < cutoff) {
-        if (thin.run(context, start, end, this.resolution).changes) {
+        if (thin.run(this.idOf(context), start, end, this.resolution).changes) {
           this.invalidateLevels(context, start, end)
         }
         done.run(id)
@@ -2640,7 +3023,7 @@ export class SqliteTrackStore implements TrackStore {
         // can lose rows: the refined days of a long stay are left alone
         // until the spacing next widens, about once a day.
         const last = this.lastThin.get(id)
-        if (thin.run(context, start, cutoff - 1, spacing).changes) {
+        if (thin.run(this.idOf(context), start, cutoff - 1, spacing).changes) {
           this.invalidateLevels(context, last?.spacing === spacing ? last.cutoff : start, cutoff - 1)
         }
         this.lastThin.set(id, { spacing, cutoff })
@@ -2759,7 +3142,7 @@ export class SqliteTrackStore implements TrackStore {
     own: readonly Span[] = [],
   ): { kept: TimedPosition[][][]; overlapping: number } {
     const recorded = this.db.prepare(
-      'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?',
+      'SELECT timestamp FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp <= ?',
     )
     const kept: TimedPosition[][][] = []
     const index = new KeptRuns()
@@ -2773,7 +3156,7 @@ export class SqliteTrackStore implements TrackStore {
         if (first === undefined || last === undefined) continue
         const from = first.timestamp - MIN_FILLED_GAP_MS
         const to = last.timestamp + MIN_FILLED_GAP_MS
-        let stored = recorded.all(context, from, to) as { timestamp: number }[]
+        let stored = recorded.all(this.idOf(context), from, to) as { timestamp: number }[]
         if (r === 0 && own.length > 0) {
           stored = stored.filter(({ timestamp }) => !withinSpans(own, timestamp))
         }
@@ -2864,13 +3247,14 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     const { recorded, count } = this.simplifying()
+    const id = this.idOf(context)
     const dropped = segments.map(() => new Set<number>())
     for (const [day, entries] of byDay) {
       const own = mine.get(day)
       const others =
         own === undefined
-          ? recorded.get(context, day * LEVEL_DAY_MS, (day + 1) * LEVEL_DAY_MS) !== undefined
-          : (count.get(context, day * LEVEL_DAY_MS, (day + 1) * LEVEL_DAY_MS) as { n: number }).n !== own
+          ? recorded.get(id, day * LEVEL_DAY_MS, (day + 1) * LEVEL_DAY_MS) !== undefined
+          : (count.get(id, day * LEVEL_DAY_MS, (day + 1) * LEVEL_DAY_MS) as { n: number }).n !== own
       if (others) continue
       // In the order refineDay() reads them: by time, and as written, which is the rowid's order.
       entries.sort((a, b) => a.point.timestamp - b.point.timestamp)
@@ -3019,7 +3403,7 @@ export class SqliteTrackStore implements TrackStore {
   saveHistoryImport(state: HistoryImportState, runs: TimedPosition[][], since = -Infinity): number {
     const deleted = this.deletedSpans().filter(({ context }) => context === state.context)
     const recorded = this.db.prepare(
-      'SELECT timestamp FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?',
+      'SELECT timestamp FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp <= ?',
     )
     const kept: TimedPosition[][] = []
     let dropped = 0
@@ -3029,7 +3413,7 @@ export class SqliteTrackStore implements TrackStore {
       const last = visible.at(-1)
       if (first !== undefined && last !== undefined) {
         const around = recorded.all(
-          state.context,
+          this.idOf(state.context),
           Math.max(since, first.timestamp - MIN_FILLED_GAP_MS),
           last.timestamp + MIN_FILLED_GAP_MS,
         ) as { timestamp: number }[]
@@ -3137,19 +3521,19 @@ export class SqliteTrackStore implements TrackStore {
     const moved = Number(
       this.db
         .prepare(
-          `INSERT INTO binned_positions (bin_id, context, timestamp, lat, lon, s2cell)
-           SELECT ?, context, timestamp, lat, lon, s2cell FROM positions
-           WHERE context = ? AND timestamp >= ? AND timestamp <= ?`,
+          `INSERT INTO binned_positions (bin_id, context_id, timestamp, lat, lon, s2cell)
+           SELECT ?, context_id, timestamp, lat, lon, s2cell FROM positions
+           WHERE context_id = ? AND timestamp >= ? AND timestamp <= ?`,
         )
-        .run(id, context, lower, to).changes,
+        .run(id, this.idOf(context), lower, to).changes,
     )
     if (moved === 0 && !keepEmpty && into === undefined) {
       this.db.prepare('DELETE FROM recycle_bin WHERE id = ?').run(id)
       return { known }
     }
     this.db
-      .prepare('DELETE FROM positions WHERE context = ? AND timestamp >= ? AND timestamp <= ?')
-      .run(context, lower, to)
+      .prepare('DELETE FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp <= ?')
+      .run(this.idOf(context), lower, to)
     // Only the days at either end keep positions to refine again; those in
     // between are empty now, and their significant positions go with them.
     if (moved > 0) {
@@ -3253,17 +3637,17 @@ export class SqliteTrackStore implements TrackStore {
     if (entry.import_id === null) {
       const spans = this.db
         .prepare(
-          'SELECT context, min(timestamp) AS first, max(timestamp) AS last FROM binned_positions WHERE bin_id = ? GROUP BY context',
+          'SELECT context_id, min(timestamp) AS first, max(timestamp) AS last FROM binned_positions WHERE bin_id = ? GROUP BY context_id',
         )
-        .all(id) as unknown as { context: string; first: number; last: number }[]
+        .all(id) as unknown as { context_id: number; first: number; last: number }[]
       this.db
         .prepare(
-          `INSERT INTO positions (context, timestamp, lat, lon, s2cell)
-           SELECT context, timestamp, lat, lon, s2cell FROM binned_positions WHERE bin_id = ?`,
+          `INSERT INTO positions (context_id, timestamp, lat, lon, s2cell)
+           SELECT context_id, timestamp, lat, lon, s2cell FROM binned_positions WHERE bin_id = ?`,
         )
         .run(id)
-      for (const { context, first, last } of spans) {
-        this.invalidateLevels(context, first, last)
+      for (const { context_id: contextId, first, last } of spans) {
+        this.invalidateLevels(this.nameOf(contextId), first, last)
       }
       this.db.prepare('DELETE FROM binned_positions WHERE bin_id = ?').run(id)
     } else {
@@ -3467,10 +3851,49 @@ export class SqliteTrackStore implements TrackStore {
           )
         }
       }
-      // What the write did to the level state in memory went with it.
+      // What the write did to the state in memory went with it.
+      this.loadContexts()
       this.loadLevels()
       throw error
     }
+  }
+
+  /** The contexts' ids as the database holds them. */
+  private loadContexts(): void {
+    this.contextIds.clear()
+    this.contextNames.clear()
+    for (const { id, context } of this.db.prepare('SELECT id, context FROM contexts').all() as unknown as {
+      id: number
+      context: Context
+    }[]) {
+      this.contextIds.set(context, id)
+      this.contextNames.set(id, context)
+    }
+  }
+
+  /** A context's id, or NO_CONTEXT for one the store holds no row of, or never did. */
+  private idOf(context: Context): number {
+    return this.contextIds.get(context) ?? NO_CONTEXT
+  }
+
+  /** A context's id, given it one if it has none: for a write of its positions. */
+  private idFor(context: Context): number {
+    let id = this.contextIds.get(context)
+    if (id === undefined) {
+      id = (this.db.prepare('INSERT INTO contexts (context) VALUES (?) RETURNING id').get(context) as { id: number }).id
+      this.contextIds.set(context, id)
+      this.contextNames.set(id, context)
+    }
+    return id
+  }
+
+  /** The context an id stands for. */
+  private nameOf(id: number): Context {
+    const context = this.contextNames.get(id)
+    if (context === undefined) {
+      throw new Error(`No context has id ${id}`)
+    }
+    return context
   }
 
   /** The level state as the database holds it, with nothing in progress. */
@@ -3520,9 +3943,9 @@ export class SqliteTrackStore implements TrackStore {
 
   /** Unsigned round-trip check, used by the tests. */
   cellIdsFor(context: Context): bigint[] {
-    const stmt = this.db.prepare('SELECT s2cell FROM positions WHERE context = ? ORDER BY timestamp, rowid')
+    const stmt = this.db.prepare('SELECT s2cell FROM positions WHERE context_id = ? ORDER BY timestamp, rowid')
     stmt.setReadBigInts(true)
-    const rows = stmt.all(context) as unknown as { s2cell: bigint }[]
+    const rows = stmt.all(this.idOf(context)) as unknown as { s2cell: bigint }[]
     return rows.map(({ s2cell }) => toUnsigned(s2cell))
   }
 }

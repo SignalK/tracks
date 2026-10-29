@@ -52,6 +52,27 @@ this plugin, such as Freeboard, draws no new ones for AIS targets. What was reco
 before stays until those days run out, or for good when they are set to 0. The webapp says that
 they are not being recorded. Another vessel's track can still be imported.
 
+Each position names its vessel by a number, which a table in the file turns back into the vessel,
+rather than in full: the file takes about half the space an older version's did. The first start
+after updating from such a version rewrites `tracks.db` once, as a new file that then replaces it.
+The new file is built beside `tracks.db`, or, where that is a link, beside the file it points to.
+That takes about 8 seconds for two million positions on a Raspberry Pi 5, while the plugin waits.
+It needs room on the disk for the new file: about half the old one where recorded positions take
+most of it, and up to its whole size where imported tracks do, since those are
+copied as they are. It needs room in the temporary directory too, for sorting its largest index,
+about an eighth of the old file. Close other programs that have the file open, an `sqlite3` shell
+say, before updating. One that holds a lock on it when the plugin starts keeps it from being
+rewritten: the plugin then does not start, says why, and tries again at its next start. A write
+to the file while it is being rewritten either fails, as SQLite answers that the database is
+locked, or stops the rewrite the same way, and the old file stays as it was. On Windows, a
+program that opens the file, writes to it and closes it again in the instant before the new file
+replaces the old one loses that write. On Linux and macOS,
+one that holds no lock, as a shell left idle may, does not keep the file from being rewritten,
+and still has the old file open once the new one has replaced it: what it reads then is no longer
+the database, and a write from it can damage the new file, so close it before it writes anything.
+An older version cannot read the rewritten file; to go back to one, restore a backup of
+`tracks.db` taken before updating.
+
 ### Keeping tracks for years
 
 The own vessel's track is kept here indefinitely. For a track recorded before Signal K, or while

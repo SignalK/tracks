@@ -1386,6 +1386,29 @@ describe('DELETE /plugins/tracks/database', () => {
     },
   )
 
+  it('deletes a rewrite of the database a crash left half built', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    writeFileSync(join(h.dataDir, 'tracks.db.migrating'), 'half built')
+
+    await request(h.app).delete(DELETE_URL).expect(200)
+
+    expect(existsSync(join(h.dataDir, 'tracks.db.migrating'))).toBe(false)
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'deletes a rewrite left half built beside the file a link to the database points to',
+    async () => {
+      const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+      await linkedElsewhere(h, async (target) => {
+        writeFileSync(`${target}.migrating`, 'half built')
+
+        await request(h.app).delete(DELETE_URL).expect(200)
+
+        expect(existsSync(`${target}.migrating`)).toBe(false)
+      })
+    },
+  )
+
   it('answers 409 to a second delete while the first waits for the store to close', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
     const gate = holdClose()
