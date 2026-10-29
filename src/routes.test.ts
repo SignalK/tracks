@@ -24,11 +24,30 @@ import type { TrackApi } from './trackApi.js'
 const API = '/signalk/v1/api'
 const SELF_ID = SELF_CONTEXT.replace('vessels.', '')
 
+/**
+ * Run once, before the next asynchronous `realpath` the plugin asks for, so a
+ * test can act while the delete follows the link to the database.
+ */
+const following = vi.hoisted(() => ({ before: undefined as (() => Promise<unknown>) | undefined }))
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...fs,
+    realpath: async (...args: Parameters<typeof fs.realpath>) => {
+      const before = following.before
+      following.before = undefined
+      await before?.()
+      return fs.realpath(...args)
+    },
+  }
+})
+
 let harness: TestHarness | undefined
 /** Releases for closes a test held, so a test that fails holding one cannot hang the ones after it. */
 const heldCloses: (() => void)[] = []
 
 afterEach(async () => {
+  following.before = undefined
   for (const release of heldCloses.splice(0)) release()
   await harness?.stop()
   harness = undefined
@@ -1331,6 +1350,30 @@ describe('DELETE /plugins/tracks/database', () => {
 
     gate.release()
     expect((await first).status).toBe(200)
+  })
+
+  it('answers 409 to a second delete while the first follows the link to the database', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    let second: request.Response | undefined
+    following.before = async () => (second = await request(h.app).delete(DELETE_URL))
+
+    await request(h.app).delete(DELETE_URL).expect(200)
+
+    expect(second?.status).toBe(409)
+    expect(second?.body.message).toBe('The track database is being deleted already.')
+  })
+
+  it('deletes nothing, and starts nothing, when the server stops the plugin while the delete follows the link', async () => {
+    const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+    following.before = () => h.stop()
+
+    const res = await request(h.app).delete(DELETE_URL).expect(409)
+
+    expect(res.body.message).toBe('The plugin was restarted or stopped while the delete waited; nothing was deleted.')
+    expect(h.store()).toBeUndefined()
+    await h.restart()
+    const kept = await request(h.app).get(`${API}/self/track`).expect(200)
+    expect(kept.body.coordinates).toEqual([[[24.9, 60.1]]])
   })
 
   it('deletes nothing when the server restarts the plugin while the delete waits', async () => {

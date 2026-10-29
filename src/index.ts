@@ -16,6 +16,7 @@
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
 import { lstatSync, realpathSync, rmSync } from 'node:fs'
+import { lstat, realpath } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { createTrackProvider } from './trackProvider.js'
 import type { TrackProvider } from './trackProvider.js'
@@ -344,6 +345,26 @@ const followLinks = (file: string): string => {
   } catch (err) {
     if (lstatSync(file, { throwIfNoEntry: false }) !== undefined) throw err
     return join(realpathSync(dirname(file)), basename(file))
+  }
+}
+
+/**
+ * {@link followLinks} off the event loop, so that a disk that stops
+ * answering holds the caller rather than the server.
+ */
+const followLinksAsync = async (file: string): Promise<string> => {
+  try {
+    return await realpath(file)
+  } catch (err) {
+    const there = await lstat(file).then(
+      () => true,
+      (missing: NodeJS.ErrnoException) => {
+        if (missing.code === 'ENOENT') return false
+        throw missing
+      },
+    )
+    if (there) throw err
+    return join(await realpath(dirname(file)), basename(file))
   }
 }
 
@@ -1671,6 +1692,7 @@ export default function ThePlugin(app: App): Plugin {
           })
         }
         const config = startedWith
+        const asked = lifecycle
         // Not `tracks`: a store that will not open is the case this is for.
         if (!config) {
           notAvailable(res)
@@ -1692,15 +1714,23 @@ export default function ThePlugin(app: App): Plugin {
         // A link to the database stays, and the file it points to goes, so
         // that the empty database is created where the user put the old one.
         const file = join(dataDir, 'tracks.db')
-        let target: string
-        try {
-          target = followLinks(file)
-        } catch (err) {
-          unreachable(err)
-          return
-        }
         resetting = true
         void (async () => {
+          let target: string
+          try {
+            target = await followLinksAsync(file)
+          } catch (err) {
+            unreachable(err)
+            return
+          }
+          // As after the stop below, the server's restart or stop while the
+          // link was followed wins.
+          if (lifecycle !== asked) {
+            res
+              .status(409)
+              .json({ message: 'The plugin was restarted or stopped while the delete waited; nothing was deleted.' })
+            return
+          }
           const stopping = plugin.stop()
           const stopped = lifecycle
           await stopping
@@ -1718,7 +1748,12 @@ export default function ThePlugin(app: App): Plugin {
           try {
             // Followed again now that the plugin has stopped: a link changed
             // meanwhile deletes nothing, rather than a file it no longer
-            // points to.
+            // points to. Synchronous, as the delete is, so that neither the
+            // server's restart nor its stop lands between them and the start
+            // below. The follow before the stop, and the close of a store that
+            // was open, reach the disk first and off the event loop: only a
+            // disk that stops answering in the moment between holds the
+            // server here.
             let now: string | undefined
             try {
               now = followLinks(file)
