@@ -16,7 +16,7 @@
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
 import { lstatSync, realpathSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { createTrackProvider } from './trackProvider.js'
 import type { TrackProvider } from './trackProvider.js'
 import { recordedId } from './recycleBin.js'
@@ -333,16 +333,17 @@ const notAvailable = (res: Response) => {
 const errorDetail = (err: unknown): string => (err instanceof Error && err.stack ? err.stack : String(err))
 
 /**
- * The file `file` is once links are followed, or `file` itself when nothing
- * is there. Throws for one that cannot be reached, such as a link into a disk
- * not mounted, or past a directory the server's user may not enter.
+ * The file `file` is once links are followed, or would be when nothing is
+ * there, so that the two compare equal. Throws for one that cannot be
+ * reached, such as a link into a disk not mounted, or past a directory the
+ * server's user may not enter.
  */
 const followLinks = (file: string): string => {
   try {
     return realpathSync(file)
   } catch (err) {
-    if (lstatSync(file, { throwIfNoEntry: false }) === undefined) return file
-    throw err
+    if (lstatSync(file, { throwIfNoEntry: false }) !== undefined) throw err
+    return join(realpathSync(dirname(file)), basename(file))
   }
 }
 

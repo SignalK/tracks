@@ -1179,6 +1179,45 @@ describe('DELETE /plugins/tracks/database', () => {
     )
   }
 
+  // As on macOS, where the temporary directory is under /var, a link to
+  // /private/var: a database not there yet when the delete is asked for is
+  // the same one once the plugin has stopped.
+  it.skipIf(process.platform === 'win32')(
+    'deletes a database made only while the delete waits, in a data directory reached through a link',
+    async () => {
+      const real = mkdtempSync(join(tmpdir(), 'sk-tracks-real-'))
+      const linked = `${real}-link`
+      symlinkSync(real, linked)
+      const tmp = process.env.TMPDIR
+      process.env.TMPDIR = linked
+      let h: TestHarness
+      try {
+        h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
+      } finally {
+        if (tmp === undefined) delete process.env.TMPDIR
+        else process.env.TMPDIR = tmp
+      }
+      try {
+        await request(h.app).get(`${API}/self/track`).expect(200)
+        for (const suffix of ['', '-wal', '-shm']) rmSync(join(h.dataDir, `tracks.db${suffix}`), { force: true })
+        const gate = holdClose(() => writeFileSync(join(h.dataDir, 'tracks.db'), ''))
+        const answer = request(h.app)
+          .delete(DELETE_URL)
+          .then((res) => res)
+        await gate.waiting()
+        gate.release()
+
+        const res = await answer
+        expect(res.status).toBe(200)
+        expect(res.body).toEqual({ deleted: true })
+      } finally {
+        await h.stop()
+        rmSync(linked, { force: true })
+        rmSync(real, { recursive: true, force: true })
+      }
+    },
+  )
+
   const UNREACHABLE =
     'The track database, or the file a link to it points to, cannot be reached, so nothing was deleted. The server log says why.'
 
@@ -1369,8 +1408,10 @@ describe('DELETE /plugins/tracks/database', () => {
 
   it('says so when the plugin does not start again after the delete', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
-    // With its directory gone, the new store cannot be created.
-    const gate = holdClose(() => rmSync(h.dataDir, { recursive: true, force: true }))
+    // With its directory gone, the new store cannot be created. Gone once
+    // the delete has run, up to the new store's start, which waits for its
+    // worker: gone before, the delete would find nothing to delete.
+    const gate = holdClose(() => setImmediate(() => rmSync(h.dataDir, { recursive: true, force: true })))
     const answer = request(h.app)
       .delete(DELETE_URL)
       .then((res) => res)
