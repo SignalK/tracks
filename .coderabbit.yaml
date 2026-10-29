@@ -83,7 +83,7 @@ reviews:
 
         ## What NOT to flag
         Do not flag the following patterns — they are intentional, and each is
-        explained in AGENTS.md:
+        explained in AGENTS.md or below:
         - `main` and `exports` both pointing at `dist/index.js` in package.json,
           and the comment defending it. The server resolves plugins by directory
           and reads `main`; dropping it makes the plugin unloadable.
@@ -112,6 +112,11 @@ reviews:
           opt-in via `npm run test:e2e` and deliberately absent from CI.
         - The absence of a CHANGELOG. Release notes are generated from merged PR
           titles by `.github/workflows/release_on_tag.yml`.
+        - A test harness member called missing, such as `h.dataDir`,
+          `h.store()` or `h.errors`. `TestHarness`, which `createHarness()`
+          returns, is in `src/harness.test-utils.ts`, which a diff seldom
+          touches: read it before reporting one. CI's `npm run test:ci`
+          type-checks the tests, so a member that is not there fails the build.
 
         ## Scope
         Focus on files changed since main. Think carefully about how changes
