@@ -1101,7 +1101,7 @@ describe('DELETE /plugins/tracks/database', () => {
           const res = await request(h.app).delete(DELETE_URL).expect(500)
 
           expect(res.body.message).toBe('Could not delete the track database')
-          expect(h.errors.flat().join('\n')).toContain('EACCES')
+          expect(h.errors.flat().join('\n')).toMatch(/Could not delete the track database: .*EACCES/)
           expect(existsSync(target)).toBe(true)
           expect(lstatSync(join(h.dataDir, 'tracks.db')).isSymbolicLink()).toBe(true)
           h.emit(SELF_CONTEXT, [60.3, 24.7])
@@ -1169,6 +1169,11 @@ describe('DELETE /plugins/tracks/database', () => {
             'The track database changed or could no longer be reached while the delete waited; nothing was deleted.',
           )
           expect(existsSync(target)).toBe(true)
+          if (!existing) {
+            expect(h.errors.flat().join('\n')).toMatch(
+              /Not deleting the track database, which can no longer be reached: .*ENOENT/,
+            )
+          }
         })
       },
     )
@@ -1191,7 +1196,7 @@ describe('DELETE /plugins/tracks/database', () => {
       const res = await request(h.app).delete(DELETE_URL).expect(409)
 
       expect(res.body.message).toBe(UNREACHABLE)
-      expect(h.errors.flat().join('\n')).toContain('ENOENT')
+      expect(h.errors.flat().join('\n')).toMatch(/Not deleting the track database, which cannot be reached: .*ENOENT/)
       expect(lstatSync(join(h.dataDir, 'tracks.db')).isSymbolicLink()).toBe(true)
     },
   )
@@ -1206,7 +1211,9 @@ describe('DELETE /plugins/tracks/database', () => {
           const res = await request(h.app).delete(DELETE_URL).expect(409)
 
           expect(res.body.message).toBe(UNREACHABLE)
-          expect(h.errors.flat().join('\n')).toContain('EACCES')
+          expect(h.errors.flat().join('\n')).toMatch(
+            /Not deleting the track database, which cannot be reached: .*EACCES/,
+          )
           expect(lstatSync(join(h.dataDir, 'tracks.db')).isSymbolicLink()).toBe(true)
           // The store the plugin had open is left as it was.
           h.emit(SELF_CONTEXT, [60.3, 24.7])
@@ -1234,7 +1241,7 @@ describe('DELETE /plugins/tracks/database', () => {
         const res = await request(h.app).delete(DELETE_URL).expect(409)
 
         expect(res.body.message).toBe(UNREACHABLE)
-        expect(h.errors.flat().join('\n')).toContain('EACCES')
+        expect(h.errors.flat().join('\n')).toMatch(/Not deleting the track database, which cannot be reached: .*EACCES/)
       } finally {
         chmodSync(h.dataDir, 0o755)
       }
@@ -1259,7 +1266,7 @@ describe('DELETE /plugins/tracks/database', () => {
         const res = await request(h.app).delete(DELETE_URL).expect(409)
 
         expect(res.body.message).toBe(UNREACHABLE)
-        expect(h.errors.flat().join('\n')).toContain('EEXIST')
+        expect(h.errors.flat().join('\n')).toMatch(/Not deleting the track database, which cannot be reached: .*EEXIST/)
         expect(h.store()).toBe(running)
       } finally {
         rmSync(h.dataDir, { force: true })
