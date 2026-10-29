@@ -255,6 +255,11 @@ Deleted parts of the own vessel's recording are forgotten as well, so a history 
 brings them back. It asks for `DELETE` to be typed before it goes ahead. The route,
 `DELETE /plugins/tracks/database?confirm=DELETE`, needs administrator rights and the same word.
 
+If `tracks.db` in the plugin's data directory is a link to a file elsewhere, such as on another
+disk, the file it points to is deleted and the link stays, so the empty database is created there.
+If the plugin cannot reach that file, as on a disk that is not mounted, or may not delete it,
+the database stays as it was and the webapp says so.
+
 ## Glitch filtering
 
 A receiver occasionally reports a position far from the vessel — a bad almanac, a multipath
