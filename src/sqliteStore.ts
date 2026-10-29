@@ -841,18 +841,21 @@ function migrate(path: string, debug: Debug): void {
         lock.exec('PRAGMA busy_timeout = 0')
         lockExclusive(lock, file)
       }
-      const moved = changeCounter(header) !== changes
-      if (!lock) {
-        const fd = header
-        header = undefined
-        closeSync(fd)
-      }
-      // A write by another program while this one read the file, which the
-      // rename would lose, or whose log SQLite would replay into the new file.
-      if (moved || hotLog(`${file}-journal`) || hotLog(`${file}-wal`)) {
-        throw new Error(`${file} was written to while it was rewritten for this version`)
-      }
       for (let attempt = 1; ; attempt++) {
+        // Checked again before each try at the rename: without the lock, a
+        // program may have written to the file while the last one waited.
+        header ??= openSync(file, 'r')
+        const moved = changeCounter(header) !== changes
+        if (!lock) {
+          const fd = header
+          header = undefined
+          closeSync(fd)
+        }
+        // A write by another program while this one read the file, which the
+        // rename would lose, or whose log SQLite would replay into the new file.
+        if (moved || hotLog(`${file}-journal`) || hotLog(`${file}-wal`)) {
+          throw new Error(`${file} was written to while it was rewritten for this version`)
+        }
         try {
           renameSync(next, file)
           break

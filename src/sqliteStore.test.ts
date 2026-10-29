@@ -14,10 +14,13 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
-// A way into a rewrite for an older database between its last read of the
-// old file and its check that nothing wrote to it since: the fsync of the new
-// file comes in between.
-const rewriting = vi.hoisted(() => ({ beforeFsync: undefined as (() => void) | undefined }))
+// Ways into a rewrite for an older database: between its last read of the
+// old file and its check that nothing wrote to it since, where the fsync of
+// the new file comes in, and at each try to rename the new file over it.
+const rewriting = vi.hoisted(() => ({
+  beforeFsync: undefined as (() => void) | undefined,
+  beforeRename: undefined as (() => void) | undefined,
+}))
 vi.mock('node:fs', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs')>()
   return {
@@ -25,6 +28,10 @@ vi.mock('node:fs', async (importOriginal) => {
     fsyncSync: (fd: number) => {
       rewriting.beforeFsync?.()
       fs.fsyncSync(fd)
+    },
+    renameSync: (from: string, to: string) => {
+      rewriting.beforeRename?.()
+      fs.renameSync(from, to)
     },
   }
 })
@@ -3309,6 +3316,84 @@ describe('the position index', () => {
     },
     15_000,
   )
+
+  it.skipIf(process.platform === 'win32')(
+    'holds the lock on an older database while it renames the rewrite over it',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+      try {
+        const file = join(dir, 'tracks.db')
+        const older = new DatabaseSync(file)
+        older.exec(OLD_POSITIONS)
+        older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+        older.close()
+        const refused: number[] = []
+        rewriting.beforeRename = () => {
+          rewriting.beforeRename = undefined
+          const writer = new DatabaseSync(file)
+          try {
+            writer.exec('PRAGMA busy_timeout = 0')
+            writer.exec('BEGIN IMMEDIATE')
+          } catch (error) {
+            refused.push(((error as { errcode?: number }).errcode ?? 0) & 0xff)
+          } finally {
+            writer.close()
+          }
+        }
+        try {
+          const store = new SqliteTrackStore({ file }, debug)
+          store.close()
+        } finally {
+          rewriting.beforeRename = undefined
+        }
+
+        expect(refused).toEqual([5])
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  // As on Windows, which takes no lock and tries the rename again while a
+  // scanner holds a file: a write between two tries stops the rewrite.
+  it('leaves an older database as it is when something writes to it while a rename is tried again', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+    try {
+      const file = join(dir, 'tracks.db')
+      const older = new DatabaseSync(file)
+      older.exec(OLD_POSITIONS)
+      older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+      older.close()
+      Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+      rewriting.beforeRename = () => {
+        rewriting.beforeRename = undefined
+        const writer = new DatabaseSync(file)
+        writer.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0 + 1000, 60.2, 24.8)
+        writer.close()
+        throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+      }
+      try {
+        expect(() => new SqliteTrackStore({ file }, debug)).toThrow(/was written to while it was rewritten/)
+      } finally {
+        rewriting.beforeRename = undefined
+        if (platform) Object.defineProperty(process, 'platform', platform)
+      }
+      expect(existsSync(`${file}.migrating`)).toBe(false)
+      const kept = new DatabaseSync(file)
+      expect(kept.prepare('PRAGMA user_version').get()).toEqual({ user_version: 0 })
+      expect(kept.prepare('SELECT count(*) AS n FROM positions').get()).toEqual({ n: 2 })
+      kept.close()
+
+      // Rewritten at the next start, the write included.
+      const store = new SqliteTrackStore({ file }, debug)
+      expect(await store.getTimed(ctx)).toHaveLength(2)
+      store.close()
+    } finally {
+      if (platform) Object.defineProperty(process, 'platform', platform)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
   it('builds the rewrite again where a crash left it half built', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
