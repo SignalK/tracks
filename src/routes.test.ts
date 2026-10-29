@@ -15,6 +15,10 @@ import { get } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import zlib from 'node:zlib'
+import type { Gzip } from 'node:zlib'
+import compression from 'compression'
+import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AsyncTrackStore } from './asyncTrackStore.js'
@@ -950,6 +954,74 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
 
     expect(read).toHaveBeenCalledTimes(1)
     expect(h.errors).toEqual([])
+  })
+
+  // The server mounts compression ahead of every route. It hands a `drain`
+  // listener to its compression stream and leaves taking one off to the
+  // response, so a listener added for each wait stays on the stream to the
+  // end, each holding the day it waited to send: hundreds of MB for a
+  // recording of years.
+  it('waits for the client through the server compression on one listener', async () => {
+    const h = (harness = createHarness({ selfPosition: [60, 24] }))
+    const day = Date.UTC(2026, 6, 1)
+    // A day of 1,000 points is more text than the gzip stream takes before
+    // it asks the writer to wait (64 KiB), so the write of each day waits.
+    const times = Array.from({ length: 20 }, (_, d) =>
+      Array.from({ length: 1000 }, (_, i) => day + d * 24 * 60 * 60_000 + i * 1000),
+    ).flat()
+    h.seedTrack(
+      SELF_CONTEXT,
+      times.map((_, i) => [60 + (i % 1000) * 1e-4, 24]),
+      times,
+    )
+    const streams: Gzip[] = []
+    // Whether the stream asked the export to wait and has not drained since,
+    // how often it asked, and how often the export read on regardless.
+    let full = false
+    let waits = 0
+    let readAhead = 0
+    const createGzip = zlib.createGzip
+    vi.spyOn(zlib, 'createGzip').mockImplementation((options) => {
+      const stream = createGzip(options)
+      streams.push(stream)
+      const write = stream.write.bind(stream) as (chunk: unknown) => boolean
+      stream.write = ((chunk: unknown) => {
+        full = !write(chunk)
+        if (full) waits++
+        return !full
+      }) as Gzip['write']
+      // A client slower than the store: the drain comes 50 ms late, so an
+      // export that does not wait for it reads on while the stream is full.
+      const emit = stream.emit.bind(stream)
+      stream.emit = ((event: string | symbol, ...args: unknown[]) => {
+        if (event !== 'drain') return emit(event, ...args)
+        setTimeout(() => {
+          full = false
+          emit(event, ...args)
+        }, 50)
+        return true
+      }) as Gzip['emit']
+      return stream
+    })
+    // The export asks for the next day as soon as the one before is written.
+    const timeExtent = AsyncTrackStore.prototype.timeExtent
+    vi.spyOn(AsyncTrackStore.prototype, 'timeExtent').mockImplementation(function (this: AsyncTrackStore, ...args) {
+      if (full) readAhead++
+      return timeExtent.apply(this, args)
+    })
+    const server = express()
+    server.use(compression())
+    server.use(h.app)
+
+    const res = await request(server).get(`${API}/self/track.gpx`).set('Accept-Encoding', 'gzip').expect(200)
+
+    expect(res.headers['content-encoding']).toBe('gzip')
+    expect(fromGpx(res.text)[0]?.segments.flat()).toHaveLength(times.length)
+    expect(streams).toHaveLength(1)
+    expect(waits).toBeGreaterThan(1)
+    expect(readAhead).toBe(0)
+    // Fewer than one a wait: they do not pile up.
+    expect(streams[0]!.listenerCount('drain')).toBeLessThan(waits)
   })
 
   // The GPX and JSON routes share one read pipeline, so a window read by one

@@ -1130,25 +1130,31 @@ export default function ThePlugin(app: App): Plugin {
           // years holds a day of it rather than all of it, twice over, on the
           // server's own thread.
           let closed = false
+          // One listener of each for the whole response, waking whichever
+          // write is waiting. The server's compression middleware hands a
+          // `drain` listener to its compression stream but leaves `off` on
+          // the response, so a listener added per wait could never be taken
+          // off again, and each would hold the day of text it waited to send.
+          let waiting: (() => void) | undefined
+          const wake = () => {
+            const resume = waiting
+            waiting = undefined
+            resume?.()
+          }
           res.on('close', () => {
             closed = true
+            wake()
           })
+          res.on('drain', wake)
+          // A response already closed takes nothing and says so by no event.
+          // Otherwise a write the response cannot take yet waits for the
+          // client to take what was sent, or to go away.
           const send = (text: string): Promise<void> =>
-            new Promise((resolve) => {
-              // A response already closed takes nothing and says so by no event.
-              if (text === '' || closed || res.write(text)) {
-                resolve()
-                return
-              }
-              // Waits for the client to take what was sent, or to go away.
-              const done = () => {
-                res.off('drain', done)
-                res.off('close', done)
-                resolve()
-              }
-              res.on('drain', done)
-              res.on('close', done)
-            })
+            text === '' || closed || res.write(text)
+              ? Promise.resolve()
+              : new Promise((resolve) => {
+                  waiting = resolve
+                })
           const begin = async () => {
             if (res.headersSent) return
             const filename = gpxFilename(label)
