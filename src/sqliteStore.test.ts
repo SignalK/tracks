@@ -3196,8 +3196,10 @@ describe('the position index', () => {
         try {
           ;({ file } = crashedBehindLink(dir))
         } catch (error) {
-          // Making a link needs extra rights on Windows.
-          if ((error as { code?: string }).code === 'EPERM') {
+          // Making a link needs extra rights on Windows. Skip for that alone:
+          // an EPERM from copying the files would hide what the test is for.
+          const { code, syscall } = error as { code?: string; syscall?: string }
+          if (code === 'EPERM' && syscall === 'symlink') {
             context.skip()
           }
           throw error
