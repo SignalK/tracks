@@ -718,7 +718,7 @@ const BY_CONTEXT_ID = ['positions', 'binned_positions', 'significant', 'level_vi
 
 /** SQLITE_BUSY and SQLITE_LOCKED, which node:sqlite reports as extended codes: another connection holds the database. */
 const HELD = new Set([5, 6])
-/** What Windows answers a rename with while a scanner or an indexer has a file open, and what retrying it waits out. */
+/** What Windows answers a rename, or an open of the old file, with while a scanner or an indexer has a file open, and what retrying it waits out. */
 const RENAME_BUSY = new Set(['EPERM', 'EBUSY', 'EACCES'])
 /** How often, and how long apart, migrate() tries to take a database out of WAL mode or lock it, or to rename the new one over it. */
 const LEAVE_WAL_TRIES = 10
@@ -833,30 +833,31 @@ function migrate(path: string, debug: Debug): void {
     // and so refuses the rename while another program has it open.
     const lock = process.platform === 'win32' ? undefined : new DatabaseSync(file)
     // Opened before the lock and closed after it, as for the probe above;
-    // without one, before the rename, which Windows refuses over a file this
-    // process has open too.
-    let header: number | undefined = openSync(file, 'r')
+    // without one, at each try and closed before the rename, which Windows
+    // refuses over a file this process has open too.
+    let header = lock ? openSync(file, 'r') : undefined
     try {
       if (lock) {
         lock.exec('PRAGMA busy_timeout = 0')
         lockExclusive(lock, file)
       }
       for (let attempt = 1; ; attempt++) {
-        // Checked again before each try at the rename: without the lock, a
-        // program may have written to the file while the last one waited.
-        header ??= openSync(file, 'r')
-        const moved = changeCounter(header) !== changes
-        if (!lock) {
-          const fd = header
-          header = undefined
-          closeSync(fd)
-        }
-        // A write by another program while this one read the file, which the
-        // rename would lose, or whose log SQLite would replay into the new file.
-        if (moved || hotLog(`${file}-journal`) || hotLog(`${file}-wal`)) {
-          throw new Error(`${file} was written to while it was rewritten for this version`)
-        }
         try {
+          // Checked again before each try at the rename: without the lock, a
+          // program may have written to the file while the last one waited.
+          header ??= openSync(file, 'r')
+          const moved = changeCounter(header) !== changes
+          if (!lock) {
+            const fd = header
+            header = undefined
+            closeSync(fd)
+          }
+          // A write by another program while this one read the file, which the
+          // rename would lose, or whose log SQLite would replay into the new
+          // file.
+          if (moved || hotLog(`${file}-journal`) || hotLog(`${file}-wal`)) {
+            throw new Error(`${file} was written to while it was rewritten for this version`)
+          }
           renameSync(next, file)
           break
         } catch (error) {

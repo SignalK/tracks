@@ -4,6 +4,7 @@ import {
   lstatSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -17,10 +18,12 @@ import { describe, expect, it, vi } from 'vitest'
 
 // Ways into a rewrite for an older database: between its last read of the
 // old file and its check that nothing wrote to it since, where the fsync of
-// the new file comes in, and at each try to rename the new file over it.
+// the new file comes in, at each try to rename the new file over it, and at
+// each open of a file.
 const rewriting = vi.hoisted(() => ({
   beforeFsync: undefined as (() => void) | undefined,
   beforeRename: undefined as (() => void) | undefined,
+  beforeOpen: undefined as ((path: unknown) => void) | undefined,
 }))
 vi.mock('node:fs', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs')>()
@@ -33,6 +36,10 @@ vi.mock('node:fs', async (importOriginal) => {
     renameSync: (from: string, to: string) => {
       rewriting.beforeRename?.()
       fs.renameSync(from, to)
+    },
+    openSync: (...args: Parameters<typeof fs.openSync>) => {
+      rewriting.beforeOpen?.(args[0])
+      return fs.openSync(...args)
     },
   }
 })
@@ -3400,6 +3407,54 @@ describe('the position index', () => {
       const store = new SqliteTrackStore({ file }, debug)
       expect(await store.getTimed(ctx)).toHaveLength(2)
       store.close()
+    } finally {
+      if (platform) Object.defineProperty(process, 'platform', platform)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // As on Windows, where a scanner can hold the old file as well as the new
+  // one: an open of it refused between two tries at the rename is waited out
+  // as the rename is.
+  it('tries the rename again when the old database is held as it is checked again', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+    const busy = (what: string) =>
+      Object.assign(new Error(`EBUSY: resource busy or locked, ${what}`), { code: 'EBUSY' })
+    try {
+      const file = join(dir, 'tracks.db')
+      const older = new DatabaseSync(file)
+      older.exec(OLD_POSITIONS)
+      older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+      older.close()
+      Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+      // The file as the rewrite names it, its directory's links followed.
+      const opened = realpathSync(file)
+      let refused = false
+      rewriting.beforeRename = () => {
+        rewriting.beforeRename = undefined
+        rewriting.beforeOpen = (path) => {
+          if (path !== opened) return
+          rewriting.beforeOpen = undefined
+          refused = true
+          throw busy('open')
+        }
+        throw busy('rename')
+      }
+      let store: SqliteTrackStore
+      try {
+        store = new SqliteTrackStore({ file }, debug)
+      } finally {
+        rewriting.beforeRename = undefined
+        rewriting.beforeOpen = undefined
+        if (platform) Object.defineProperty(process, 'platform', platform)
+      }
+      expect(refused).toBe(true)
+      expect(await store.getTimed(ctx)).toHaveLength(1)
+      store.close()
+      const rewritten = new DatabaseSync(file)
+      expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      rewritten.close()
     } finally {
       if (platform) Object.defineProperty(process, 'platform', platform)
       rmSync(dir, { recursive: true, force: true })
