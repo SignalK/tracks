@@ -939,18 +939,20 @@ describe('GET /vessels/:vesselId/track.gpx', () => {
   })
 })
 
-// The webapp says how long other vessels are kept, and lists them that far back.
+// The webapp says how long other vessels are kept, lists them that far back,
+// and says when they are not recorded.
 describe('GET /plugins/tracks/settings', () => {
   it.each([
-    [{}, 7],
-    [{ aisRetentionDays: 3 }, 3],
-    [{ aisRetentionDays: 0 }, 0],
-  ])('answers how many days other vessels are kept (%j)', async (config, days) => {
+    [{}, 7, true],
+    [{ aisRetentionDays: 3 }, 3, true],
+    [{ aisRetentionDays: 0 }, 0, true],
+    [{ recordOtherVessels: false }, 7, false],
+  ])('answers how other vessels are kept (%j)', async (config, days, recorded) => {
     const h = (harness = createHarness({ selfPosition: [60, 24], config }))
 
     const res = await request(h.app).get('/plugins/tracks/settings').expect(200)
 
-    expect(res.body).toEqual({ aisRetentionDays: days })
+    expect(res.body).toEqual({ aisRetentionDays: days, recordOtherVessels: recorded })
   })
 })
 

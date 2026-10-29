@@ -314,7 +314,7 @@ const daysText = (days) => `${days} day${days === 1 ? '' : 's'}`
  * whether the own vessel's request answered, and with its recording: when it
  * did not, its row is the list's window of it.
  */
-function describe(sorted, retention, own) {
+function describe(sorted, others, own) {
   const has = (kind) => sorted.some((properties) => kindOf(properties) === kind)
   const window = `the last ${daysText(listDays)}`
   lists.own.note.textContent = own.whole
@@ -325,24 +325,34 @@ function describe(sorted, retention, own) {
         ? `In ${window}.`
         : `None in ${window}.`
   const kept =
-    retention === undefined
+    others.days === undefined
       ? ''
-      : retention > 0
-        ? ` The plugin keeps them ${daysText(retention)}.`
+      : others.days > 0
+        ? ` The plugin keeps them ${daysText(others.days)}.`
         : ' The plugin keeps them indefinitely.'
-  lists.others.note.textContent = has('others') ? `In ${window}.${kept}` : `None in ${window}.${kept}`
+  // Or the list would read as though the receiver had heard no one.
+  const recorded = others.recorded === false ? " Recording them is turned off in the plugin's settings." : ''
+  lists.others.note.textContent = `${has('others') ? 'In' : 'None in'} ${window}.${kept}${recorded}`
   lists.imported.note.textContent = has('imported') ? 'Kept until deleted, however old.' : 'No imported tracks.'
 }
 
-/** How many days the plugin keeps other vessels, 0 for indefinitely, or undefined when it does not say. */
-async function retention(signal) {
+/**
+ * How the plugin is set for other vessels: the days it keeps them, 0 for
+ * indefinitely, and whether it records them, each undefined when it does not
+ * say.
+ */
+async function othersSettings(signal) {
   try {
     const response = await fetch(SETTINGS_URL, { credentials: 'include', signal })
     const body = response.ok ? await response.json() : undefined
     const days = body?.aisRetentionDays
-    return Number.isFinite(days) && days >= 0 ? days : undefined
+    const recorded = body?.recordOtherVessels
+    return {
+      days: Number.isFinite(days) && days >= 0 ? days : undefined,
+      recorded: typeof recorded === 'boolean' ? recorded : undefined,
+    }
   } catch {
-    return undefined
+    return { days: undefined, recorded: undefined }
   }
 }
 
@@ -376,7 +386,7 @@ async function load() {
   // announces where the wait ended rather than every second of it.
   status.setAttribute('aria-busy', 'true')
   // Beside the own vessel's tracks: it asks the plugin, not the store.
-  const kept = retention(AbortSignal.timeout(OWN_WAIT_MS))
+  const settings = othersSettings(AbortSignal.timeout(OWN_WAIT_MS))
   try {
     // The others are asked for once this settles, not beside it: the store
     // answers one query at a time, so asked together the own vessel's would
@@ -389,16 +399,16 @@ async function load() {
       waiting = 'Loading the other vessels…'
       tick()
     }
-    const days = await kept
-    listDays = days > 0 ? days : LIST_DAYS
-    await list(deadline, own, days)
+    const others = await settings
+    listDays = others.days > 0 ? others.days : LIST_DAYS
+    await list(deadline, own, others)
   } finally {
     clearInterval(ticker)
     status.setAttribute('aria-busy', 'false')
   }
 }
 
-async function list(deadline, own, retention) {
+async function list(deadline, own, others) {
   const imports = allImports(deadline)
   let response
   try {
@@ -466,7 +476,7 @@ async function list(deadline, own, retention) {
   const older = (await namesByProvider(listed, unlisted, deadline))
     ? unlisted
     : unlisted.map((properties) => ({ ...properties, id: localId(properties), providerId: undefined }))
-  describe(draw([...listed, ...older]), retention, { whole, answered: own !== undefined })
+  describe(draw([...listed, ...older]), others, { whole, answered: own !== undefined })
   show('')
   status.hidden = true
 }

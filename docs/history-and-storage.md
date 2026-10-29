@@ -15,7 +15,8 @@ write can take seconds), but it cannot damage the file. How long they are kept
 depends on whose they are: the own vessel's track is kept indefinitely, and
 another vessel's positions are dropped after the number of days set in the
 plugin settings, whether it is still in range or not. Setting that to 0 keeps
-every position.
+them indefinitely, simplified as below. Other vessels are not recorded at all
+while the setting to record them is turned off.
 
 Once a day is more than a day old, the store also simplifies it, to half a
 metre unless the plugin's settings give another tolerance, for every vessel and
