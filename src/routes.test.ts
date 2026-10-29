@@ -1063,6 +1063,8 @@ describe('DELETE /plugins/tracks/database', () => {
       await h.restart()
       await then(target, elsewhere)
     } finally {
+      // A test that fails holding a close would otherwise wait for it here.
+      for (const release of heldCloses.splice(0)) release()
       await h.stop()
       rmSync(elsewhere, { recursive: true, force: true })
     }
