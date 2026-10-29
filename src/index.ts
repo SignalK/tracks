@@ -15,8 +15,9 @@
 
 import { Temporal } from '@js-temporal/polyfill'
 import type { Request, RequestHandler, Response, Router } from 'express'
-import { existsSync, realpathSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { lstatSync, realpathSync, rmSync } from 'node:fs'
+import { lstat, realpath } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { createTrackProvider } from './trackProvider.js'
 import type { TrackProvider } from './trackProvider.js'
 import { recordedId } from './recycleBin.js'
@@ -331,6 +332,47 @@ const notAvailable = (res: Response) => {
 }
 
 const errorDetail = (err: unknown): string => (err instanceof Error && err.stack ? err.stack : String(err))
+
+/**
+ * The file `file` is once links are followed, or would be when nothing is
+ * there, so that the two compare equal. Throws for one that cannot be
+ * reached, such as a link into a disk not mounted, or past a directory the
+ * server's user may not enter.
+ *
+ * With the system's own realpath, which follows links as SQLite's open
+ * does, and spells the file as the asynchronous one does. Node's
+ * `realpathSync` takes a `..` in a link's target before the links it
+ * passes, and so can name another file, and on Windows it keeps the short
+ * names the system's expands.
+ */
+const followLinks = (file: string): string => {
+  try {
+    return realpathSync.native(file)
+  } catch (err) {
+    if (lstatSync(file, { throwIfNoEntry: false }) !== undefined) throw err
+    return join(realpathSync.native(dirname(file)), basename(file))
+  }
+}
+
+/**
+ * {@link followLinks} off the event loop, so that a disk that stops
+ * answering holds the caller rather than the server.
+ */
+const followLinksAsync = async (file: string): Promise<string> => {
+  try {
+    return await realpath(file)
+  } catch (err) {
+    const there = await lstat(file).then(
+      () => true,
+      (missing: NodeJS.ErrnoException) => {
+        if (missing.code === 'ENOENT') return false
+        throw missing
+      },
+    )
+    if (there) throw err
+    return join(await realpath(dirname(file)), basename(file))
+  }
+}
 
 /**
  * Reject once `ms` has passed.
@@ -1646,15 +1688,55 @@ export default function ThePlugin(app: App): Plugin {
           res.status(409).json({ message: 'The track database is being deleted already.' })
           return
         }
+        // A database that cannot be reached deletes nothing: one on a disk not
+        // mounted would be left behind.
+        const unreachable = (err: unknown) => {
+          app.error(`Not deleting the track database, which cannot be reached: ${errorDetail(err)}`)
+          res.status(409).json({
+            message:
+              'The track database, or the file a link to it points to, cannot be reached, so nothing was deleted. The server log says why.',
+          })
+        }
         const config = startedWith
-        const dataDir = app.getDataDirPath?.()
+        const asked = lifecycle
         // Not `tracks`: a store that will not open is the case this is for.
-        if (!config || !dataDir) {
+        if (!config) {
           notAvailable(res)
           return
         }
+        let dataDir: string | undefined
+        try {
+          // The server makes the directory as it is asked for it, which
+          // throws for one that is a link that points nowhere.
+          dataDir = app.getDataDirPath?.()
+        } catch (err) {
+          unreachable(err)
+          return
+        }
+        if (!dataDir) {
+          notAvailable(res)
+          return
+        }
+        // A link to the database stays, and the file it points to goes, so
+        // that the empty database is created where the user put the old one.
+        const file = join(dataDir, 'tracks.db')
         resetting = true
         void (async () => {
+          let target: string
+          try {
+            target = await followLinksAsync(file)
+          } catch (err) {
+            unreachable(err)
+            return
+          }
+          // As after the stop below, the server's restart or stop while the
+          // link was followed wins.
+          if (lifecycle !== asked) {
+            res
+              .status(409)
+              .json({ message: 'The plugin was restarted or stopped while the delete waited; nothing was deleted.' })
+            return
+          }
           const stopping = plugin.stop()
           const stopped = lifecycle
           await stopping
@@ -1668,14 +1750,34 @@ export default function ThePlugin(app: App): Plugin {
             return
           }
           let restarted: number
+          let moved: boolean
           try {
-            // And a rewrite for a newer schema that a crash left half built,
-            // which is built beside the file a link to the database points to.
-            const file = join(dataDir, 'tracks.db')
-            const target = existsSync(file) ? realpathSync(file) : file
-            rmSync(`${target}.migrating`, { force: true })
-            for (const suffix of ['', '-wal', '-shm', '.migrating']) {
-              rmSync(`${file}${suffix}`, { force: true })
+            // Followed again now that the plugin has stopped: a link changed
+            // meanwhile deletes nothing, rather than a file it no longer
+            // points to. Synchronous, as the delete is, so that neither the
+            // server's restart nor its stop lands between them and the start
+            // below. The follow before the stop, and the close of a store that
+            // was open, reach the disk first and off the event loop: only a
+            // disk that stops answering in the moment between holds the
+            // server here.
+            let now: string | undefined
+            try {
+              now = followLinks(file)
+            } catch (err) {
+              app.error(`Not deleting the track database, which can no longer be reached: ${errorDetail(err)}`)
+            }
+            moved = now !== target
+            if (!moved) {
+              // SQLite keeps the -wal and -shm beside the file a link points
+              // to, and on Windows beside the link. They go first: refused
+              // part way, the delete then leaves a database that opens, rather
+              // than a stray -wal beside an empty one. And before them a
+              // rewrite for a newer schema that a crash left half built, which
+              // is built beside the file a link points to too.
+              for (const base of new Set([target, file])) {
+                for (const suffix of ['.migrating', '-wal', '-shm']) rmSync(`${base}${suffix}`, { force: true })
+              }
+              rmSync(target, { force: true })
             }
           } finally {
             // Started again whatever the delete did, so a file that would not
@@ -1683,6 +1785,13 @@ export default function ThePlugin(app: App): Plugin {
             const starting = plugin.start(config)
             restarted = lifecycle
             await starting
+          }
+          if (moved) {
+            res.status(409).json({
+              message:
+                'The track database changed or could no longer be reached while the delete waited; nothing was deleted.',
+            })
+            return
           }
           // A store the server stopped or replaced meanwhile is not one that
           // failed to open.

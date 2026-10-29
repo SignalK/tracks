@@ -95,11 +95,16 @@ simplified instead, to the smallest tolerance up to 32 m whose significance leve
 the budget. It is spaced in time to fit instead where the query sets `maxPoints`, which asks for
 spacing, where no tolerance up to 32 m holds it, or where tracks split at pauses (**Split a track
 after this many minutes without a fix**). The answer says which in `epsilon` or `resolution`. A
-track within the budget is answered as before. A query with a box is not counted. With `clip`,
-which the server sets for any box from 2.34, it reads the stretches near the box, which for a box
-around the whole track is all of it; without `clip`, a query that names a vessel reads its whole
-track. The webapp's GPX export of the own vessel still writes every position of the whole
-recording.
+track within the budget is answered as before. A query with a box and `clip`, which the server
+sets for any box from 2.34, is not counted: it reads the stretches near the box, which for a box
+around the whole track is all of it. Nor is a query with a box that names no vessel. Without
+`clip`, a query that names a vessel would read its whole track, so that read is counted, every
+position of the window. A track over the budget is read to fit and matched against the box on
+what that read keeps: thinned to the query's `resolution` where that holds it within the budget,
+or else read first at the tolerance the box asks for where that is 4 m or more. A vessel that
+came into the box by less than the tolerance, or for less than the spacing, can then be left out,
+and one whose kept line cuts across a box it went round matches it. The webapp's GPX export of
+the own vessel still writes every position of the whole recording.
 
 ## Imported tracks
 
@@ -269,6 +274,11 @@ vessel's row exports its whole recording as GPX, and each import exports from it
 Deleted parts of the own vessel's recording are forgotten as well, so a history import afterwards
 brings them back. It asks for `DELETE` to be typed before it goes ahead. The route,
 `DELETE /plugins/tracks/database?confirm=DELETE`, needs administrator rights and the same word.
+
+If `tracks.db` in the plugin's data directory is a link to a file elsewhere, such as on another
+disk, the file it points to is deleted and the link stays, so the empty database is created there.
+If the plugin cannot reach that file, as on a disk that is not mounted, or may not delete it,
+the database stays as it was and the webapp says so.
 
 ## Glitch filtering
 

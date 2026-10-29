@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import express from 'express'
@@ -78,6 +78,11 @@ export interface TestHarness {
 export interface HarnessOptions {
   /** Plugin config overrides. Bootstrap is disabled by default so tests stay hermetic. */
   config?: Record<string, unknown>
+  /**
+   * Make the data directory whenever the plugin asks for it and it is not
+   * there, as the server does, rather than once for the harness.
+   */
+  makesDataDir?: boolean
   selfContext?: string
   selfPosition?: LatLngTuple
   /** Initial navigation.state for the own vessel. */
@@ -175,7 +180,10 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
     error: (...args: unknown[]) => errors.push(args),
     setPluginStatus: (msg: string) => statuses.push(msg),
     selfContext,
-    getDataDirPath: () => dataDir,
+    getDataDirPath: () => {
+      if (options.makesDataDir === true && !existsSync(dataDir)) mkdirSync(dataDir)
+      return dataDir
+    },
     ...(options.paths === undefined ? {} : { getPath: (path: string): unknown => options.paths?.[path] }),
     ...(options.history === undefined
       ? {}
