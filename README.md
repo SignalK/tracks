@@ -56,14 +56,17 @@ Each position names its vessel by a number, which a table in the file turns back
 rather than in full: the file takes about half the space an older version's did. The first start
 after updating from such a version rewrites `tracks.db` once, as a new file beside it that then
 replaces it. That takes about 8 seconds for two million positions on a Raspberry Pi 5, while the
-plugin waits, and needs room on the disk for the new file, about half the old one, and in the
-temporary directory for sorting its largest index, about an eighth of the old file. A program that
-holds the file open when the plugin starts, an `sqlite3` shell say, keeps it from being rewritten:
-the plugin then does not start, says why, and tries again at its next start. A program that writes
-to the file while it is being rewritten stops the rewrite the same way, and the old file stays as
-it was, but for a write in the instant before the new file replaces it, which is lost, as is what a
-program that still has the old file open writes after that. An older version cannot read the
-rewritten file; to go back to one, restore a backup of `tracks.db` taken before updating.
+plugin waits. It needs room on the disk for the new file: about half the old one where recorded
+positions take most of it, and up to its whole size where imported tracks do, since those are
+copied as they are. It needs room in the temporary directory too, for sorting its largest index,
+about an eighth of the old file. Close other programs that have the file open, an `sqlite3` shell
+say, before updating. One that holds a lock on it when the plugin starts keeps it from being
+rewritten: the plugin then does not start, says why, and tries again at its next start. One that
+holds none, as a shell left idle may, does not, and what it writes once the new file has replaced
+the old one is lost. A program that writes to the file while it is being rewritten stops the
+rewrite the same way, and the old file stays as it was, but for a write in the instant before the
+new file replaces it, which is lost too. An older version cannot read the rewritten file; to go
+back to one, restore a backup of `tracks.db` taken before updating.
 
 ### Keeping tracks for years
 

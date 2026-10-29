@@ -1614,8 +1614,9 @@ export class SqliteTrackStore implements TrackStore {
         longitudeSpan((longitudes.all(id, ...windowParams) as unknown as { lon: number }[]).map(({ lon }) => lon))
       return { context: this.nameOf(id), pointCount: count, first, last, bbox: [west, south, east, north] }
     })
-    // In the order of their names, as grouped by name they came: by their
-    // UTF-8 bytes, as SQLite orders them, which contexts() lists them in.
+    // By name, in the order of their UTF-8 bytes that SQLite sorts text in,
+    // as contexts() lists them: grouped by id, they come in the order of
+    // their ids.
     return summaries.sort((a, b) => Buffer.compare(Buffer.from(a.context), Buffer.from(b.context)))
   }
 
