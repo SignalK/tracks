@@ -61,12 +61,14 @@ positions take most of it, and up to its whole size where imported tracks do, si
 copied as they are. It needs room in the temporary directory too, for sorting its largest index,
 about an eighth of the old file. Close other programs that have the file open, an `sqlite3` shell
 say, before updating. One that holds a lock on it when the plugin starts keeps it from being
-rewritten: the plugin then does not start, says why, and tries again at its next start. One that
-holds none, as a shell left idle may, does not, and what it writes once the new file has replaced
-the old one is lost. A program that writes to the file while it is being rewritten stops the
-rewrite the same way, and the old file stays as it was, but for a write in the instant before the
-new file replaces it, which is lost too. An older version cannot read the rewritten file; to go
-back to one, restore a backup of `tracks.db` taken before updating.
+rewritten: the plugin then does not start, says why, and tries again at its next start. A write
+to the file while it is being rewritten either fails, as SQLite answers that the database is
+locked, or stops the rewrite the same way, and the old file stays as it was. On Linux and macOS,
+one that holds no lock, as a shell left idle may, does not keep the file from being rewritten,
+and still has the old file open once the new one has replaced it: what it reads then is no longer
+the database, and a write from it can damage the new file, so close it before it writes anything.
+An older version cannot read the rewritten file; to go back to one, restore a backup of
+`tracks.db` taken before updating.
 
 ### Keeping tracks for years
 

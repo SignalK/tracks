@@ -720,7 +720,7 @@ const BY_CONTEXT_ID = ['positions', 'binned_positions', 'significant', 'level_vi
 const HELD = new Set([5, 6])
 /** What Windows answers a rename with while a scanner or an indexer has a file open, and what retrying it waits out. */
 const RENAME_BUSY = new Set(['EPERM', 'EBUSY', 'EACCES'])
-/** How often, and how long apart, migrate() tries to take a database out of WAL mode, or to rename the new one over it. */
+/** How often, and how long apart, migrate() tries to take a database out of WAL mode or lock it, or to rename the new one over it. */
 const LEAVE_WAL_TRIES = 10
 const LEAVE_WAL_WAIT_MS = 500
 
@@ -735,8 +735,10 @@ const LEAVE_WAL_WAIT_MS = 500
  * mode, which writes back and removes its log, so no log is ever left beside
  * the new file to be replayed into it. That cannot be done while another
  * connection holds it, which a few tries wait out; the store then does not
- * open. A crash anywhere leaves either database whole, and a new file left
- * half built is built again.
+ * open. The new file replaces the old one under a lock on it, so that a write
+ * another program began meanwhile stops the rewrite rather than being lost.
+ * A crash anywhere leaves either database whole, and a new file left half
+ * built is built again.
  */
 function migrate(path: string, debug: Debug): void {
   if (!existsSync(path)) {
@@ -822,29 +824,44 @@ function migrate(path: string, debug: Debug): void {
     } finally {
       closeSync(fd)
     }
-    // A write by another program while this one read the file, which the
-    // rename would lose, or whose log SQLite would replay into the new file.
+    // The last checks and the rename under an exclusive lock on the old file.
+    // A write another program began on it meanwhile is then in the change
+    // counter already, or holds a lock that keeps this one from being taken.
+    // A program that keeps the old file open past the rename is beyond any
+    // lock, and the README asks for it to be closed. Not on Windows, which
+    // renames nothing over a file that is open, this connection's included,
+    // and so refuses the rename while another program has it open.
+    const lock = process.platform === 'win32' ? undefined : new DatabaseSync(file)
+    // Opened before the lock and closed after it, as for the probe above.
     const header = openSync(file, 'r')
-    let moved: boolean
     try {
-      moved = changeCounter(header) !== changes
-    } finally {
-      closeSync(header)
-    }
-    if (moved || hotLog(`${file}-journal`) || hotLog(`${file}-wal`)) {
-      throw new Error(`${file} was written to while it was rewritten for this version`)
-    }
-    for (let attempt = 1; ; attempt++) {
-      try {
-        renameSync(next, file)
-        break
-      } catch (error) {
-        const busy = process.platform === 'win32' && RENAME_BUSY.has((error as { code?: string }).code ?? '')
-        if (attempt === LEAVE_WAL_TRIES || !busy) {
-          throw error
-        }
-        pause(LEAVE_WAL_WAIT_MS)
+      if (lock) {
+        lock.exec('PRAGMA busy_timeout = 0')
+        lockExclusive(lock, file)
       }
+      // A write by another program while this one read the file, which the
+      // rename would lose, or whose log SQLite would replay into the new file.
+      if (changeCounter(header) !== changes || hotLog(`${file}-journal`) || hotLog(`${file}-wal`)) {
+        throw new Error(`${file} was written to while it was rewritten for this version`)
+      }
+      for (let attempt = 1; ; attempt++) {
+        try {
+          renameSync(next, file)
+          break
+        } catch (error) {
+          const busy = process.platform === 'win32' && RENAME_BUSY.has((error as { code?: string }).code ?? '')
+          if (attempt === LEAVE_WAL_TRIES || !busy) {
+            throw error
+          }
+          pause(LEAVE_WAL_WAIT_MS)
+        }
+      }
+    } finally {
+      if (lock?.isTransaction) {
+        lock.exec('ROLLBACK')
+      }
+      lock?.close()
+      closeSync(header)
     }
   } catch (error) {
     // Up to half the old file, which on a full disk would keep it full.
@@ -891,6 +908,27 @@ function hotLog(log: string): boolean {
     return readSync(fd, first, 0, 1, 0) === 1 && first[0] !== 0
   } finally {
     closeSync(fd)
+  }
+}
+
+/**
+ * Take an exclusive lock on the database `db` has open at `file`, waiting out
+ * another connection that holds one for a few tries.
+ */
+function lockExclusive(db: DatabaseSync, file: string): void {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      db.exec('BEGIN EXCLUSIVE')
+      return
+    } catch (error) {
+      if (!HELD.has(((error as { errcode?: number }).errcode ?? 0) & 0xff)) {
+        throw error
+      }
+    }
+    if (attempt === LEAVE_WAL_TRIES) {
+      throw new Error(`${file} needs rewriting for this version, but another connection holds it open`)
+    }
+    pause(LEAVE_WAL_WAIT_MS)
   }
 }
 

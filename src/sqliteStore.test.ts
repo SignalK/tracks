@@ -3268,6 +3268,48 @@ describe('the position index', () => {
     }
   })
 
+  // Begun during the rewrite and waiting for its lock, the write shows in
+  // neither the change counter nor a hot journal yet: renamed over, it would
+  // land in the replaced file, and its program be told it was made.
+  it.skipIf(process.platform === 'win32')(
+    'leaves an older database as it is while a write begun during the rewrite waits for it',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+      const held: { writer?: DatabaseSync } = {}
+      try {
+        const file = join(dir, 'tracks.db')
+        const older = new DatabaseSync(file)
+        older.exec(OLD_POSITIONS)
+        older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+        older.close()
+        rewriting.beforeFsync = () => {
+          rewriting.beforeFsync = undefined
+          held.writer = new DatabaseSync(file)
+          held.writer.exec('BEGIN IMMEDIATE')
+          held.writer.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0 + 1000, 60.2, 24.8)
+        }
+        try {
+          expect(() => new SqliteTrackStore({ file }, debug)).toThrow(/another connection holds it open/)
+        } finally {
+          rewriting.beforeFsync = undefined
+        }
+        expect(existsSync(`${file}.migrating`)).toBe(false)
+
+        // The write goes through to the file, which the next start rewrites.
+        held.writer?.exec('COMMIT')
+        held.writer?.close()
+        delete held.writer
+        const store = new SqliteTrackStore({ file }, debug)
+        expect(await store.getTimed(ctx)).toHaveLength(2)
+        store.close()
+      } finally {
+        held.writer?.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    15_000,
+  )
+
   it('builds the rewrite again where a crash left it half built', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
     try {
