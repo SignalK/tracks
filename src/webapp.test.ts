@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { toGpx } from './gpx.js'
 import { trackLabel } from './utils.js'
 import { parseDuration } from './timeWindow.js'
 // @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
@@ -1334,6 +1335,25 @@ describe('the import form', () => {
     })
   })
 
+  it('proposes no track plainly another vessel’s, and says what was seen of the others', () => {
+    const from = '2023-08-29T21:57:38Z'
+    const to = '2023-08-30T08:00:00Z'
+    expect(trackChoice({ name: 'Passage', points: 40000, from, to, elsewhere: 'Own Ship', foreign: true })).toEqual({
+      name: 'Passage',
+      label: `Passage: ${(40000).toLocaleString()} points, 2023-08-29 to 2023-08-30, elsewhere than Own Ship at the same time`,
+      disabled: false,
+      checked: false,
+    })
+    expect(trackChoice({ name: '', points: 2, from, to, elsewhere: 'Eigenes Schiff' })).toMatchObject({
+      label: expect.stringMatching(/^\(no name\): .*, elsewhere than Eigenes Schiff at the same time$/),
+      checked: true,
+    })
+    expect(trackChoice({ name: 'Log', points: 2, from, to, elsewhere: 'Own Ship', partly: true })).toMatchObject({
+      label: expect.stringMatching(/, partly elsewhere than Own Ship at the same time$/),
+      checked: true,
+    })
+  })
+
   /** Stand-ins for the form's elements, enough for start() to wire up. */
   const formStub = (over: { self?: object; file?: object } = {}) => {
     const listening = () => ({ addEventListener: () => {} })
@@ -1462,6 +1482,587 @@ describe('a GPX file uploaded in slices', () => {
       true,
     )
     expect([...read.parts.keys()]).toEqual([1])
+  })
+
+  const at = (lat: number | string, lon: number | string, time: string) =>
+    `<trkpt lat="${lat}" lon="${lon}"><time>${time}</time></trkpt>`
+  const track = (name: string, points: string[]) => `<trk><name>${name}</name><trkseg>${points.join('')}</trkseg></trk>`
+  const gpxBy = (creator: string | undefined, ...tracks: string[]) =>
+    new Blob([
+      [
+        `<?xml version="1.0"?><gpx version="1.1"${creator === undefined ? '' : ` creator="${creator}"`} xmlns="${GPX}">`,
+        ...tracks,
+        '</gpx>',
+      ].join('\n'),
+    ])
+  // As TimeZero writes one: naming no creator.
+  const gpxOf = (...tracks: string[]) => gpxBy(undefined, ...tracks)
+  /** Steps of ten minutes from midnight UTC on 2023-03-01, and minutes on from there. */
+  const msOf = (step: number, minutes = 0) => Date.UTC(2023, 2, 1) + (step * 10 + minutes) * 60_000
+  const utc = (step: number, minutes = 0) => new Date(msOf(step, minutes)).toISOString().replace('.000Z', 'Z')
+  /** The same instant written with an offset of two hours, or with no zone at all. */
+  const offset = (step: number) => `${new Date(msOf(step) + 2 * 3_600_000).toISOString().slice(0, 19)}+02:00`
+  const zoneless = (step: number) => new Date(msOf(step)).toISOString().slice(0, 19)
+  const steps = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i)
+  /** Under way at about 18 knots. */
+  const ownAt = (step: number) => 60 + step * 0.05
+  type Seen = { name: string; elsewhere?: string; partly?: boolean; foreign?: boolean }
+  /** What the scan says of each track: left unticked, only noted, noted as partly so, or nothing. */
+  const verdicts = async (file: Blob, chunk?: number) =>
+    Object.fromEntries(
+      (await scanGpx(file, () => {}, chunk)).map(({ name, elsewhere, partly, foreign }: Seen) => [
+        name,
+        elsewhere === undefined ? undefined : `${foreign ? 'unticked' : partly ? 'partly' : 'noted'}: ${elsewhere}`,
+      ]),
+    )
+
+  // A chartplotter's export carries other boats' passages beside the own
+  // track, under names of their own: written into the recording, each drew
+  // lines across an ocean to wherever that boat was at the time.
+  it.each([7, 64, 1 << 20])(
+    'leaves unticked a track that was elsewhere than the own one at the same time, in chunks of %i bytes',
+    async (chunk) => {
+      // Three days of it, five minutes into each ten, and each fix three
+      // minutes on gone astray: only the first in each ten minutes is compared.
+      const own = steps(0, 432).flatMap((i) => [at(ownAt(i), 24, utc(i, 5)), at(0, 0, utc(i, 8))])
+      const file = gpxOf(
+        track('Own Ship', own),
+        // Each fix after one in the same ten minutes whose time cannot be read.
+        track(
+          'Passage',
+          steps(0, 3).flatMap((i) => [
+            at(-30, -20, utc(i, 9.99).replace(/:\d\d(\.\d+)?Z$/, ':99Z')),
+            at(-30, -20, utc(i)),
+          ]),
+        ),
+        track(
+          'Offset',
+          steps(0, 3).map((i) => at(-30, -20, offset(i))),
+        ),
+        // Written with character references, which the server decodes.
+        track(
+          'Encoded',
+          steps(46, 3).map((i) => at('&#45;30', '-20', utc(i))),
+        ),
+        // The same vessel on a second plotter five minutes earlier, kilometres
+        // behind, with one fix gone astray.
+        track('Second plotter', [
+          at(ownAt(-0.5), 24, utc(0)),
+          at(ownAt(0.5), 24, utc(1)),
+          at(0, 0, utc(2)),
+          at(ownAt(2.5), 24, utc(3)),
+        ]),
+        // Plotters 900 metres north and 800 metres east, at the same instants.
+        track(
+          'Twin',
+          steps(4, 4).map((i) => at(ownAt(i) + 0.0081, 24, utc(i, 5))),
+        ),
+        track(
+          'Twin east',
+          steps(12, 4).map((i) => at(ownAt(i), 24.0144, utc(i, 5))),
+        ),
+        // A kilometre and a half off at the same instants: no stray fix.
+        track(
+          'Close by',
+          steps(60, 3).map((i) => at(ownAt(i) + 0.0135, 24, utc(i, 5))),
+        ),
+        // Five kilometres off a minute later: further than a vessel sails in it.
+        track(
+          'Neighbour',
+          steps(8, 4).map((i) => at(ownAt(i) + 0.045, 24, utc(i, 6))),
+        ),
+        // Nine kilometres behind five minutes earlier, which 30 m/s covers,
+        // and eleven, which it does not.
+        track(
+          'Fast boat',
+          steps(52, 3).map((i) => at(ownAt(i) - 0.081, 24, utc(i))),
+        ),
+        track(
+          'Too fast',
+          steps(56, 3).map((i) => at(ownAt(i) - 0.099, 24, utc(i))),
+        ),
+        // Together as often as not.
+        track('Mostly together', [
+          ...steps(20, 3).map((i) => at(ownAt(i), 24, utc(i, 5))),
+          ...steps(23, 3).map((i) => at(0, 0, utc(i, 5))),
+        ]),
+        // Renamed as the own track ends, its first two fixes stale.
+        track('Renamed', [
+          at(0, 0, utc(430, 9)),
+          at(0, 0, utc(431, 9)),
+          at(ownAt(432), 24, utc(432, 5)),
+          at(ownAt(433), 24, utc(433, 5)),
+        ]),
+        // Points the import would not date or place.
+        track(
+          'No coordinates',
+          steps(30, 3).map((i) => at('', '', utc(i))),
+        ),
+        track(
+          'Exponents',
+          steps(64, 3).map((i) => at('-3e1', '-2e1', utc(i))),
+        ),
+        track(
+          'Time in extensions',
+          steps(33, 3).map((i) => `<trkpt lat="-30" lon="-20"><extensions><time>${utc(i)}</time></extensions></trkpt>`),
+        ),
+        // A segment's own extensions after its one point.
+        `<trk><name>Segment extensions</name><trkseg>${at(ownAt(50), 24, utc(50, 5))}<extensions>${steps(120, 4)
+          .map((i) => `<time>${utc(i, 5)}</time>`)
+          .join('')}</extensions></trkseg></trk>`,
+        track(
+          'No zone',
+          steps(36, 3).map((i) => at(-30, -20, zoneless(i))),
+        ),
+        track(
+          'North of the pole',
+          steps(39, 3).map((i) => at(91, 24, utc(i))),
+        ),
+        track(
+          'East of the date line',
+          steps(42, 3).map((i) => at(60, 181, utc(i))),
+        ),
+        // 2023-02-29, which Date.parse would roll into 1 March.
+        track(
+          'No such day',
+          steps(72, 3).map((i) => at(-30, -20, utc(i).replace('2023-03-01', '2023-02-29'))),
+        ),
+        // After the own track, under the name the plotter gives it in German.
+        track(
+          'Eigenes Schiff',
+          steps(440, 10).map((i) => at(ownAt(i), 24, utc(i, 5))),
+        ),
+        track(
+          'After the switch',
+          steps(440, 3).map((i) => at(-30, -20, utc(i))),
+        ),
+        track(
+          'Later',
+          steps(460, 3).map((i) => at(-30, -20, utc(i))),
+        ),
+        track(
+          'AIS Ariadne',
+          steps(0, 3).map((i) => at(0, 0, utc(i))),
+        ),
+      )
+
+      expect(await verdicts(file, chunk)).toEqual({
+        'Own Ship': undefined,
+        Passage: 'unticked: Own Ship',
+        Offset: 'unticked: Own Ship',
+        Encoded: 'unticked: Own Ship',
+        'Second plotter': undefined,
+        Twin: undefined,
+        'Twin east': undefined,
+        'Close by': 'unticked: Own Ship',
+        Neighbour: 'unticked: Own Ship',
+        'Fast boat': undefined,
+        'Too fast': 'unticked: Own Ship',
+        'Mostly together': undefined,
+        Renamed: undefined,
+        'No coordinates': undefined,
+        Exponents: undefined,
+        'Time in extensions': undefined,
+        'Segment extensions': undefined,
+        'No zone': undefined,
+        'North of the pole': undefined,
+        'East of the date line': undefined,
+        'No such day': undefined,
+        'Eigenes Schiff': undefined,
+        'After the switch': 'unticked: Eigenes Schiff',
+        Later: undefined,
+        'AIS Ariadne': undefined,
+      })
+    },
+  )
+
+  // A track of the own name that covers little beside one elsewhere that
+  // covers much may be a plotter just installed beside a friend's year, or
+  // a friend's passage beside the own tracks under other names: the note
+  // says what was seen, and the choice is left as it was.
+  it.each(['Own Ship', 'Eigenes Schiff'])(
+    'only notes a track elsewhere than %s where that covers little',
+    async (name) => {
+      const file = gpxOf(
+        track(
+          name,
+          steps(0, 4).map((i) => at(ownAt(i), 24, utc(i, 5))),
+        ),
+        track(
+          'Year',
+          steps(0, 144).map((i) => at(-30, -20, utc(i))),
+        ),
+      )
+
+      expect(await verdicts(file)).toEqual({ [name]: undefined, Year: `noted: ${name}` })
+    },
+  )
+
+  // Hours, not points or stretches: a passage logged every minute outnumbers
+  // in both an own track logged every half hour over more time.
+  it('leaves unticked a passage logged more densely than the own track', async () => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 20).map((i) => at(ownAt(i * 3), 24, utc(i * 3, 5))),
+      ),
+      track(
+        'Passage',
+        steps(0, 240).map((i) => at(-30, -20, utc(0, i))),
+      ),
+    )
+
+    expect(await verdicts(file)).toEqual({ 'Own Ship': undefined, Passage: 'unticked: Own Ship' })
+  })
+
+  // Leaving a track unticked takes the own name to cover twice the hours of
+  // all others together, those of a second plotter beside it included.
+  it.each([
+    ['twice the hours of the passage', 12, [], 'unticked'],
+    ['less than twice', 18, [], 'noted'],
+    [
+      'less than twice with a second plotter',
+      6,
+      [
+        track(
+          'Second plotter',
+          steps(6, 12).map((i) => at(ownAt(i), 24, utc(i))),
+        ),
+      ],
+      'noted',
+    ],
+  ])('leaves unticked a passage where the own track covers %s', async (_, passageSteps, more, verdict) => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 24).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Passage',
+        steps(0, passageSteps as number).map((i) => at(-30, -20, utc(i))),
+      ),
+      ...(more as string[]),
+    )
+
+    expect((await verdicts(file)).Passage).toBe(`${verdict}: Own Ship`)
+  })
+
+  // In a file of a program that does not name the own track so, a track of
+  // that name was taken in from TimeZero: another boat's, as like as not.
+  it.each([
+    ['OpenCPN', 'noted'],
+    ['TimeZero Professional', 'unticked'],
+    ['@signalk/tracks-plugin', 'unticked'],
+  ])('judges a passage in a file by %s: %s', async (creator, verdict) => {
+    const file = gpxBy(
+      creator,
+      track(
+        'Own Ship',
+        steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Passage',
+        steps(0, 3).map((i) => at(-30, -20, utc(i))),
+      ),
+    )
+
+    expect((await verdicts(file)).Passage).toBe(`${verdict}: Own Ship`)
+  })
+
+  // The page cannot import what writes the plugin's own export, so this ties
+  // the name and the creator it looks for to what that writes.
+  it('leaves unticked a passage beside the own track in this plugin’s own export', async () => {
+    const xml = toGpx([
+      {
+        name: trackLabel(SELF, SELF, () => undefined),
+        context: SELF,
+        segments: [steps(0, 144).map((i) => ({ position: [ownAt(i), 24] as [number, number], timestamp: msOf(i, 5) }))],
+      },
+      {
+        name: 'Passage',
+        segments: [steps(0, 3).map((i) => ({ position: [-30, -20] as [number, number], timestamp: msOf(i) }))],
+      },
+    ])
+
+    const choices = (await scanGpx(new Blob([xml]))).map(trackChoice)
+
+    expect(choices.map(({ name, checked }: { name: string; checked: boolean }) => [name, checked])).toEqual([
+      ['Own Ship', true],
+      ['Passage', false],
+    ])
+  })
+
+  // Quotes and `>` in a value, the creator's or one before it, hide no
+  // other program's file as TimeZero's.
+  it.each([`creator="Skipper's Log"`, `creator='Nav "Pro"'`, 'creator="A > B"', 'desc="a>b" creator="OpenCPN"'])(
+    'takes a file whose <gpx> says %s for another program’s',
+    async (said) => {
+      const file = new Blob([
+        `<?xml version="1.0"?><gpx version="1.1" ${said} xmlns="${GPX}">`,
+        track(
+          'Own Ship',
+          steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+        ),
+        track(
+          'Passage',
+          steps(0, 3).map((i) => at(-30, -20, utc(i))),
+        ),
+        '</gpx>',
+      ])
+
+      expect((await verdicts(file)).Passage).toBe('noted: Own Ship')
+    },
+  )
+
+  it('takes a file whose <gpx> names no creator for TimeZero’s, whatever else its values hold', async () => {
+    const file = new Blob([
+      `<?xml version="1.0"?><gpx version="1.1" desc="a>b" xmlns="${GPX}">`,
+      track(
+        'Own Ship',
+        steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Passage',
+        steps(0, 3).map((i) => at(-30, -20, utc(i))),
+      ),
+      '</gpx>',
+    ])
+
+    expect((await verdicts(file)).Passage).toBe('unticked: Own Ship')
+  })
+
+  // TimeZero writes the own track as many <trk>, each sharing a stretch with
+  // the next where they meet, the next one's first fix stale.
+  it('leaves unticked a passage beside the own name split into <trk> where they meet', async () => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 50).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track('Own Ship', [at(0, 0, utc(49, 7)), ...steps(50, 50).map((i) => at(ownAt(i), 24, utc(i, 5)))]),
+      track(
+        'Own Ship',
+        steps(99, 50).map((i) => at(ownAt(i), 24, utc(i, 6))),
+      ),
+      track(
+        'Passage',
+        steps(47, 6).map((i) => at(-30, -20, utc(i))),
+      ),
+    )
+
+    expect((await verdicts(file)).Passage).toBe('unticked: Own Ship')
+  })
+
+  // Every <trk> of the track, not one, apart from an own one not disputed.
+  it('only notes a track one of whose <trk> was apart only from a disputed one of the own name', async () => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 200).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Own Ship',
+        steps(150, 10).map((i) => at(10, 10, utc(i, 5))),
+      ),
+      track(
+        'Own Ship',
+        steps(300, 100).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Log',
+        steps(320, 4).map((i) => at(-30, -20, utc(i))),
+      ),
+      track(
+        'Log',
+        steps(152, 4).map((i) => at(-30, -20, utc(i))),
+      ),
+    )
+
+    expect((await verdicts(file)).Log).toBe('noted: Own Ship')
+  })
+
+  // Two of the own name apart at the same time: one is not the own vessel's.
+  it('leaves nothing unticked for a track of the own name another so named was apart from', async () => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 120).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Own Ship',
+        steps(150, 100).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      // A friend's export taken into the plotter, from the gap into the second.
+      track(
+        'Own Ship',
+        steps(125, 50).map((i) => at(-30, -20 + i * 0.01, utc(i, 5))),
+      ),
+      // The own phone's log in the gap, and a passage away from the first.
+      track(
+        'Phone',
+        steps(122, 25).map((i) => at(ownAt(i), 24, utc(i))),
+      ),
+      track(
+        'Passage',
+        steps(10, 3).map((i) => at(10, 10, utc(i))),
+      ),
+    )
+
+    expect(await verdicts(file)).toEqual({
+      'Own Ship': undefined,
+      Phone: 'noted: Own Ship',
+      Passage: 'unticked: Own Ship',
+    })
+  })
+
+  // Nor do their hours make the own name cover enough to leave one unticked.
+  it('counts no hours of a track of the own name another so named was apart from', async () => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 24).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Own Ship',
+        steps(100, 60).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Own Ship',
+        steps(100, 60).map((i) => at(-30, -20, utc(i, 5))),
+      ),
+      track(
+        'Passage',
+        steps(0, 18).map((i) => at(10, 10, utc(i))),
+      ),
+    )
+
+    expect((await verdicts(file)).Passage).toBe('noted: Own Ship')
+  })
+
+  // Tracks go into the recording by name, so one name holding the own
+  // vessel's <trk> and another's is chosen as a whole.
+  it('only notes a track partly elsewhere, and leaves alone one partly together', async () => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        [...steps(0, 100), ...steps(130, 100)].map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      // Another boat's log, then the own handheld's in a gap of the plotter's.
+      track(
+        'Log',
+        steps(10, 4).map((i) => at(-30, -20, utc(i))),
+      ),
+      track(
+        'Log',
+        steps(110, 10).map((i) => at(ownAt(i), 24, utc(i))),
+      ),
+      // Another boat's log, then the own handheld's beside the plotter.
+      track(
+        'Handheld',
+        steps(20, 4).map((i) => at(-30, -20, utc(i))),
+      ),
+      track(
+        'Handheld',
+        steps(40, 4).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+    )
+
+    expect(await verdicts(file)).toEqual({ 'Own Ship': undefined, Log: 'partly: Own Ship', Handheld: undefined })
+  })
+
+  // A file can hold another vessel's track under the own name too: a
+  // friend's export taken into the plotter, in another language or not.
+  it.each([
+    [
+      'a friend’s track under the German name',
+      [
+        track(
+          'Own Ship',
+          steps(0, 10).map((i) => at(ownAt(i), 24, utc(i, 5))),
+        ),
+        track(
+          'Eigenes Schiff',
+          steps(0, 10).map((i) => at(-30, -20, utc(i, 5))),
+        ),
+      ],
+    ],
+    [
+      'a friend’s track under the same name, ahead of the own',
+      [
+        track(
+          'Own Ship',
+          steps(0, 10).map((i) => at(-30, -20, utc(i, 5))),
+        ),
+        track(
+          'Own Ship',
+          steps(0, 10).map((i) => at(ownAt(i), 24, utc(i, 5))),
+        ),
+      ],
+    ],
+  ])('leaves alone a track together with any named like the own one: %s', async (_, tracks) => {
+    const file = gpxOf(
+      ...tracks,
+      // Together with the own in three stretches, the fewest that count.
+      track(
+        'Second plotter',
+        steps(2, 3).map((i) => at(ownAt(i), 24, utc(i))),
+      ),
+      // Met the own in two stretches and left in a third: too few to count.
+      track('Brief encounter', [at(ownAt(6), 24, utc(6, 5)), at(ownAt(7), 24, utc(7, 5)), at(10, 10, utc(8, 5))]),
+      // With the own as often as away from it.
+      track('Half with us', [
+        ...steps(0, 3).map((i) => at(ownAt(i), 24, utc(i, 5))),
+        ...steps(3, 3).map((i) => at(10, 10, utc(i, 5))),
+      ]),
+      track(
+        'Passage',
+        steps(2, 4).map((i) => at(10, 10, utc(i))),
+      ),
+    )
+
+    expect(await verdicts(file)).toMatchObject({
+      'Second plotter': undefined,
+      'Brief encounter': expect.stringMatching(/^noted: /),
+      'Half with us': expect.stringMatching(/^noted: /),
+      Passage: expect.stringMatching(/^noted: /),
+    })
+  })
+
+  // Which of two tracks apart at the same time is the own one does not show
+  // in where and when they were.
+  it.each([
+    [
+      'a plotter keeping a track a day beside a longer passage',
+      [
+        track(
+          'Passage',
+          steps(0, 30).map((i) => at(-30, -20, utc(i))),
+        ),
+        ...[0, 1, 2, 3, 4].map((day) =>
+          track(
+            `Day ${day}`,
+            steps(day * 6, 5).map((i) => at(ownAt(i), 24, utc(i))),
+          ),
+        ),
+      ],
+    ],
+    [
+      'a plotter of years beside a passage',
+      [
+        track(
+          'Track',
+          steps(0, 144).map((i) => at(ownAt(i), 24, utc(i))),
+        ),
+        track(
+          'Passage',
+          steps(0, 3).map((i) => at(-30, -20, utc(i))),
+        ),
+      ],
+    ],
+  ])('marks nothing in a file with no track named like the own one: %s', async (_, tracks) => {
+    const marked = Object.entries(await verdicts(gpxOf(...tracks))).filter(([, by]) => by !== undefined)
+
+    expect(marked).toEqual([])
   })
 
   type Call = { url: string; method: string; offset?: number; size?: number; signal?: AbortSignal | null | undefined }

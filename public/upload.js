@@ -43,6 +43,11 @@ export function isOtherVessel(name) {
   return /^AIS\b/.test(name) || /^\d{9}$/.test(name)
 }
 
+/** Named as TimeZero names the own vessel's track, in English as this plugin's export does too, and in German. */
+export function isOwnVessel(name) {
+  return name === 'Own Ship' || name === 'Eigenes Schiff'
+}
+
 const MARKUP = /(<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->)/
 
 /**
@@ -64,9 +69,244 @@ function textOf(raw) {
 // A CDATA section or a comment is matched whole, so that markup inside one is not taken for a tag.
 const TAG = /<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<(\/?)(?:[\w.-]+:)?([\w.-]+)[^>]*?(\/?)>/g
 
+const LAT = /\slat\s*=\s*(["'])([^"']*)\1/
+const LON = /\slon\s*=\s*(["'])([^"']*)\1/
+// A start tag read with its quotes, which TAG is not: a `>` in a value
+// ends TAG's match early.
+const START_TAG = /<[\w.:-]+((?:\s+[\w.:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*\/?>/y
+const ATTRIBUTE = /([\w.:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
+
+/**
+ * What the start tag at `at` in `text` says wrote the file: its `creator`,
+ * null where it names none, and `''` where the tag cannot be read whole,
+ * which may hide one.
+ */
+function creatorOf(text, at) {
+  START_TAG.lastIndex = at
+  let tag
+  try {
+    tag = START_TAG.exec(text)
+  } catch {
+    // A tag of a million attributes runs the expression out of stack.
+    return ''
+  }
+  if (!tag) return ''
+  for (const [, name, double, single] of tag[1].matchAll(ATTRIBUTE)) {
+    if (name === 'creator') return double ?? single
+  }
+  return null
+}
+
+/**
+ * Whether a file whose `<gpx>` says it was written by `creator` names the
+ * own vessel's track as TimeZero does: TimeZero's exports, which name no
+ * creator (or name TimeZero), and this plugin's own (`gpx.ts`). In any other
+ * program's file a track of that name was taken in from one of them.
+ */
+export function namesOwnTrack(creator) {
+  return creator === undefined || creator === '@signalk/tracks-plugin' || /timezero/i.test(creator)
+}
+
+// A coordinate and a time as the server reads them (`decimal` and `dateTime`
+// in src/gpx.ts), so that only points the import would write are sampled.
+const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/
+const DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
+
+function coordinate(tag, attribute) {
+  const raw = attribute.exec(tag)?.[2]
+  const value = raw === undefined ? undefined : decodeEntities(raw)
+  return value !== undefined && DECIMAL.test(value) ? Number(value) : Number.NaN
+}
+
+function inRange(lat, lon) {
+  return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
+}
+
+function timeOf(value) {
+  const match = DATE_TIME.exec(value)
+  if (!match) return Number.NaN
+  const at = Date.parse(value)
+  // Date.parse rolls an impossible day into the next month rather than refusing it.
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])]
+  const utc = new Date(Date.UTC(year, month - 1, day))
+  return utc.getUTCFullYear() === year && utc.getUTCMonth() === month - 1 && utc.getUTCDate() === day ? at : Number.NaN
+}
+
+/** A track is sampled at its first point in each stretch of this long. */
+const SAMPLE_MS = 10 * 60_000
+
+/**
+ * Two points of one vessel lie no further apart than this speed takes it in
+ * the time between them (about 58 knots), and a fix gone astray by this much.
+ */
+const SAME_VESSEL_SPEED = 30
+const SAME_VESSEL_SLACK_M = 1000
+
+/**
+ * The fewest stretches two tracks must lie apart in for one to be taken for
+ * another vessel's, or together in to be taken for the same: where two
+ * tracks of one vessel meet, at a rename say, they share a stretch or two,
+ * and a track's first fix is the likeliest to be stale.
+ */
+const APART_STRETCHES = 3
+
+const STRETCHES_PER_HOUR = 3_600_000 / SAMPLE_MS
+
+/**
+ * How many times the hours that the other tracks not named like an AIS
+ * target cover together the undisputed `<trk>` of the own name must cover,
+ * for a track apart from them to be left unticked rather than only noted.
+ */
+const OWN_DOMINANCE = 2
+
+const EARTH_RADIUS_M = 6_371_008.8
+const RAD = Math.PI / 180
+
+function metresBetween(lat1, lon1, lat2, lon2) {
+  const h =
+    Math.sin(((lat2 - lat1) * RAD) / 2) ** 2 +
+    Math.cos(lat1 * RAD) * Math.cos(lat2 * RAD) * Math.sin(((lon2 - lon1) * RAD) / 2) ** 2
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(h)))
+}
+
+/** Whether two samples, `[time, lat, lon]`, lie further apart than one vessel sails between them. */
+function far(one, other) {
+  const reach = SAME_VESSEL_SLACK_M + (SAME_VESSEL_SPEED * Math.abs(one[0] - other[0])) / 1000
+  return metresBetween(one[1], one[2], other[1], other[2]) > reach
+}
+
+/** Apart in at least APART_STRETCHES and most of the stretches two tracks share, or together in as many. */
+const apartIn = ({ far, near }) => far >= APART_STRETCHES && far > near
+const togetherIn = ({ far, near }) => near >= APART_STRETCHES && near > far
+
+/** Counts of far and near stretches, kept per pair of keys. */
+function tally(counts, key, isFar) {
+  const count = counts.get(key) ?? { far: 0, near: 0 }
+  if (isFar) count.far++
+  else count.near++
+  counts.set(key, count)
+}
+
+/**
+ * How a track, sampled as a map from stretch to `[time, lat, lon]`, lay
+ * beside each `<trk>` named like the own vessel's, `own` holding them by
+ * stretch: whether it was together with any, and those it was apart from.
+ */
+function compare(stretches, own) {
+  const counts = new Map()
+  for (const [stretch, sample] of stretches) {
+    for (const ownTrack of own.get(stretch) ?? []) tally(counts, ownTrack, far(sample, ownTrack.stretches.get(stretch)))
+  }
+  const counted = [...counts]
+  return {
+    together: counted.some(([, count]) => togetherIn(count)),
+    apartFrom: counted.filter(([, count]) => apartIn(count)).map(([ownTrack]) => ownTrack),
+  }
+}
+
+/**
+ * The `<trk>` named like the own vessel's that were apart from another so
+ * named while both have points: one of the two is not the own vessel's, and
+ * which is not plain, so neither leaves a track unticked or counts towards
+ * the own hours.
+ */
+function disputed(own) {
+  const pairs = new Map()
+  for (const [stretch, tracks] of own) {
+    for (let i = 0; i < tracks.length; i++) {
+      for (let j = i + 1; j < tracks.length; j++) {
+        const counts = pairs.get(tracks[i]) ?? new Map()
+        pairs.set(tracks[i], counts)
+        tally(counts, tracks[j], far(tracks[i].stretches.get(stretch), tracks[j].stretches.get(stretch)))
+      }
+    }
+  }
+  const found = new Set()
+  for (const [one, counts] of pairs) {
+    for (const [other, count] of counts) {
+      if (apartIn(count)) found.add(one).add(other)
+    }
+  }
+  return found
+}
+
+/**
+ * The tracks that were elsewhere than one named like the own vessel's at
+ * the same time: `elsewhere` names that one, `partly` says that only some
+ * of the track's `<trk>` were, and `foreign` that it is plainly another
+ * vessel's, such as a passage another boat shared, which a chartplotter's
+ * export carries beside the own track under a name of its own.
+ *
+ * Only a track named as TimeZero names the own vessel's is taken for it.
+ * Where and when two tracks were does not tell which of them is the own
+ * one: a passage of days beside a plotter's tracks of a few hours each
+ * covers more time, and so can a friend's track of a year beside a plotter
+ * only just installed. In a file without such a name, nothing is marked.
+ *
+ * The name is no proof either: a friend's TimeZero export calls theirs
+ * `Own Ship` too, and one name can hold the own vessel's `<trk>` and
+ * another's. So every `<trk>` is compared on its own; a track with a `<trk>`
+ * together with any named like the own vessel's is not marked at all; and
+ * a track is `foreign` only where:
+ * - the file comes from TimeZero or this plugin (`ownNames`), since in a
+ *   file of any other program that name can only be a track taken in;
+ * - every one of its `<trk>` was apart from one of the own name that is not
+ *   `disputed`;
+ * - those cover OWN_DOMINANCE times the hours of the other tracks together,
+ *   as a plotter's track of years does beside a few passages.
+ * Otherwise the note says what was seen, and the choice is left as it was.
+ * One case these cannot tell: another boat's `<trk>` under the own name at
+ * a time the own vessel's is in the file only under another name, which is
+ * then left unticked; the note on it says what to look at.
+ */
+function markElsewhere(sampledTracks, ownNames) {
+  const own = new Map()
+  const others = new Map()
+  for (const { group, sampled } of sampledTracks) {
+    if (isOwnVessel(group.name)) {
+      const ownTrack = { name: group.name, stretches: sampled.stretches }
+      for (const stretch of sampled.stretches.keys()) {
+        const tracks = own.get(stretch)
+        if (tracks) tracks.push(ownTrack)
+        else own.set(stretch, [ownTrack])
+      }
+    } else {
+      const tracks = others.get(group)
+      if (tracks) tracks.push(sampled)
+      else others.set(group, [sampled])
+    }
+  }
+  if (own.size === 0) return
+  const doubted = disputed(own)
+  const hours = new Set()
+  for (const [stretch, tracks] of own) {
+    if (tracks.some((ownTrack) => !doubted.has(ownTrack))) hours.add(Math.floor(stretch / STRETCHES_PER_HOUR))
+  }
+  const otherHours = new Set()
+  for (const tracks of others.values()) {
+    for (const { stretches } of tracks) {
+      for (const stretch of stretches.keys()) otherHours.add(Math.floor(stretch / STRETCHES_PER_HOUR))
+    }
+  }
+  const plain = ownNames && hours.size >= OWN_DOMINANCE * otherHours.size
+  for (const [group, tracks] of others) {
+    const seen = tracks.map(({ stretches }) => compare(stretches, own))
+    if (seen.some(({ together }) => together)) continue
+    const first = seen.find(({ apartFrom }) => apartFrom.length > 0)
+    if (first === undefined) continue
+    group.elsewhere = first.apartFrom[0].name
+    if (seen.some(({ apartFrom }) => apartFrom.length === 0)) group.partly = true
+    else if (plain && seen.every(({ apartFrom }) => apartFrom.some((ownTrack) => !doubted.has(ownTrack)))) {
+      group.foreign = true
+    }
+  }
+}
+
 /**
  * The tracks of a GPX file by name, `''` for one without, each with how many
- * points it has and the times of its first and last point as written.
+ * points it has and the times of its first and last point as written, and
+ * `elsewhere`, `partly` and `foreign` for one that was in another place than
+ * the own vessel's at the same time (see `markElsewhere`).
  *
  * It picks out tags rather than parsing, which reads a gigabyte in seconds
  * where a parser would take minutes; the server parses the upload properly
@@ -76,6 +316,13 @@ const TAG = /<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<(\/?)(?:[\w.-]+:)?([\w.-]
  */
 export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYTES) {
   const tracks = new Map()
+  // Each <trk>'s first point in each stretch of SAMPLE_MS it has points in.
+  const samples = new Map()
+  const sampledTracks = []
+  // What the first <gpx> says wrote the file (see creatorOf), undefined before it.
+  let creator
+  // Tracks named like an AIS target, which are never compared.
+  const targets = new Set()
   const decoder = new TextDecoder()
   let carry = ''
   let track
@@ -83,6 +330,43 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let depth = 0
   let capture
   let text = ''
+  // The tag of the point being read, for its position once its time is
+  // known, and how deep it is, so that only its own <time> dates it.
+  let point
+  let pointDepth = 0
+  let pointTime = false
+  const sampledOf = (key) => {
+    let sampled = samples.get(key)
+    if (sampled === undefined) {
+      sampled = { stretches: new Map() }
+      samples.set(key, sampled)
+      sampledTracks.push({ group: key.group, sampled })
+    }
+    return sampled
+  }
+  // A time in UTC shares its first 15 characters with every other in its
+  // ten minutes, so most points need no parse.
+  let lastPrefix
+  let lastStretch
+  const stretchOf = (time) => {
+    const utc = time.length >= 20 && time.endsWith('Z')
+    if (utc && time.slice(0, 15) === lastPrefix) return lastStretch
+    const stretch = Math.floor(timeOf(time) / SAMPLE_MS)
+    if (utc && !Number.isNaN(stretch)) {
+      lastPrefix = time.slice(0, 15)
+      lastStretch = stretch
+    }
+    return stretch
+  }
+  const sample = (key, time) => {
+    const stretch = stretchOf(time)
+    if (Number.isNaN(stretch) || samples.get(key)?.stretches.has(stretch)) return
+    const at = timeOf(time)
+    const lat = coordinate(point, LAT)
+    const lon = coordinate(point, LON)
+    if (Number.isNaN(at) || !inRange(lat, lon)) return
+    sampledOf(key).stretches.set(stretch, [at, lat, lon])
+  }
   const close = (name) => {
     if (name === 'name' && capture === 'name' && track.name === undefined) {
       track.name = textOf(text)
@@ -90,12 +374,20 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       const time = textOf(text)
       track.group.from ??= time
       track.group.to = time
+      if (pointTime && !targets.has(track.group)) {
+        sample(track, time)
+      }
+    } else if (name === 'trkpt') {
+      point = undefined
     }
     capture = undefined
   }
   const group = (name) => {
     let found = tracks.get(name)
-    if (!found) tracks.set(name, (found = { name, points: 0 }))
+    if (!found) {
+      tracks.set(name, (found = { name, points: 0 }))
+      if (isOtherVessel(name)) targets.add(found)
+    }
     return found
   }
   for (let at = 0; at < file.size; at += chunkBytes) {
@@ -123,12 +415,17 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         continue
       }
       const [, closing, name, empty] = match
+      if (name === 'gpx' && !closing && !track) {
+        if (creator === undefined) creator = creatorOf(chunk, match.index)
+        continue
+      }
       if (name === 'trk') {
         if (closing) {
           track = undefined
         } else {
           track = {}
           depth = 0
+          point = undefined
         }
         continue
       }
@@ -146,9 +443,14 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         text = ''
       } else if (name === 'trkpt' && track.group) {
         track.group.points++
+        if (!empty) {
+          point = match[0]
+          pointDepth = depth
+        }
       } else if (name === 'time' && track.group) {
         capture = 'time'
         text = ''
+        pointTime = point !== undefined && depth === pointDepth + 1
       }
       if (empty) close(name)
       else depth++
@@ -161,6 +463,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     if (capture) text += chunk.slice(end, open >= end ? open : chunk.length)
     onProgress(Math.min(file.size, at + chunkBytes) / file.size)
   }
+  markElsewhere(sampledTracks, namesOwnTrack(creator ?? undefined))
   return [...tracks.values()]
 }
 

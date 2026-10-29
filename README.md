@@ -169,10 +169,23 @@ A chartplotter's export of several years runs past a gigabyte, more than one req
 With **Tracks of my own vessel** ticked, the Tracks webapp first reads the file in the browser and
 lists its tracks by name, with how many points each has and when they begin and end, to choose
 which are the vessel's: such an export mixes the own track with the AIS targets the plotter
-followed, which it names `AIS <name>` or by the MMSI and which are not ticked. A track without
-times cannot be placed in the recording and cannot be chosen. **Import** then sends the file a
-slice at a time, and the server writes each slice's points into the recording before it takes
-the next, so neither side holds more of the file than a slice.
+followed, which it names `AIS <name>` or by the MMSI and which are not ticked. The list also notes
+a track that was elsewhere than the own track at the same time, such as another boat's passage the
+plotter was given, since one vessel cannot be further from itself than it sails between two fixes.
+The own track is the one TimeZero names `Own Ship` (`Eigenes Schiff` in German), as this plugin's
+own export does; in a file without that name nothing is noted. A noted track is left unticked only
+where that is plain: the file names no other program as its creator than TimeZero or this plugin,
+every part of it was elsewhere in most of the stretches it shares with the own track, and the own
+name covers at least twice the hours of the other tracks not named like an AIS target together, as
+a plotter's track of years does beside a few passages. Otherwise it stays ticked with the note,
+`partly` where only some of it was elsewhere, since a friend's TimeZero export calls its track `Own
+Ship` too, and tracks are chosen by name. Two parts under the own name that were apart at the same
+time count as neither. Look at the notes before importing: a track can still be left unticked
+though it is the vessel's, where another boat's track carries the own name at a time the vessel's
+is in the file only under another name. A passage at a time the own track has no point is not
+noted. A track without times cannot be placed in the recording and cannot be chosen. **Import**
+then sends the file a slice at a time, and the server writes each slice's points into the recording
+before it takes the next, so neither side holds more of the file than a slice.
 
 The points are written as above: into the gaps of the recording, or with **Replace** in place of
 what it holds, one recycle bin entry for each segment of the file. Points without a time are left
