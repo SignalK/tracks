@@ -2,6 +2,7 @@ import {
   chmodSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -3216,6 +3217,71 @@ describe('the position index', () => {
     }
   })
 
+  // The system follows `d` before it takes the `..`, as SQLite does. Taken
+  // the other way round, the path names a file in `data`, which is not
+  // there, and the store would not open.
+  it.skipIf(process.platform === 'win32')(
+    'rewrites the older database a link reaches past a linked directory and `..`',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+      try {
+        mkdirSync(join(dir, 'disk', 'x', 'y'), { recursive: true })
+        mkdirSync(join(dir, 'data'))
+        symlinkSync(join(dir, 'disk', 'x', 'y'), join(dir, 'data', 'd'))
+        const target = join(dir, 'disk', 'x', 'tracks.db')
+        const older = new DatabaseSync(target)
+        older.exec(OLD_POSITIONS)
+        older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+        older.close()
+        const file = join(dir, 'tracks.db')
+        // Not `join`, which would take the `..` away.
+        symlinkSync(`${join(dir, 'data', 'd')}/../tracks.db`, file)
+
+        const store = new SqliteTrackStore({ file }, debug)
+        expect(await store.getTimed(ctx)).toHaveLength(1)
+        store.close()
+        expect(existsSync(join(dir, 'data', 'tracks.db'))).toBe(false)
+        const rewritten = new DatabaseSync(target)
+        expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+        rewritten.close()
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  // As on some RAM disks on Windows, where the system's realpath fails.
+  it.skipIf(process.platform === 'win32')(
+    "rewrites the file a link points to where the system's realpath fails",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+      const native = vi.spyOn(realpathSync, 'native').mockImplementation(() => {
+        throw Object.assign(new Error('EISDIR: illegal operation on a directory, realpath'), { code: 'EISDIR' })
+      })
+      try {
+        const target = join(dir, 'elsewhere.db')
+        const file = join(dir, 'tracks.db')
+        const older = new DatabaseSync(target)
+        older.exec(OLD_POSITIONS)
+        older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
+        older.close()
+        symlinkSync(target, file)
+
+        const store = new SqliteTrackStore({ file }, debug)
+        expect(native).toHaveBeenCalled()
+        expect(await store.getTimed(ctx)).toHaveLength(1)
+        store.close()
+        expect(lstatSync(file).isSymbolicLink()).toBe(true)
+        const rewritten = new DatabaseSync(target)
+        expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+        rewritten.close()
+      } finally {
+        native.mockRestore()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+
   // A new database set up only in part before a crash, its version not yet written.
   it('opens a database of this version whose version was never written', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
@@ -3428,8 +3494,9 @@ describe('the position index', () => {
       older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.1, 24.9)
       older.close()
       Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
-      // The file as the rewrite names it, its directory's links followed.
-      const opened = realpathSync(file)
+      // The file as the rewrite names it, with the system's realpath: on
+      // Windows, Node's own keeps the short names in the temporary directory.
+      const opened = realpathSync.native(file)
       let refused = false
       rewriting.beforeRename = () => {
         rewriting.beforeRename = undefined

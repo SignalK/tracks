@@ -745,8 +745,16 @@ function migrate(path: string, debug: Debug): void {
     return
   }
   // Through a link, the file it points to, which the new one must replace
-  // rather than the link.
-  const file = realpathSync(path)
+  // rather than the link. With the system's realpath, which follows links
+  // as SQLite's open does: Node's own takes a `..` in a link's target before
+  // the links it passes, and so can name another file. Node's where the
+  // system's fails, as it does on some RAM disks on Windows.
+  let file: string
+  try {
+    file = realpathSync.native(path)
+  } catch {
+    file = realpathSync(path)
+  }
   const started = performance.now()
   // The file's change counter as the lock found it, to tell a write that
   // came in while the rewrite read it.
