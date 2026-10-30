@@ -1752,6 +1752,7 @@ describe('a GPX file uploaded in slices', () => {
   it.each([
     ['OpenCPN', 'noted'],
     ['OpenCPN TimeZero importer', 'noted'],
+    ['&#84;imeZero', 'unticked'],
     ['TimeZero Professional', 'unticked'],
     ['@signalk/tracks-plugin', 'unticked'],
   ])('judges a passage in a file by %s: %s', async (creator, verdict) => {
@@ -1815,28 +1816,36 @@ describe('a GPX file uploaded in slices', () => {
     },
   )
 
-  it('takes a file whose <gpx> names no creator for TimeZero’s, whatever else its values hold', async () => {
-    const file = new Blob([
-      `<?xml version="1.0"?><gpx version="1.1" desc="a>b" xmlns="${GPX}">`,
-      track(
-        'Own Ship',
-        steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
-      ),
-      track(
-        'Passage',
-        steps(0, 3).map((i) => at(-30, -20, utc(i))),
-      ),
-      '</gpx>',
-    ])
+  it.each([7, 64, 1 << 20])(
+    'takes a file whose <gpx> names no creator for TimeZero’s, whatever else its values hold, in chunks of %i bytes',
+    async (chunk) => {
+      const file = new Blob([
+        `<?xml version="1.0"?><gpx version="1.1" desc="a>b" xmlns="${GPX}">`,
+        track(
+          'Own Ship',
+          steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+        ),
+        track(
+          'Passage',
+          steps(0, 3).map((i) => at(-30, -20, utc(i))),
+        ),
+        '</gpx>',
+      ])
 
-    expect((await verdicts(file)).Passage).toBe('unticked: Own Ship')
-  })
+      expect((await verdicts(file, chunk)).Passage).toBe('unticked: Own Ship')
+    },
+  )
 
-  // A point's position from its own attributes, read with their quotes.
-  it.each([
-    ['in another attribute’s value', (i: number) => `desc=' lat="${ownAt(i)}" lon="24"' lat="-30" lon="-20"`],
-    ['after a `>` in a value', () => 'desc="a>b" lat="-30" lon="-20"'],
-  ])('reads a point’s position, with one %s', async (_, attributes) => {
+  // A point's position from its own attributes, read with their quotes,
+  // whole when a `>` in a value puts the tag across two chunks of the scan.
+  it.each<[string, number, (i: number) => string]>([
+    ['in another attribute’s value', 1 << 20, (i: number) => `desc=' lat="${ownAt(i)}" lon="24"' lat="-30" lon="-20"`],
+    ...[7, 64, 1 << 20].map((chunk): [string, number, (i: number) => string] => [
+      'after a `>` in a value',
+      chunk,
+      () => 'desc="a>b" lat="-30" lon="-20"',
+    ]),
+  ])('reads a point’s position, with one %s, in chunks of %i bytes', async (_, chunk, attributes) => {
     const file = gpxOf(
       track(
         'Own Ship',
@@ -1848,7 +1857,7 @@ describe('a GPX file uploaded in slices', () => {
       ),
     )
 
-    expect((await verdicts(file)).Passage).toBe('unticked: Own Ship')
+    expect((await verdicts(file, chunk)).Passage).toBe('unticked: Own Ship')
   })
 
   // As the server reads a point: in GPX's namespace, under whatever prefix
@@ -1925,6 +1934,13 @@ describe('a GPX file uploaded in slices', () => {
       undefined,
     ],
     [
+      'GPX’s namespace written with a character reference',
+      `<trk><name>Passage</name><trkseg xmlns:g="http&#58;//www.topografix.com/GPX/1/1">${steps(0, 3)
+        .map((i) => `<g:trkpt lat="-30" lon="-20"><g:time>${utc(i)}</g:time></g:trkpt>`)
+        .join('')}</trkseg></trk>`,
+      'unticked: Own Ship',
+    ],
+    [
       'a <trk> under another prefix, its points under none',
       `<v:trk xmlns:v="urn:v"><v:name>Passage</v:name><trkseg>${steps(0, 3)
         .map((i) => at(-30, -20, utc(i)))
@@ -1971,6 +1987,21 @@ describe('a GPX file uploaded in slices', () => {
     )
 
     expect((await verdicts(file)).Leg).toBeUndefined()
+  })
+
+  // A track is named by its own <name>, in GPX's namespace, as the server names it.
+  it('names a track by its <name> in GPX’s namespace', async () => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      `<trk><v:name xmlns:v="urn:v">Own Ship</v:name><name>Passage</name><trkseg>${steps(0, 3)
+        .map((i) => at(-30, -20, utc(i)))
+        .join('')}</trkseg></trk>`,
+    )
+
+    expect((await verdicts(file)).Passage).toBe('unticked: Own Ship')
   })
 
   // More own <trk> in ten minutes than any plotter writes: none is trusted.

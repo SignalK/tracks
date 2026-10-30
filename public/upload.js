@@ -75,6 +75,33 @@ const START_TAG = /<[\w.:-]+((?:\s+[\w.:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*\/?>/
 const ATTRIBUTE = /([\w.:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
 const PREFIX = /^<\/?([\w.-]+):/
 
+/** The longest start tag carried into the next chunk when it runs past this one; a longer one is not GPX's. */
+const MAX_CARRIED_TAG = 64 * 1024
+
+/**
+ * Whether TAG's `match` in `text` is a start tag that a `>` in a quoted value
+ * ended early and that runs on past the end of `text`: read whole with the
+ * next chunk. A tag whose last attribute ends in a quote is whole, and so is
+ * one without attributes, which is nearly every one.
+ */
+function runsOn(text, match) {
+  const tag = match[0]
+  const before = tag.charCodeAt(tag.length - (tag.endsWith('/>') ? 3 : 2))
+  if (match[1] || match[2] === undefined || before === 34 || before === 39 || !tag.includes('=')) return false
+  let quote = 0
+  for (let i = match.index + 1; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    if (quote !== 0) {
+      if (c === quote) quote = 0
+    } else if (c === 34 || c === 39) {
+      quote = c
+    } else if (c === 62) {
+      return false
+    }
+  }
+  return text.length - match.index <= MAX_CARRIED_TAG
+}
+
 /** The attributes of the start tag at `at` in `text`, or undefined where it cannot be read whole. */
 function attributesOf(text, at) {
   START_TAG.lastIndex = at
@@ -98,8 +125,8 @@ const GPX_NAMESPACE = 'http://www.topografix.com/GPX/1/1'
 function bindings(attributes) {
   const bound = new Map()
   for (const [name, value] of attributes) {
-    if (name === 'xmlns') bound.set('', value)
-    else if (name.startsWith('xmlns:')) bound.set(name.slice(6), value)
+    if (name === 'xmlns') bound.set('', decodeEntities(value))
+    else if (name.startsWith('xmlns:')) bound.set(name.slice(6), decodeEntities(value))
   }
   return bound
 }
@@ -140,7 +167,8 @@ function inGpx(tag, scopes) {
 function rootOf(text, at) {
   const attributes = attributesOf(text, at)
   if (attributes === undefined) return { creator: '', scope: null }
-  return { creator: attributes.get('creator') ?? null, scope: bindings(attributes) }
+  const creator = attributes.get('creator')
+  return { creator: creator === undefined ? null : decodeEntities(creator), scope: bindings(attributes) }
 }
 
 /**
@@ -477,6 +505,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         bang = chunk.indexOf('<!', bang + 2)
       }
       if (bang >= 0 && bang < match.index) break
+      if (at + chunkBytes < file.size && runsOn(chunk, match)) break
       if (capture) text += chunk.slice(end, match.index)
       end = TAG.lastIndex
       if (match[2] === undefined) {
@@ -514,7 +543,12 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         const scope = scopeOf(chunk, match.index, match[0])
         segment = { scope, inGpx: track.inGpx && inGpx(match[0], [scope, track.scope, root?.scope]) }
       }
-      if (name === 'name' && depth === 0 && track.group === undefined) {
+      if (
+        name === 'name' &&
+        depth === 0 &&
+        track.group === undefined &&
+        inGpx(match[0], [scopeOf(chunk, match.index, match[0]), track.scope, root?.scope])
+      ) {
         capture = 'name'
         text = ''
       } else if (name === 'trkpt' && track.group) {
