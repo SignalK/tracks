@@ -1988,7 +1988,7 @@ export default function ThePlugin(app: App): Plugin {
           type: 'array',
           title: 'Pause recording while navigation.state is one of',
           description:
-            "Stops recording the own vessel while it is not going anywhere, so a winter on a mooring costs no rows. Needs navigation.state to be set, by signalk-autostate or by hand. Leave empty (the default) to always record. Note that 'anchored' is offered but rarely wanted: an anchor alarm watches exactly the track a vessel makes while swinging on its rode. AIS targets are never gated, since their status comes from the transponder and is often stale.",
+            "Stops recording the own vessel while it is not going anywhere, so a winter on a mooring costs no rows. Needs navigation.state to be set, by signalk-autostate or by hand. By default it pauses while moored, not-under-way or aground; clear the list to always record. Note that 'anchored' is offered but rarely wanted: an anchor alarm watches exactly the track a vessel makes while swinging on its rode. AIS targets are never gated, since their status comes from the transponder and is often stale.",
           items: {
             type: 'string',
             enum: [...PAUSABLE_STATES],
