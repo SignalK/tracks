@@ -1751,6 +1751,7 @@ describe('a GPX file uploaded in slices', () => {
   // that name was taken in from TimeZero: another boat's, as like as not.
   it.each([
     ['OpenCPN', 'noted'],
+    ['OpenCPN TimeZero importer', 'noted'],
     ['TimeZero Professional', 'unticked'],
     ['@signalk/tracks-plugin', 'unticked'],
   ])('judges a passage in a file by %s: %s', async (creator, verdict) => {
@@ -1829,6 +1830,165 @@ describe('a GPX file uploaded in slices', () => {
     ])
 
     expect((await verdicts(file)).Passage).toBe('unticked: Own Ship')
+  })
+
+  // A point's position from its own attributes, read with their quotes.
+  it.each([
+    ['in another attribute’s value', (i: number) => `desc=' lat="${ownAt(i)}" lon="24"' lat="-30" lon="-20"`],
+    ['after a `>` in a value', () => 'desc="a>b" lat="-30" lon="-20"'],
+  ])('reads a point’s position, with one %s', async (_, attributes) => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Passage',
+        steps(0, 3).map((i) => `<trkpt ${attributes(i)}><time>${utc(i)}</time></trkpt>`),
+      ),
+    )
+
+    expect((await verdicts(file)).Passage).toBe('unticked: Own Ship')
+  })
+
+  // As the server reads a point: in GPX's namespace, under whatever prefix
+  // the root binds to it, or in none.
+  it.each([
+    [
+      'prefixed with one bound to GPX’s namespace',
+      `<?xml version="1.0"?><g:gpx version="1.1" xmlns:g="${GPX}">`,
+      (i: number, lat: number, lon: number) =>
+        `<g:trkpt lat="${lat}" lon="${lon}"><g:time>${utc(i)}</g:time></g:trkpt>`,
+      'unticked: Own Ship',
+    ],
+    [
+      'prefixed with one bound to another namespace',
+      `<?xml version="1.0"?><gpx version="1.1" xmlns="${GPX}" xmlns:v="urn:v">`,
+      (i: number, lat: number, lon: number) =>
+        `<v:trkpt lat="${lat}" lon="${lon}"><v:time>${utc(i)}</v:time></v:trkpt>`,
+      undefined,
+    ],
+    [
+      'in another namespace by its own xmlns',
+      `<?xml version="1.0"?><gpx version="1.1" xmlns="${GPX}">`,
+      (i: number, lat: number, lon: number) =>
+        `<trkpt xmlns="urn:v" lat="${lat}" lon="${lon}"><time>${utc(i)}</time></trkpt>`,
+      undefined,
+    ],
+  ])('reads the position of a point %s as the server would', async (_, root, point, verdict) => {
+    const named = (name: string) => (root.includes('<g:gpx') ? `g:${name}` : name)
+    const trackOf = (name: string, points: string[]) =>
+      `<${named('trk')}><${named('name')}>${name}</${named('name')}><${named('trkseg')}>${points.join('')}</${named('trkseg')}></${named('trk')}>`
+    const own = steps(0, 144).map((i) =>
+      root.includes('<g:gpx')
+        ? `<g:trkpt lat="${ownAt(i)}" lon="24"><g:time>${utc(i, 5)}</g:time></g:trkpt>`
+        : at(ownAt(i), 24, utc(i, 5)),
+    )
+    const file = new Blob([
+      [
+        root,
+        trackOf('Own Ship', own),
+        trackOf(
+          'Passage',
+          steps(0, 3).map((i) => point(i, -30, -20)),
+        ),
+        `</${named('gpx')}>`,
+      ].join('\n'),
+    ])
+
+    expect((await verdicts(file)).Passage).toBe(verdict)
+  })
+
+  // Bound wherever the server looks: on the <trk>, the <trkseg> or the point.
+  it.each([
+    [
+      'a prefix bound on its <trkseg>',
+      `<trk><name>Passage</name><trkseg xmlns:g="${GPX}">${steps(0, 3)
+        .map((i) => `<g:trkpt lat="-30" lon="-20"><g:time>${utc(i)}</g:time></g:trkpt>`)
+        .join('')}</trkseg></trk>`,
+      'unticked: Own Ship',
+    ],
+    [
+      'no namespace, said on the point',
+      track(
+        'Passage',
+        steps(0, 3).map((i) => `<trkpt xmlns="" lat="-30" lon="-20"><time>${utc(i)}</time></trkpt>`),
+      ),
+      'unticked: Own Ship',
+    ],
+    [
+      'a <time> in another namespace',
+      track(
+        'Passage',
+        steps(0, 3).map((i) => `<trkpt lat="-30" lon="-20"><v:time xmlns:v="urn:v">${utc(i)}</v:time></trkpt>`),
+      ),
+      undefined,
+    ],
+    [
+      'a <trk> under another prefix, its points under none',
+      `<v:trk xmlns:v="urn:v"><v:name>Passage</v:name><trkseg>${steps(0, 3)
+        .map((i) => at(-30, -20, utc(i)))
+        .join('')}</trkseg></v:trk>`,
+      undefined,
+    ],
+    [
+      'an element named trkseg in a point before it',
+      track('Passage', [
+        `<trkpt lat="-30" lon="-20"><time>${utc(0)}</time><extensions><v:trkseg xmlns:v="urn:v"/></extensions></trkpt>`,
+        ...steps(1, 2).map((i) => at(-30, -20, utc(i))),
+      ]),
+      'unticked: Own Ship',
+    ],
+    [
+      'a <trk> in another namespace',
+      `<trk xmlns="urn:v"><name>Passage</name><trkseg>${steps(0, 3)
+        .map((i) => at(-30, -20, utc(i)))
+        .join('')}</trkseg></trk>`,
+      undefined,
+    ],
+  ])('reads the namespace of a point with %s as the server would', async (_, passage, verdict) => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      passage,
+    )
+
+    expect((await verdicts(file)).Passage).toBe(verdict)
+  })
+
+  // An own track the server would not read is no own track to judge by.
+  it('judges nothing by a track of the own name in another namespace', async () => {
+    const file = gpxOf(
+      `<trk xmlns="urn:v"><name>Own Ship</name><trkseg>${steps(0, 144)
+        .map((i) => at(ownAt(i), 24, utc(i, 5)))
+        .join('')}</trkseg></trk>`,
+      track(
+        'Leg',
+        steps(0, 3).map((i) => at(-30, -20, utc(i))),
+      ),
+    )
+
+    expect((await verdicts(file)).Leg).toBeUndefined()
+  })
+
+  // More own <trk> in ten minutes than any plotter writes: none is trusted.
+  it('only notes a passage beside a crowd of tracks of the own name in one stretch', async () => {
+    const file = gpxOf(
+      ...steps(0, 17).map(() =>
+        track(
+          'Own Ship',
+          steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+        ),
+      ),
+      track(
+        'Passage',
+        steps(0, 3).map((i) => at(-30, -20, utc(i))),
+      ),
+    )
+
+    expect((await verdicts(file)).Passage).toBe('noted: Own Ship')
   })
 
   // TimeZero writes the own track as many <trk>, each sharing a stretch with

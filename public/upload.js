@@ -69,32 +69,78 @@ function textOf(raw) {
 // A CDATA section or a comment is matched whole, so that markup inside one is not taken for a tag.
 const TAG = /<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<(\/?)(?:[\w.-]+:)?([\w.-]+)[^>]*?(\/?)>/g
 
-const LAT = /\slat\s*=\s*(["'])([^"']*)\1/
-const LON = /\slon\s*=\s*(["'])([^"']*)\1/
 // A start tag read with its quotes, which TAG is not: a `>` in a value
 // ends TAG's match early.
 const START_TAG = /<[\w.:-]+((?:\s+[\w.:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*\/?>/y
 const ATTRIBUTE = /([\w.:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
+const PREFIX = /^<\/?([\w.-]+):/
 
-/**
- * What the start tag at `at` in `text` says wrote the file: its `creator`,
- * null where it names none, and `''` where the tag cannot be read whole,
- * which may hide one.
- */
-function creatorOf(text, at) {
+/** The attributes of the start tag at `at` in `text`, or undefined where it cannot be read whole. */
+function attributesOf(text, at) {
   START_TAG.lastIndex = at
   let tag
   try {
     tag = START_TAG.exec(text)
   } catch {
     // A tag of a million attributes runs the expression out of stack.
-    return ''
+    return undefined
   }
-  if (!tag) return ''
-  for (const [, name, double, single] of tag[1].matchAll(ATTRIBUTE)) {
-    if (name === 'creator') return double ?? single
+  if (!tag) return undefined
+  const attributes = new Map()
+  for (const [, name, double, single] of tag[1].matchAll(ATTRIBUTE)) attributes.set(name, double ?? single)
+  return attributes
+}
+
+/** GPX's namespace, as `src/gpx.ts` has it: the server reads a point in it, or in none. */
+const GPX_NAMESPACE = 'http://www.topografix.com/GPX/1/1'
+
+/** The namespaces these attributes bind, by prefix, `''` for the default. */
+function bindings(attributes) {
+  const bound = new Map()
+  for (const [name, value] of attributes) {
+    if (name === 'xmlns') bound.set('', value)
+    else if (name.startsWith('xmlns:')) bound.set(name.slice(6), value)
   }
-  return null
+  return bound
+}
+
+/**
+ * The namespaces the start tag `tag`, at `at` in `text`, binds: undefined
+ * where it binds none, and null where it cannot be read whole.
+ */
+function scopeOf(text, at, tag) {
+  // One with a quote may be cut short by a `>` in a value, and bind something after it.
+  if (!tag.includes('xmlns') && !tag.includes('"') && !tag.includes("'")) return undefined
+  const attributes = attributesOf(text, at)
+  return attributes === undefined ? null : bindings(attributes)
+}
+
+/**
+ * Whether the element of start tag `tag` is in GPX's namespace or in none,
+ * as the server reads one, its prefix looked up in `scopes`, innermost
+ * first: those of its own tag and of the `<trkpt>`, `<trkseg>`, `<trk>` and
+ * `<gpx>` it is in, the only ones the server reads it under. One that
+ * could not be read whole counts against it.
+ */
+function inGpx(tag, scopes) {
+  const prefix = PREFIX.exec(tag)?.[1] ?? ''
+  for (const scope of scopes) {
+    if (scope === null) return false
+    const namespace = scope?.get(prefix)
+    if (namespace !== undefined) return namespace === '' || namespace === GPX_NAMESPACE
+  }
+  return prefix === ''
+}
+
+/**
+ * What the `<gpx>` start tag at `at` in `text` says: who wrote the file, its
+ * `creator`, null where it names none and `''` where the tag cannot be read
+ * whole, which may hide one; and the namespaces it binds (see scopeOf).
+ */
+function rootOf(text, at) {
+  const attributes = attributesOf(text, at)
+  if (attributes === undefined) return { creator: '', scope: null }
+  return { creator: attributes.get('creator') ?? null, scope: bindings(attributes) }
 }
 
 /**
@@ -104,7 +150,7 @@ function creatorOf(text, at) {
  * program's file a track of that name was taken in from one of them.
  */
 export function namesOwnTrack(creator) {
-  return creator === undefined || creator === '@signalk/tracks-plugin' || /timezero/i.test(creator)
+  return creator === undefined || creator === '@signalk/tracks-plugin' || /^timezero\b/i.test(creator)
 }
 
 // A coordinate and a time as the server reads them (`decimal` and `dateTime`
@@ -112,8 +158,7 @@ export function namesOwnTrack(creator) {
 const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/
 const DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
 
-function coordinate(tag, attribute) {
-  const raw = attribute.exec(tag)?.[2]
+function coordinate(raw) {
   const value = raw === undefined ? undefined : decodeEntities(raw)
   return value !== undefined && DECIMAL.test(value) ? Number(value) : Number.NaN
 }
@@ -179,6 +224,12 @@ function far(one, other) {
 const apartIn = ({ far, near }) => far >= APART_STRETCHES && far > near
 const togetherIn = ({ far, near }) => near >= APART_STRETCHES && near > far
 
+/** Where no `<trkseg>` is open: no point is read there. */
+const NO_SEGMENT = { scope: undefined, inGpx: false }
+
+/** The most `<trk>` of the own name one stretch can hold before they are all doubted. */
+const MAX_OWN_TOGETHER = 16
+
 /** Counts of far and near stretches, kept per pair of keys. */
 function tally(counts, key, isFar) {
   const count = counts.get(key) ?? { far: 0, near: 0 }
@@ -206,13 +257,20 @@ function compare(stretches, own) {
 
 /**
  * The `<trk>` named like the own vessel's that were apart from another so
- * named while both have points: one of the two is not the own vessel's, and
- * which is not plain, so neither leaves a track unticked or counts towards
- * the own hours.
+ * named while both have points, and those in a stretch with more than
+ * MAX_OWN_TOGETHER of them: one of each pair is not the own vessel's, and
+ * which is not plain, so none of them leaves a track unticked or counts
+ * towards the own hours.
  */
 function disputed(own) {
   const pairs = new Map()
+  const found = new Set()
   for (const [stretch, tracks] of own) {
+    // So many in ten minutes is no plotter's own track, and each pair would be compared.
+    if (tracks.length > MAX_OWN_TOGETHER) {
+      for (const track of tracks) found.add(track)
+      continue
+    }
     for (let i = 0; i < tracks.length; i++) {
       for (let j = i + 1; j < tracks.length; j++) {
         const counts = pairs.get(tracks[i]) ?? new Map()
@@ -221,7 +279,6 @@ function disputed(own) {
       }
     }
   }
-  const found = new Set()
   for (const [one, counts] of pairs) {
     for (const [other, count] of counts) {
       if (apartIn(count)) found.add(one).add(other)
@@ -319,8 +376,8 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   // Each <trk>'s first point in each stretch of SAMPLE_MS it has points in.
   const samples = new Map()
   const sampledTracks = []
-  // What the first <gpx> says wrote the file (see creatorOf), undefined before it.
-  let creator
+  // What the first <gpx> says (see rootOf), undefined before it.
+  let root
   // Tracks named like an AIS target, which are never compared.
   const targets = new Set()
   const decoder = new TextDecoder()
@@ -330,11 +387,14 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let depth = 0
   let capture
   let text = ''
-  // The tag of the point being read, for its position once its time is
-  // known, and how deep it is, so that only its own <time> dates it.
+  // Where the start tag of the point being read is, for its position once
+  // its time is known, and how deep it is, so that only its own <time> dates it.
   let point
   let pointDepth = 0
   let pointTime = false
+  // The <time> of that point, and the <trkseg> it is in.
+  let timeTag
+  let segment = NO_SEGMENT
   const sampledOf = (key) => {
     let sampled = samples.get(key)
     if (sampled === undefined) {
@@ -362,21 +422,30 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     const stretch = stretchOf(time)
     if (Number.isNaN(stretch) || samples.get(key)?.stretches.has(stretch)) return
     const at = timeOf(time)
-    const lat = coordinate(point, LAT)
-    const lon = coordinate(point, LON)
+    if (point === undefined) return
+    // Not read whole where a `>` in a value lies across the end of a chunk:
+    // the next point in the ten minutes stands in for it.
+    const attributes = attributesOf(point.text, point.at)
+    if (attributes === undefined) return
+    const scopes = [bindings(attributes), segment.scope, track.scope, root?.scope]
+    if (!inGpx(point.tag, scopes) || !inGpx(timeTag.tag, [timeTag.scope, ...scopes])) return
+    const lat = coordinate(attributes.get('lat'))
+    const lon = coordinate(attributes.get('lon'))
     if (Number.isNaN(at) || !inRange(lat, lon)) return
     sampledOf(key).stretches.set(stretch, [at, lat, lon])
   }
   const close = (name) => {
     if (name === 'name' && capture === 'name' && track.name === undefined) {
       track.name = textOf(text)
-    } else if (name === 'time' && capture === 'time') {
+    } else if (name === 'time' && capture === 'time' && track.group) {
       const time = textOf(text)
       track.group.from ??= time
       track.group.to = time
       if (pointTime && !targets.has(track.group)) {
         sample(track, time)
       }
+    } else if (name === 'trkseg' && depth === 0) {
+      segment = NO_SEGMENT
     } else if (name === 'trkpt') {
       point = undefined
     }
@@ -416,16 +485,18 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       }
       const [, closing, name, empty] = match
       if (name === 'gpx' && !closing && !track) {
-        if (creator === undefined) creator = creatorOf(chunk, match.index)
+        root ??= rootOf(chunk, match.index)
         continue
       }
       if (name === 'trk') {
         if (closing) {
           track = undefined
         } else {
-          track = {}
+          const scope = scopeOf(chunk, match.index, match[0])
+          track = { scope, inGpx: inGpx(match[0], [scope, root?.scope]) }
           depth = 0
           point = undefined
+          segment = NO_SEGMENT
         }
         continue
       }
@@ -438,19 +509,26 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       if (name === 'trkseg' && track.group === undefined) {
         track.group = group(track.name ?? '')
       }
+      // The <trk>'s own: one in its or a point's extensions is no segment.
+      if (name === 'trkseg' && depth === 0) {
+        const scope = scopeOf(chunk, match.index, match[0])
+        segment = { scope, inGpx: track.inGpx && inGpx(match[0], [scope, track.scope, root?.scope]) }
+      }
       if (name === 'name' && depth === 0 && track.group === undefined) {
         capture = 'name'
         text = ''
       } else if (name === 'trkpt' && track.group) {
         track.group.points++
-        if (!empty) {
-          point = match[0]
+        // Only where the server reads it: its namespaces are checked when it is sampled.
+        if (!empty && segment.inGpx && depth === 1) {
+          point = { text: chunk, at: match.index, tag: match[0] }
           pointDepth = depth
         }
       } else if (name === 'time' && track.group) {
         capture = 'time'
         text = ''
         pointTime = point !== undefined && depth === pointDepth + 1
+        if (pointTime) timeTag = { tag: match[0], scope: scopeOf(chunk, match.index, match[0]) }
       }
       if (empty) close(name)
       else depth++
@@ -463,7 +541,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     if (capture) text += chunk.slice(end, open >= end ? open : chunk.length)
     onProgress(Math.min(file.size, at + chunkBytes) / file.size)
   }
-  markElsewhere(sampledTracks, namesOwnTrack(creator ?? undefined))
+  markElsewhere(sampledTracks, namesOwnTrack(root?.creator ?? undefined))
   return [...tracks.values()]
 }
 
