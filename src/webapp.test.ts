@@ -1840,10 +1840,9 @@ describe('a GPX file uploaded in slices', () => {
   // whole when a `>` in a value puts the tag across two chunks of the scan.
   it.each<[string, number, (i: number) => string]>([
     ['in another attribute’s value', 1 << 20, (i: number) => `desc=' lat="${ownAt(i)}" lon="24"' lat="-30" lon="-20"`],
-    ...[7, 64, 1 << 20].map((chunk): [string, number, (i: number) => string] => [
-      'after a `>` in a value',
-      chunk,
-      () => 'desc="a>b" lat="-30" lon="-20"',
+    ...[7, 64, 1 << 20].flatMap((chunk): [string, number, (i: number) => string][] => [
+      ['after a `>` in a value', chunk, () => 'desc="a>b" lat="-30" lon="-20"'],
+      ['after a `>` behind a quote in a value', chunk, () => `desc='x">y' lat="-30" lon="-20"`],
     ]),
   ])('reads a point’s position, with one %s, in chunks of %i bytes', async (_, chunk, attributes) => {
     const file = gpxOf(
@@ -1999,6 +1998,22 @@ describe('a GPX file uploaded in slices', () => {
       `<trk><v:name xmlns:v="urn:v">Own Ship</v:name><name>Passage</name><trkseg>${steps(0, 3)
         .map((i) => at(-30, -20, utc(i)))
         .join('')}</trkseg></trk>`,
+    )
+
+    expect((await verdicts(file)).Passage).toBe('unticked: Own Ship')
+  })
+
+  // A point the import would not place gives way to the next in its ten minutes.
+  it('samples the next point in ten minutes where the first cannot be placed', async () => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Passage',
+        steps(0, 3).flatMap((i) => [at('', '', utc(i)), at(-30, -20, utc(i, 1))]),
+      ),
     )
 
     expect((await verdicts(file)).Passage).toBe('unticked: Own Ship')

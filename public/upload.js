@@ -79,17 +79,35 @@ const PREFIX = /^<\/?([\w.-]+):/
 const MAX_CARRIED_TAG = 64 * 1024
 
 /**
+ * The quote a run of `text` from `from` to `to` ends inside, given the one it
+ * starts in (0 for none): attribute values are quoted with `"` or `'`.
+ */
+function quoteAfter(text, from, to, quote = 0) {
+  for (let i = from; i < to; i++) {
+    const c = text.charCodeAt(i)
+    if (quote !== 0) {
+      if (c === quote) quote = 0
+    } else if (c === 34 || c === 39) {
+      quote = c
+    }
+  }
+  return quote
+}
+
+/**
  * Whether TAG's `match` in `text` is a start tag that a `>` in a quoted value
  * ended early and that runs on past the end of `text`: read whole with the
- * next chunk. A tag whose last attribute ends in a quote is whole, and so is
- * one without attributes, which is nearly every one.
+ * next chunk. Only a tag whose `>` lies inside a value is read on from it,
+ * and a tag without attributes not at all; the scan asks only of the last
+ * tag of a chunk.
  */
 function runsOn(text, match) {
   const tag = match[0]
-  const before = tag.charCodeAt(tag.length - (tag.endsWith('/>') ? 3 : 2))
-  if (match[1] || match[2] === undefined || before === 34 || before === 39 || !tag.includes('=')) return false
-  let quote = 0
-  for (let i = match.index + 1; i < text.length; i++) {
+  if (match[1] || match[2] === undefined || !tag.includes('=')) return false
+  const end = match.index + tag.length
+  let quote = quoteAfter(text, match.index + 1, end - 1)
+  if (quote === 0) return false
+  for (let i = end; i < text.length; i++) {
     const c = text.charCodeAt(i)
     if (quote !== 0) {
       if (c === quote) quote = 0
@@ -415,13 +433,17 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let depth = 0
   let capture
   let text = ''
-  // Where the start tag of the point being read is, for its position once
-  // its time is known, and how deep it is, so that only its own <time> dates it.
-  let point
+  // Where the start tag of the point being read is, and the tag itself, for
+  // its position once its time is known, and how deep it is, so that only its
+  // own <time> dates it: plain values, as a gigabyte holds millions of points.
+  let pointText
+  let pointAt = 0
+  let pointTag
   let pointDepth = 0
   let pointTime = false
-  // The <time> of that point, and the <trkseg> it is in.
+  // The <time> of that point and what it binds, and the <trkseg> it is in.
   let timeTag
+  let timeScope
   let segment = NO_SEGMENT
   const sampledOf = (key) => {
     let sampled = samples.get(key)
@@ -438,7 +460,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let lastStretch
   const stretchOf = (time) => {
     const utc = time.length >= 20 && time.endsWith('Z')
-    if (utc && time.slice(0, 15) === lastPrefix) return lastStretch
+    if (utc && lastPrefix !== undefined && time.startsWith(lastPrefix)) return lastStretch
     const stretch = Math.floor(timeOf(time) / SAMPLE_MS)
     if (utc && !Number.isNaN(stretch)) {
       lastPrefix = time.slice(0, 15)
@@ -446,21 +468,32 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     }
     return stretch
   }
+  // The <trk> and stretch last found sampled: most points follow one in the same ten minutes.
+  let doneKey
+  let doneStretch
   const sample = (key, time) => {
     const stretch = stretchOf(time)
-    if (Number.isNaN(stretch) || samples.get(key)?.stretches.has(stretch)) return
+    if (stretch === doneStretch && key === doneKey) return
+    if (Number.isNaN(stretch)) return
+    if (samples.get(key)?.stretches.has(stretch)) {
+      doneKey = key
+      doneStretch = stretch
+      return
+    }
     const at = timeOf(time)
-    if (point === undefined) return
+    if (pointTag === undefined) return
     // Not read whole where a `>` in a value lies across the end of a chunk:
     // the next point in the ten minutes stands in for it.
-    const attributes = attributesOf(point.text, point.at)
+    const attributes = attributesOf(pointText, pointAt)
     if (attributes === undefined) return
     const scopes = [bindings(attributes), segment.scope, track.scope, root?.scope]
-    if (!inGpx(point.tag, scopes) || !inGpx(timeTag.tag, [timeTag.scope, ...scopes])) return
+    if (!inGpx(pointTag, scopes) || !inGpx(timeTag, [timeScope, ...scopes])) return
     const lat = coordinate(attributes.get('lat'))
     const lon = coordinate(attributes.get('lon'))
     if (Number.isNaN(at) || !inRange(lat, lon)) return
     sampledOf(key).stretches.set(stretch, [at, lat, lon])
+    doneKey = key
+    doneStretch = stretch
   }
   const close = (name) => {
     if (name === 'name' && capture === 'name' && track.name === undefined) {
@@ -475,7 +508,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     } else if (name === 'trkseg' && depth === 0) {
       segment = NO_SEGMENT
     } else if (name === 'trkpt') {
-      point = undefined
+      pointTag = undefined
     }
     capture = undefined
   }
@@ -489,6 +522,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   }
   for (let at = 0; at < file.size; at += chunkBytes) {
     const chunk = carry + decoder.decode(await file.slice(at, at + chunkBytes).arrayBuffer(), { stream: true })
+    const lastOpen = chunk.lastIndexOf('<')
     let end = 0
     TAG.lastIndex = 0
     // The next `<!` the tags have not reached, kept rather than searched for at every tag.
@@ -505,7 +539,8 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         bang = chunk.indexOf('<!', bang + 2)
       }
       if (bang >= 0 && bang < match.index) break
-      if (at + chunkBytes < file.size && runsOn(chunk, match)) break
+      // Only the last tag of a chunk can run past it: a value holds no `<`.
+      if (match.index === lastOpen && at + chunkBytes < file.size && runsOn(chunk, match)) break
       if (capture) text += chunk.slice(end, match.index)
       end = TAG.lastIndex
       if (match[2] === undefined) {
@@ -524,7 +559,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
           const scope = scopeOf(chunk, match.index, match[0])
           track = { scope, inGpx: inGpx(match[0], [scope, root?.scope]) }
           depth = 0
-          point = undefined
+          pointTag = undefined
           segment = NO_SEGMENT
         }
         continue
@@ -555,14 +590,19 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         track.group.points++
         // Only where the server reads it: its namespaces are checked when it is sampled.
         if (!empty && segment.inGpx && depth === 1) {
-          point = { text: chunk, at: match.index, tag: match[0] }
+          pointText = chunk
+          pointAt = match.index
+          pointTag = match[0]
           pointDepth = depth
         }
       } else if (name === 'time' && track.group) {
         capture = 'time'
         text = ''
-        pointTime = point !== undefined && depth === pointDepth + 1
-        if (pointTime) timeTag = { tag: match[0], scope: scopeOf(chunk, match.index, match[0]) }
+        pointTime = pointTag !== undefined && depth === pointDepth + 1
+        if (pointTime) {
+          timeTag = match[0]
+          timeScope = scopeOf(chunk, match.index, match[0])
+        }
       }
       if (empty) close(name)
       else depth++
