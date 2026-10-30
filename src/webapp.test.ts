@@ -2036,6 +2036,48 @@ describe('a GPX file uploaded in slices', () => {
     expect((await verdicts(file, chunk)).Passage).toBe('unticked: Own Ship')
   })
 
+  // The forms the track list reads as the server does, sampled as well: the
+  // list takes its names, counts and times before a point is sampled. The
+  // <time> binds its namespace, so that the sample reads its attributes.
+  it.each<[string, number, string, (i: number) => string]>([
+    ...[7, 64, 1 << 20].flatMap((chunk): [string, number, string, (i: number) => string][] => [
+      [
+        'a `>` in their <time>’s value',
+        chunk,
+        '1.0',
+        (i: number) => `<trkpt lat="-30" lon="-20"><time xmlns="${GPX}" desc="a>b">${utc(i)}</time></trkpt>`,
+      ],
+      [
+        'XML 1.1’s line ends between their attributes',
+        chunk,
+        '1.1',
+        (i: number) => `<trkpt\u2028lat="-30"\u0085lon="-20"><time>${utc(i)}</time></trkpt>`,
+      ],
+    ]),
+    // Longer than a chunk of 64 KiB and than 64 KiB carried.
+    ...[4096, 1 << 16].map((chunk): [string, number, string, (i: number) => string] => [
+      'a start tag of 200 kB',
+      chunk,
+      '1.0',
+      (i: number) =>
+        `<trkpt lat="-30" lon="-20"${i === 1 ? ` desc="${'y'.repeat(200_000)}"` : ''}><time>${utc(i)}</time></trkpt>`,
+    ]),
+  ])('leaves unticked a passage whose points hold %s, in chunks of %i bytes', async (_, chunk, version, point) => {
+    const file = new Blob([
+      [
+        `<?xml version="${version}"?><gpx version="1.1" xmlns="${GPX}">`,
+        track(
+          'Own Ship',
+          steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+        ),
+        track('Passage', steps(0, 3).map(point)),
+        '</gpx>',
+      ].join('\n'),
+    ])
+
+    expect((await verdicts(file, chunk)).Passage).toBe('unticked: Own Ship')
+  })
+
   // As the server reads a point: in GPX's namespace, under whatever prefix
   // the root binds to it, or in none.
   it.each([
