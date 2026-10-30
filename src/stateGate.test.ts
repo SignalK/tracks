@@ -1,6 +1,7 @@
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 import { createHarness } from './harness.test-utils.js'
+import ThePlugin from './index.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
 import type { Context, LatLngTuple } from './types.js'
 
@@ -49,6 +50,15 @@ describe('StateGate', () => {
     // stale; a vessel under way still reporting 'moored' is ordinary.
     const g = gate(['moored'])
     expect(g.accept(OTHER, 'moored')).toBe(true)
+  })
+
+  // The configuration page shows the description beside the setting.
+  it('names the states it pauses on by default in the setting’s description', () => {
+    const { schema } = ThePlugin({ selfContext: SELF } as unknown as Parameters<typeof ThePlugin>[0])
+    const setting = (schema.properties as Record<string, { default: unknown; description: string }>).pauseWhenState!
+
+    expect(setting.default).toEqual(DEFAULT_PAUSE_STATES)
+    for (const state of DEFAULT_PAUSE_STATES) expect(setting.description).toContain(state)
   })
 
   it('does not offer anchored as a default', () => {
