@@ -17,6 +17,10 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
+/** A position as the store keeps it: to the 1e-7 degree, half away from zero. */
+const rounded = ([lat, lon]: LatLngTuple): LatLngTuple =>
+  [lat, lon].map((degrees) => (Math.sign(degrees) * Math.round(Math.abs(degrees) * 1e7)) / 1e7) as LatLngTuple
+
 // Ways into a rewrite for an older database: between its last read of the
 // old file and its check that nothing wrote to it since, where the fsync of
 // the new file comes in, at each try to rename the new file over it, and at
@@ -369,7 +373,7 @@ describe('significance levels', () => {
         .prepare(
           `SELECT count(*) AS n FROM significant s LEFT JOIN positions p ON p.rowid = s.position
            WHERE p.rowid IS NULL OR s.context_id IS NOT p.context_id OR s.timestamp IS NOT p.timestamp
-             OR s.lat IS NOT p.lat OR s.lon IS NOT p.lon`,
+             OR s.lat_e7 IS NOT p.lat_e7 OR s.lon_e7 IS NOT p.lon_e7`,
         )
         .get(),
     ).toEqual({ n: 0 })
@@ -424,8 +428,8 @@ describe('significance levels', () => {
     const read = await store.getTimed(ctx, undefined, undefined, 20)
     expect(read.length).toBeGreaterThan(2)
     expect(read.length).toBeLessThan(track.length / 10)
-    expect(read[0]!.position).toEqual(track[0])
-    expect(read.at(-1)!.position).toEqual(track.at(-1))
+    expect(read[0]!.position).toEqual(rounded(track[0]!))
+    expect(read.at(-1)!.position).toEqual(rounded(track.at(-1)!))
     store.close()
   })
 
@@ -786,7 +790,9 @@ describe('significance levels', () => {
     store.saveHistoryImport({ context: ctx, startedAt: later, filled: 60 }, [filled])
     const window: TimeWindow = { from: day0, to: day0 + DAY }
     const all = await store.getTimed(ctx, window)
-    expect(all.filter(({ timestamp }) => timestamp >= filled[0]!.timestamp)).toEqual(filled)
+    expect(all.filter(({ timestamp }) => timestamp >= filled[0]!.timestamp)).toEqual(
+      filled.map(({ position, timestamp }) => ({ position: rounded(position), timestamp })),
+    )
     // Until refined again, a read at a tolerance reads every position, the filled ones too.
     expect(await store.getTimed(ctx, window, undefined, 20)).toEqual(all)
     store.refineLevels(later)
@@ -1860,7 +1866,7 @@ describe('storage simplification', () => {
   const rows = (store: SqliteTrackStore, context: Context = ctx) =>
     store['db']
       .prepare(
-        'SELECT timestamp, lat, lon FROM positions WHERE context_id = (SELECT id FROM contexts WHERE context = ?) ORDER BY timestamp, rowid',
+        'SELECT timestamp, lat_e7 / 10000000.0 AS lat, lon_e7 / 10000000.0 AS lon FROM positions WHERE context_id = (SELECT id FROM contexts WHERE context = ?) ORDER BY timestamp, rowid',
       )
       .all(context)
   const count = (store: SqliteTrackStore, from: number, to: number) =>
@@ -2899,7 +2905,7 @@ describe('the position index', () => {
     expect(
       plan(
         store,
-        'SELECT timestamp, lat, lon FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp',
+        'SELECT timestamp, lat_e7 / 10000000.0 AS lat, lon_e7 / 10000000.0 AS lon FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp',
         1,
         t0,
         t0 + 1,
@@ -2908,7 +2914,7 @@ describe('the position index', () => {
     expect(
       plan(
         store,
-        'SELECT context_id, COUNT(*), MIN(lat), MAX(lon) FROM positions WHERE timestamp >= ? GROUP BY context_id',
+        'SELECT context_id, COUNT(*), MIN(lat_e7), MAX(lon_e7) FROM positions WHERE timestamp >= ? GROUP BY context_id',
         t0,
       ),
     ).toContain('COVERING INDEX idx_context_time_position')
@@ -2950,7 +2956,7 @@ describe('the position index', () => {
       const store = new SqliteTrackStore({ file }, debug)
       const db = store['db']
       expect(indexesOf(store)).toEqual(['idx_context_s2cell', 'idx_context_time_position', 'idx_s2cell'])
-      expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
       expect(db.prepare('SELECT context FROM contexts').all()).toEqual([{ context: ctx }])
       // A new file, built whole: nothing left over, and nothing beside it.
       expect(db.prepare('PRAGMA freelist_count').get()).toEqual({ freelist_count: 0 })
@@ -2971,14 +2977,14 @@ describe('the position index', () => {
       BEGIN;
       CREATE TABLE named_positions (context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);
       INSERT INTO named_positions (rowid, context, timestamp, lat, lon, s2cell)
-        SELECT p.rowid, c.context, p.timestamp, p.lat, p.lon, p.s2cell FROM positions p JOIN contexts c ON c.id = p.context_id;
+        SELECT p.rowid, c.context, p.timestamp, p.lat_e7 / 10000000.0, p.lon_e7 / 10000000.0, p.s2cell FROM positions p JOIN contexts c ON c.id = p.context_id;
       DROP TABLE positions;
       ALTER TABLE named_positions RENAME TO positions;
       CREATE INDEX idx_s2cell ON positions(s2cell);
       CREATE INDEX idx_context_time_position ON positions(context, timestamp, lat, lon);
       CREATE INDEX idx_context_s2cell ON positions(context, s2cell);
       CREATE TABLE named_significant (position INTEGER NOT NULL, context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, level INTEGER NOT NULL);
-      INSERT INTO named_significant SELECT s.position, c.context, s.timestamp, s.lat, s.lon, s.level FROM significant s JOIN contexts c ON c.id = s.context_id;
+      INSERT INTO named_significant SELECT s.position, c.context, s.timestamp, s.lat_e7 / 10000000.0, s.lon_e7 / 10000000.0, s.level FROM significant s JOIN contexts c ON c.id = s.context_id;
       DROP TABLE significant;
       ALTER TABLE named_significant RENAME TO significant;
       CREATE INDEX idx_significant_time ON significant(context, level, timestamp);
@@ -2988,7 +2994,7 @@ describe('the position index', () => {
       ALTER TABLE named_visits RENAME TO level_visits;
       CREATE INDEX idx_level_visits_hour ON level_visits(context, hour);
       CREATE TABLE named_binned (bin_id INTEGER NOT NULL, context TEXT NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);
-      INSERT INTO named_binned SELECT b.bin_id, c.context, b.timestamp, b.lat, b.lon, b.s2cell FROM binned_positions b JOIN contexts c ON c.id = b.context_id;
+      INSERT INTO named_binned SELECT b.bin_id, c.context, b.timestamp, b.lat_e7 / 10000000.0, b.lon_e7 / 10000000.0, b.s2cell FROM binned_positions b JOIN contexts c ON c.id = b.context_id;
       DROP TABLE binned_positions;
       ALTER TABLE named_binned RENAME TO binned_positions;
       CREATE INDEX idx_binned_positions ON binned_positions(bin_id);
@@ -3000,7 +3006,41 @@ describe('the position index', () => {
     db.close()
   }
 
-  it('carries every table of a database an older version wrote over, and reads it as before', async () => {
+  /** Rewrite a store's file as a version before coordinates were integers wrote it. */
+  const asReal = (file: string): void => {
+    const db = new DatabaseSync(file)
+    db.exec(`
+      BEGIN;
+      CREATE TABLE real_positions (context_id INTEGER NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);
+      INSERT INTO real_positions (rowid, context_id, timestamp, lat, lon, s2cell)
+        SELECT rowid, context_id, timestamp, lat_e7 / 10000000.0, lon_e7 / 10000000.0, s2cell FROM positions;
+      DROP TABLE positions;
+      ALTER TABLE real_positions RENAME TO positions;
+      CREATE INDEX idx_s2cell ON positions(s2cell);
+      CREATE INDEX idx_context_time_position ON positions(context_id, timestamp, lat, lon);
+      CREATE INDEX idx_context_s2cell ON positions(context_id, s2cell);
+      CREATE TABLE real_significant (position INTEGER NOT NULL, context_id INTEGER NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, level INTEGER NOT NULL);
+      INSERT INTO real_significant SELECT position, context_id, timestamp, lat_e7 / 10000000.0, lon_e7 / 10000000.0, level FROM significant;
+      DROP TABLE significant;
+      ALTER TABLE real_significant RENAME TO significant;
+      CREATE INDEX idx_significant_time ON significant(context_id, level, timestamp);
+      CREATE TABLE real_binned (bin_id INTEGER NOT NULL, context_id INTEGER NOT NULL, timestamp INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, s2cell INTEGER NOT NULL);
+      INSERT INTO real_binned SELECT bin_id, context_id, timestamp, lat_e7 / 10000000.0, lon_e7 / 10000000.0, s2cell FROM binned_positions;
+      DROP TABLE binned_positions;
+      ALTER TABLE real_binned RENAME TO binned_positions;
+      CREATE INDEX idx_binned_positions ON binned_positions(bin_id);
+      CREATE INDEX idx_binned_context ON binned_positions(context_id);
+      PRAGMA user_version = 1;
+      COMMIT;
+      VACUUM;
+    `)
+    db.close()
+  }
+
+  it.each([
+    ['before contexts had ids', asOlder],
+    ['before coordinates were integers', asReal],
+  ])('carries every table of a database an older version wrote %s over, and reads it as before', async (_, older) => {
     const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
     try {
       const file = join(dir, 'tracks.db')
@@ -3081,12 +3121,12 @@ describe('the position index', () => {
       expect(before.detail.length).toBeGreaterThan(0)
       expect(before.simplified.length).toBeGreaterThan(0)
       first.close()
-      asOlder(file)
+      older(file)
       const size = statSync(file).size
 
       const store = new SqliteTrackStore(config, debug)
       expect(await reads(store)).toEqual(before)
-      expect(store['db'].prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      expect(store['db'].prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
       // A level refers to its position by row, which the rewrite keeps.
       expect(
         store['db']
@@ -3103,6 +3143,135 @@ describe('the position index', () => {
       expect(await store.getTimed(binned)).toEqual(binnedWhole)
       store.close()
       expect(statSync(file).size).toBeLessThan(size)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // Integers of 1e-7 degrees, as GPX export writes them, rounded half away
+  // from zero as SQLite's round() rounds an older file's on the rewrite.
+  it('keeps a position to the 1e-7 degree', async () => {
+    const store = newStore()
+    store.newPosition(ctx, [60.123456789, -24.12345675], t0)
+    store.newPosition(ctx, [-0.00000005, 0.00000004], t0 + 60_000)
+
+    expect((await store.getTimed(ctx)).map(({ position }) => position)).toEqual([
+      [60.1234568, -24.1234568],
+      [-0.0000001, 0],
+    ])
+    store.close()
+  })
+
+  it('rounds an older database’s coordinates to the 1e-7 degree as it rewrites them', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const older = new DatabaseSync(file)
+      older.exec(OLD_POSITIONS)
+      older.prepare('INSERT INTO positions VALUES (?, ?, ?, ?, 0)').run(ctx, t0, 60.123456789, -24.12345675)
+      older.close()
+
+      const store = new SqliteTrackStore({ file }, debug)
+
+      expect(await store.getTimed(ctx)).toEqual([{ position: [60.1234568, -24.1234568], timestamp: t0 }])
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // Every table that holds a position, rounded alike, so a level still names
+  // its position and a binned one comes back as it was kept.
+  it('rounds the coordinates of every table of a database before coordinates were integers', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const DAY_MS = 24 * 60 * 60_000
+      const day0 = Date.UTC(2026, 5, 1)
+      const first = new SqliteTrackStore({ file }, debug)
+      first.transaction(() => {
+        for (let i = 0; i < 600; i++) {
+          first.newPosition(ctx, [60 + Math.sin(i / 50) * 0.01, 24 + i * 0.0001], day0 + i * 60_000)
+        }
+        for (let i = 0; i < 30; i++) first.newPosition(other, [59.9, 24.1 + i * 0.001], day0 + i * 60_000)
+      })
+      first.transaction(() => {
+        first.binRecorded(other, undefined, day0 + 30 * 60_000, day0 + 3 * DAY_MS, false)
+      })
+      for (let more = true; more;) {
+        first.transaction(() => {
+          more = first.refineLevels(day0 + 3 * DAY_MS)
+        })
+      }
+      first.close()
+      asReal(file)
+      // As an older version wrote them: not on the 1e-7 degree.
+      const nudge = 0.000000033
+      const real = new DatabaseSync(file)
+      for (const table of ['positions', 'binned_positions', 'significant']) {
+        real.exec(`UPDATE ${table} SET lat = lat + ${nudge}, lon = lon - ${nudge}`)
+      }
+      const before = real
+        .prepare(
+          'SELECT timestamp, lat, lon FROM positions WHERE context_id = (SELECT id FROM contexts WHERE context = ?) ORDER BY timestamp',
+        )
+        .all(ctx) as { timestamp: number; lat: number; lon: number }[]
+      const binnedBefore = real.prepare('SELECT lat, lon FROM binned_positions ORDER BY timestamp').all() as {
+        lat: number
+        lon: number
+      }[]
+      real.close()
+
+      const store = new SqliteTrackStore({ file }, debug)
+      const db = store['db']
+      expect(await store.getTimed(ctx)).toEqual(
+        before.map(({ timestamp, lat, lon }) => ({ position: rounded([lat, lon]), timestamp })),
+      )
+      expect((db.prepare('SELECT count(*) AS n FROM significant').get() as { n: number }).n).toBeGreaterThan(0)
+      expect(
+        db
+          .prepare(
+            `SELECT count(*) AS n FROM significant s JOIN positions p ON p.rowid = s.position
+             WHERE s.lat_e7 IS NOT p.lat_e7 OR s.lon_e7 IS NOT p.lon_e7`,
+          )
+          .get(),
+      ).toEqual({ n: 0 })
+      expect(binnedBefore).toHaveLength(30)
+      for (const { id } of store.binEntries()) expect(store.restoreFromBin(id)).toBe('restored')
+      expect((await store.getTimed(other)).map(({ position }) => position)).toEqual(
+        binnedBefore.map(({ lat, lon }) => rounded([lat, lon])),
+      )
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // An id is never given to another vessel, a forgotten one's included.
+  it('keeps the ids of a database before coordinates were integers, and how far they got', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const first = new SqliteTrackStore({ file }, debug)
+      first.newPosition(ctx, [60.1, 24.9], t0)
+      first.newPosition(other, [60.2, 24.8], t0)
+      const ids = first['db'].prepare('SELECT id, context FROM contexts ORDER BY id').all()
+      first.close()
+      asReal(file)
+      const real = new DatabaseSync(file)
+      real.exec("UPDATE sqlite_sequence SET seq = 100 WHERE name = 'contexts'")
+      real.close()
+
+      const store = new SqliteTrackStore({ file }, debug)
+      const db = store['db']
+      expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
+      expect(db.prepare('SELECT id, context FROM contexts ORDER BY id').all()).toEqual(ids)
+      store.newPosition('vessels.urn:mrn:signalk:uuid:new' as Context, [60.3, 24.7], t0)
+      expect(db.prepare("SELECT id FROM contexts WHERE context = 'vessels.urn:mrn:signalk:uuid:new'").get()).toEqual({
+        id: 101,
+      })
+      expect(await store.getTimed(ctx)).toEqual([{ position: [60.1, 24.9], timestamp: t0 }])
+      store.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -3248,7 +3417,7 @@ describe('the position index', () => {
 
       const store = new SqliteTrackStore({ file }, debug)
       expect(await store.getTimed(ctx)).toHaveLength(1)
-      expect(store['db'].prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      expect(store['db'].prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
       store.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -3289,7 +3458,7 @@ describe('the position index', () => {
       store.close()
       expect(lstatSync(file).isSymbolicLink()).toBe(true)
       const rewritten = new DatabaseSync(target)
-      expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
       rewritten.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -3321,7 +3490,7 @@ describe('the position index', () => {
         store.close()
         expect(existsSync(join(dir, 'data', 'tracks.db'))).toBe(false)
         const rewritten = new DatabaseSync(target)
-        expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+        expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
         rewritten.close()
       } finally {
         rmSync(dir, { recursive: true, force: true })
@@ -3352,7 +3521,7 @@ describe('the position index', () => {
         store.close()
         expect(lstatSync(file).isSymbolicLink()).toBe(true)
         const rewritten = new DatabaseSync(target)
-        expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+        expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
         rewritten.close()
       } finally {
         native.mockRestore()
@@ -3371,10 +3540,38 @@ describe('the position index', () => {
       first['db'].exec('PRAGMA user_version = 0')
       first.close()
 
-      const store = new SqliteTrackStore({ file }, debug)
+      const said: string[] = []
+      const store = new SqliteTrackStore(
+        { file },
+        Object.assign((...m: unknown[]) => said.push(String(m[0])), { enabled: true }),
+      )
       expect(await store.getTimed(ctx)).toHaveLength(1)
-      expect(store['db'].prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      expect(store['db'].prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
+      expect(said.filter((m) => m.startsWith('rewrote'))).toEqual([])
       store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves a database of this version as it is', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-index-'))
+    try {
+      const file = join(dir, 'tracks.db')
+      const first = new SqliteTrackStore({ file }, debug)
+      first.newPosition(ctx, [60.1, 24.9], t0)
+      first.close()
+      const { ino } = statSync(file, { bigint: true })
+
+      const said: string[] = []
+      const store = new SqliteTrackStore(
+        { file },
+        Object.assign((...m: unknown[]) => said.push(String(m[0])), { enabled: true }),
+      )
+      store.close()
+
+      expect(said.filter((m) => m.startsWith('rewrote'))).toEqual([])
+      expect(statSync(file, { bigint: true }).ino).toBe(ino)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -3385,7 +3582,7 @@ describe('the position index', () => {
     try {
       const file = join(dir, 'tracks.db')
       const newer = new DatabaseSync(file)
-      newer.exec('PRAGMA user_version = 2')
+      newer.exec('PRAGMA user_version = 3')
       newer.close()
 
       expect(() => new SqliteTrackStore({ file }, debug)).toThrow(/written by a newer version/)
@@ -3599,7 +3796,7 @@ describe('the position index', () => {
       expect(await store.getTimed(ctx)).toHaveLength(1)
       store.close()
       const rewritten = new DatabaseSync(file)
-      expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      expect(rewritten.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
       rewritten.close()
     } finally {
       if (platform) Object.defineProperty(process, 'platform', platform)
