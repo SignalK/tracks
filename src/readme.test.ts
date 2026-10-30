@@ -4,7 +4,7 @@ import { createHarness, SELF_CONTEXT } from './harness.test-utils.js'
 import { createInBounds, validateParameters } from './utils.js'
 import { parseTrackQuery } from './timeWindow.js'
 
-// Every example printed in the README, executed. Documentation that has not
+// Examples printed in docs/api.md, executed. Documentation that has not
 // been run is a claim, not a fact.
 // The GPX API is only useful if a consumer can reach it: the module is built
 // into the package through src/index.ts, and without a re-export toGpx and
@@ -18,7 +18,7 @@ describe('the package entry point', () => {
   })
 })
 
-describe('README examples', () => {
+describe('docs/api.md examples', () => {
   it('?bbox=130,-35,139,-33 selects South Australia', () => {
     const { bbox } = validateParameters({ bbox: '130,-35,139,-33' }, undefined)
     expect(createInBounds(bbox!)([-34, 135])).toBe(true)
@@ -81,7 +81,7 @@ describe('README examples', () => {
 // The `?times` example above, executed end to end: the documented alignment
 // invariant (times[i][j] describes coordinates[i][j]) is the part a consumer
 // relies on, so it is pinned against the real route rather than the parser.
-describe('README ?times example', () => {
+describe('docs/api.md ?times example', () => {
   it('returns times aligned with coordinates', async () => {
     const h = createHarness({ selfPosition: [60, 24] })
     try {

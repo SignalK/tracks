@@ -1,0 +1,370 @@
+# How the plugin works
+
+The [README](../README.md) gives an overview. This page explains in detail how the plugin
+records, keeps, imports and deletes tracks, and names the routes for each where it describes it.
+[api.md](api.md) lists them all.
+
+## Where a track comes from
+
+Every track is answered from the plugin's own store, a SQLite file in the plugin's data
+directory, so tracks survive a restart on their own. Base stations and aids to navigation are not
+recorded, since their position never changes.
+
+A history provider — [signalk-questdb](https://www.npmjs.com/package/signalk-questdb),
+[signalk-to-influxdb2](https://www.npmjs.com/package/signalk-to-influxdb2) — is not read when a
+track is asked for. What it holds of the own vessel reaches the store once, through
+[the history import](#importing-from-a-history-provider), and the plugin works fully with no
+provider installed. See [history-and-storage.md](history-and-storage.md) for what that
+means in practice.
+
+The own vessel is kept indefinitely. Other vessels' positions are kept for the number of
+days set in the plugin settings, also for a vessel that never leaves receiver range — a harbour
+puts hundreds of AIS targets past a receiver in a day, and keeping every one of them forever is
+rarely what anybody wants. Space freed by removing positions is reused for new ones, which slows
+the file's growth, but the file never shrinks on its own: only an SQLite `VACUUM` returns that
+space to the file system.
+
+With **Record other vessels (AIS)** turned off, the plugin records the own vessel only: nothing
+more of another vessel is recorded, its name included, so a chart plotter that draws trails from
+this plugin, such as Freeboard, draws no new ones for AIS targets. What was recorded of them
+before stays until those days run out, or for good when they are set to 0. The webapp says that
+they are not being recorded. Another vessel's track can still be imported.
+
+Each position names its vessel by a number, which a table in the file turns back into the vessel,
+rather than in full, and holds its coordinates as whole numbers of 1e-7 degrees (about 11 mm, as
+GPX export writes them): the file takes well under half the space it took up to version 3.7. The
+first start after updating from such a version rewrites `tracks.db` once, as a new file that then
+replaces it. The new file is built beside `tracks.db`, or, where that is a link, beside the file it
+points to. That takes about 9 seconds for two million positions on a Raspberry Pi 5, while the
+plugin waits. It needs room on the disk for the new file, well under half the old one where
+recorded positions take most of it (about 212 MB for 524 MB on a boat's store of two million
+positions), and up to its whole size where imported tracks do, since those are copied as they are.
+It needs room in the temporary directory too, for sorting its largest index, about an eighth of the
+old file. Close other programs that have the file open, an `sqlite3` shell say, before updating.
+One that holds a lock on it when the plugin starts keeps it from being rewritten: the plugin then
+does not start, says why, and tries again at its next start. A write to the file while it is being
+rewritten either fails, as SQLite answers that the database is locked, or stops the rewrite the
+same way, and the old file stays as it was. On Windows, a program that opens the file, writes to it
+and closes it again in the instant before the new file replaces the old one loses that write. On
+Linux and macOS, one that holds no lock, as a shell left idle may, does not keep the file from
+being rewritten, and still has the old file open once the new one has replaced it: what it reads
+then is no longer the database, and a write from it can damage the new file, so close it before it
+writes anything. An older version cannot read the rewritten file; to go back to one, restore a
+backup of `tracks.db` taken before updating.
+
+### Keeping tracks for years
+
+The own vessel's track is kept here indefinitely. For a track recorded before Signal K, or while
+this plugin was not running, a history provider can hold more:
+[the history import](#importing-from-a-history-provider) copies what the server's default
+provider holds of the own vessel into this plugin's store. Where several providers are installed,
+the default is chosen under **Data → Preferences**.
+
+[signalk-questdb](https://www.npmjs.com/package/signalk-questdb) is one such provider. From
+2.3.0 it can
+[keep the own track past its retention](https://github.com/dirkwa/signalk-questdb#retention-and-the-archive),
+and it
+[imports a chartplotter's GPX export](https://github.com/dirkwa/signalk-questdb#importing-a-gpx-track)
+of any size, which the history import then brings into this plugin. Without a provider, this
+plugin imports such an export into its own recording; see
+[Importing a large file](#importing-a-large-file).
+
+Years of a track are more than one answer of the v2 Track API can carry. A recorded track that a
+query would read as more positions than the plugin's budget for one track is read and answered
+simplified instead, to the smallest tolerance up to 32 m whose significance levels hold it within
+the budget. It is spaced in time to fit instead where the query sets `maxPoints`, which asks for
+spacing, where no tolerance up to 32 m holds it, or where tracks split at pauses (**Split a track
+after this many minutes without a fix**). The answer says which in `epsilon` or `resolution`. A
+track within the budget is answered as before. A query with a box and `clip`, which the server
+sets for any box from 2.34, is not counted: it reads the stretches near the box, which for a box
+around the whole track is all of it. Nor is a query with a box that names no vessel. Without
+`clip`, a query that names a vessel would read its whole track, so that read is counted, every
+position of the window. A track over the budget is read to fit and matched against the box on
+what that read keeps: thinned to the query's `resolution` where that holds it within the budget,
+or else read first at the tolerance the box asks for where that is 4 m or more. A vessel that
+came into the box by less than the tolerance, or for less than the spacing, can then be left out,
+and one whose kept line cuts across a box it went round matches it. The webapp's GPX export of
+the own vessel still writes every position of the whole recording.
+
+## Imported tracks
+
+A client can store a track of its own, a GPX from a friend or a passage logged by another
+device, with `POST /signalk/v2/api/tracks` (Signal K server with
+[#3038](https://github.com/SignalK/signalk-server/pull/3038)). The body is a GeoJSON
+Feature, the shape a v2 query returns; the plugin answers with an id such as
+`tracks:imported:0f0f2a1e-…`, and `GET` or `DELETE /signalk/v2/api/tracks/<id>` fetch or
+delete it. Storing needs write access; deleting needs administrator rights, or write
+access on a server with security turned off.
+
+An imported track is kept apart from the recording. It is listed by v2 queries like any
+other track, filtered by vessel, time window and area, but as a feature of its own even when
+it names a vessel the plugin also records. It is never removed by the retention settings, and never returned by the v1 routes, which answer
+where vessels are now. Its own name and any other properties it was posted with come back as
+posted. It carries `imported`, the time it was stored, which a recorded track does not, so a
+client drawing a vessel's recording can leave the import out of it. Imports stored by a version
+before that time was kept are dated to the first start of a version that keeps it.
+
+A timed track of the own vessel is the exception: it is the boat's own passage, logged before
+the plugin was installed or by another plotter, so it is written into the own vessel's
+recording instead of being kept as an import, and the answer is the recording's id,
+`tracks:recorded:<context>`. By default it only fills what the recording is missing: its
+points are used where the recording has no position for at least five minutes, and left out
+elsewhere, so nothing recorded is overwritten and two sources are never interleaved minute by
+minute. Asked to replace instead, it takes the place of what was recorded over the same time: the
+positions this plugin stored there go to the recycle bin first, one entry per segment, and with a
+history provider installed the entry is kept even where nothing was recorded, so the history
+import leaves that time out too. Restoring the entry brings the recording back. An untimed track of the own vessel
+stays an import, since it cannot be placed in time.
+
+A track with neither times (`coordTimes`) nor a vessel (`context`) is kept too. No time
+window or vessel query matches it, but `GET /plugins/tracks/imports` lists it with every other
+import, and `GET /signalk/v2/api/tracks/<id>` returns it.
+
+### Importing a GPX file
+
+The Tracks webapp imports a GPX file from the **Import** form, and a client can do the same
+with `POST /plugins/tracks/imports`, the file as the request body with `Content-Type:
+application/gpx+xml`. Each track in the file becomes an imported track as above. Ticking
+**Tracks of my own vessel** (`?self=true`) files them under the own vessel, which writes a
+timed one into the recording; otherwise a track names a vessel only if the file says which, as
+the plugin's own GPX export does. Ticking **Replace what my vessel recorded over the same time**
+as well (`onOverlap=replace`; the default is `keep`) replaces the recording rather than filling
+it. What is written into the recording is simplified with the rest of it once it is a day old (see
+[Simplifying stored tracks](#simplifying-stored-tracks)), so keep the file if you want every point.
+
+The file can be at most 25 MiB here. The webapp sends a file of the own vessel in slices instead,
+whatever its size; see [Importing a large file](#importing-a-large-file).
+
+In a timed track, points without a time are skipped, and the answer says how many
+(`skippedPoints`), as it does for the points left out where the recording already has positions
+(`overlappingPoints`). A track posted through the Track API's `POST /signalk/v2/api/tracks` is
+always kept beside the recording this way, since that API has no such choice yet. The route
+needs write access on a Signal K server that lets a plugin say so, and administrator rights on
+an older one.
+
+### Importing a large file
+
+A chartplotter's export of several years runs past a gigabyte, more than one request can carry.
+With **Tracks of my own vessel** ticked, the Tracks webapp first reads the file in the browser and
+lists its tracks by name, with how many points each has and when they begin and end, to choose
+which are the vessel's: such an export mixes the own track with the AIS targets the plotter
+followed, which it names `AIS <name>` or by the MMSI and which are not ticked, and can hold
+passages other boats shared (see below). A track without times cannot be placed in the recording
+and cannot be chosen. **Import** then sends the file a slice at a time, and the server writes each
+slice's points into the recording before it takes the next, so neither side holds more of the file
+than a slice.
+
+The points are written as above: into the gaps of the recording, or with **Replace** in place of
+what it holds, one recycle bin entry for each segment of the file. Points without a time are left
+out and counted. A file that is not well-formed GPX stops the import where it breaks; what came
+before it stays written. **Stop** ends the import, and what it wrote stays too: importing the same
+file again fills in the rest.
+
+A slice that does not get through, on a boat's Wi-Fi say, is sent again from where the server got
+to. A restart of the plugin breaks the import off only until the page sends again: the server goes
+on from the last point it saved. Reloading the page and importing the same file with the same
+choices goes on where it stopped; another file of the same name and size starts anew, told apart
+by its time of change and its first and last bytes. One file is imported at a time; one nobody has sent to for 15
+minutes gives way to the next.
+
+A file of another vessel stays at 25 MiB, since an imported track is read whole.
+
+A client imports a large file through the routes in
+[api.md](api.md#importing-a-large-file-in-slices).
+
+#### Tracks elsewhere than the own vessel
+
+The list notes a track that was elsewhere than the own track at the same time, such as a passage
+another boat shared that the plotter was given: one vessel cannot be further from itself than it
+sails between two fixes. The own track is the one TimeZero names `Own Ship` (`Eigenes Schiff` in
+German), as this plugin's own export does; in a file without that name nothing is noted. A noted
+track is left unticked only where it is plainly another boat's: the file names no other program
+than TimeZero or this plugin as its creator, each part of the track was elsewhere for most of the
+time it shares with the own track, and the own track clearly covers more hours than the other
+tracks not named like an AIS target together, as a plotter's track of years does beside a few
+passages. Otherwise it stays ticked with the note, `partly` where only some of it was elsewhere,
+since a friend's TimeZero export calls its track `Own Ship` too, and tracks are chosen by name.
+Parts under the own name that were apart from each other, or crowded into the same minutes, count
+as neither. Points are read in GPX's namespace or none, as the import reads them. Look at the notes
+before importing: a track can still be left unticked though it is the vessel's, where another
+boat's track carries the own name at a time the vessel's is in the file only under another name. A
+passage at a time the own track has no point is not noted.
+
+### Importing from a history provider
+
+With a history provider installed, the Tracks webapp offers **Import from history**. It copies
+the own vessel's track from the provider into this plugin's recording, a day at a time from the
+first day the provider holds to the moment it was started, at the finest resolution the
+provider keeps, one position a second at most. Like a GPX import it fills only stretches of at
+least five minutes where the recording has nothing, so what the plugin recorded itself stays as
+it is, and a deleted span stays deleted.
+
+The import runs on the server. How far it got shows in the webapp and in the plugin's status,
+and a stop or a restart breaks it off only until a minute after the plugin starts again, when
+it goes on with the next day. Started again once it has finished, it fills only what is still
+missing. A day under way at a second a position is up to 86,400 rows in the plugin's file.
+
+It needs administrator rights. `GET /plugins/tracks/history-import` says whether a provider is
+installed (`provider`) and how far the import got (`state`), and `POST` starts it, or resumes
+one that stopped.
+
+The webapp lists every imported track, however old and whether or not it has times, in a list of
+its own, so a passage imported from years ago can be found there. It can be deleted there on a
+Signal K server that deletes tracks by id.
+
+`GET /plugins/tracks/imports` returns every imported track, and no recorded ones, each with
+`imported`, the time it was stored.
+
+The Tracks webapp exports an imported track as GPX from its row, as it was imported. A client
+can download the same file from `GET /plugins/tracks/imports/<id>/track.gpx`, with the id less
+its `tracks:` prefix: under the track's own name, and without times if it had none.
+
+## Deleting tracks
+
+`DELETE /signalk/v2/api/tracks/<id>` deletes a track, and with `from`, `to` or both only the
+part recorded between them (on a Signal K server that accepts them; an older one refuses the
+request rather than deleting the whole track). Deleting needs administrator rights, or write
+access on a server with security turned off. The Tracks webapp offers both from each row.
+
+A recorded track has the id `tracks:recorded:<vessel context>`. Deleting it whole removes
+what was recorded up to now; the recording goes on, and what it records next is kept. With a
+history provider installed a deleted span of the own vessel is kept even where nothing was
+recorded, and the history import leaves it out, since the History API has no way to delete data
+and the import would otherwise fill it back in.
+
+Nothing deleted is gone at once. It goes to a recycle bin, listed in the Tracks webapp, where it
+can be restored or deleted for good, until it is purged after the number of days set in the
+plugin settings (180 by default). The retention settings above do not reach into the bin, but
+they apply again to what is restored: an AIS vessel's positions restored after they have aged
+past the retention are dropped at the next prune. Once a recorded span is purged its points are gone,
+but the history import keeps leaving it out for good.
+
+### Deleting the whole database
+
+For a store gone wrong past repair, the webapp's **Danger zone** deletes the whole database and
+starts the plugin again on an empty one, as if it had just been installed. It works on a database
+that no longer opens as well. That deletes:
+
+- the own vessel's whole recording;
+- every other vessel's track;
+- every imported track, and the recycle bin;
+- how far the history import got.
+
+Nothing of it can be brought back, and it skips the recycle bin. Keep a copy first: the own
+vessel's row exports its whole recording as GPX, and each import exports from its own row.
+
+Deleted parts of the own vessel's recording are forgotten as well, so a history import afterwards
+brings them back. It asks for `DELETE` to be typed before it goes ahead. The route,
+`DELETE /plugins/tracks/database?confirm=DELETE`, needs administrator rights and the same word.
+
+If `tracks.db` in the plugin's data directory is a link to a file elsewhere, such as on another
+disk, the file it points to is deleted and the link stays, so the empty database is created there.
+If the plugin cannot reach that file, as on a disk that is not mounted, or may not delete it,
+the database stays as it was and the webapp says so.
+
+## Glitch filtering
+
+A receiver occasionally reports a position far from the vessel — a bad almanac, a multipath
+reflection, a unit resetting. On a live map it flickers past. In a stored track it is permanent:
+one spike stretches the bounding box across an ocean and draws a line over the chart every time
+the track is rendered.
+
+Positions implying a speed above **Discard positions implying a speed above this (knots)** since
+the previous accepted fix are discarded, defaulting to 100 knots. That is well above any real
+vessel, and glitches usually miss it by orders of magnitude rather than by a little. The test is
+speed rather than distance, so a track resuming after a long gap — a passage with the plugin
+stopped, or an AIS target reappearing — is not filtered. Set it to 0 to record everything.
+
+The first fix after a start, and the first after more than ten minutes without one, has nothing
+checked before it. Were it a glitch, every real fix after it would look like a jump away from it,
+and be discarded for as long as that speed takes to cover the distance: hours, for a glitch whole
+degrees off. So when two fixes in a row agree with each other but not with it, the second is taken
+as the vessel's position instead, and only the first of them is lost. A fix that the next one
+agrees with is not given up that way, so a run of glitches after it is discarded.
+
+A fix dated before positions already stored has no previous fix to be measured from. The first
+fix after a restart can be one: when the server's clock is not yet set, it is dated back into
+the stored track at a position the vessel only reached later, and draws a line out and back
+across the chart. Such a fix is measured from the stored positions either side of its time
+instead, and discarded the same way.
+
+Positions the history import brings from a provider are not filtered here — they are that
+provider's record, and it is the one that decides what to keep.
+
+## Pausing while not under way
+
+A boat on a mooring for the winter emits a position every second and travels nowhere. Setting
+**Pause recording while navigation.state is one of** stops those months costing any rows.
+
+On by default for `moored`, `not-under-way` and `aground`. It needs `navigation.state` to be set —
+by [signalk-autostate](https://github.com/meri-imperiumi/signalk-autostate) or by hand — and a
+vessel that reports no state is always recorded, so an install with no state source behaves as
+though this were off. Clear the list to record regardless of state.
+
+Two limits are deliberate. **`anchored` is offered but rarely wanted**: an anchor alarm watches
+exactly the track a vessel makes while swinging on its rode, so pausing there would break it.
+And **AIS targets are never paused** — their navigational status comes from the transponder and
+is often stale, so a vessel under way still reporting `moored` would otherwise vanish from the
+track.
+
+While paused, the plugin says so in its status on the server dashboard.
+
+## Resolution by state
+
+The own vessel can be recorded at a different spacing for each `navigation.state`, finer or
+coarser than the track resolution. Out of the box only `anchored` is set, to one second, so the
+swing around the anchor shows.
+
+Detail finer than the track resolution is kept in full for a day, and is then simplified with
+everything else (see [Simplifying stored tracks](#simplifying-stored-tracks)). With that turned
+off, it is thinned by time instead: while a stay at anchor goes on, its older part is thinned only to the spacing an anchor alarm reads the whole stay at, one second
+per day of the stay, so it keeps roughly 86,400 points plus the last day. That holds until the
+spacing reaches the track resolution, after 10 days at the default ten seconds; from then on the older
+part is kept at the track resolution, never coarser. A day after the stay ends, it is thinned back
+to the track resolution.
+
+Other vessels have a resolution of their own, the track resolution unless set. Their
+`navigation.state` is not used: it is whatever their transponder was last set to, and often stale.
+Detail recorded for them finer than the track resolution is thinned the same way.
+
+## Simplifying stored tracks
+
+To keep reads fast on a small board, the plugin simplifies what it stores once a day is more than a
+day old. By default, a position that lies within half a metre of the line its neighbours draw is
+deleted, as simplifying the track to half a metre would leave it out. One position a minute is kept
+wherever the recording had one, so a straight leg never looks like a pause. Half a metre is below a
+GPS's own noise. At that tolerance, a day recorded every second keeps 3 to 5 % of its positions.
+
+It applies to every vessel, and to what an import writes into the recording: the history import,
+and a GPX upload of the own vessel. Imported tracks kept on their own are left as they are. An
+import into a day more than a day old that the recording has nothing of is simplified before it is
+written, so an SD card is not written to twice for the positions deleted again.
+
+A track drawn at the storage tolerance or more, which is what a chart asks for, comes out the same
+as it would from every position. A track read without one has fewer points.
+
+> **Deleted positions cannot be brought back.** To keep every position, keep a copy of your own
+> somewhere else and archive it: a GPX export of the track, a backup of the plugin's `tracks.db`
+> taken before updating, or a history provider such as
+> [signalk-questdb](https://www.npmjs.com/package/signalk-questdb), which keeps a record of its
+> own.
+
+The setting "Simplify stored tracks older than a day to this many metres" sets the tolerance. 0
+turns it off, and detail finer than the track resolution is then thinned by time as described
+above. Raising it simplifies every day again; lowering it brings nothing back.
+
+After an update that turns it on, the store simplifies what it already holds in the background, a
+day at a time, without slowing reads. The database file does not shrink: SQLite reuses the space
+for new positions.
+
+## Position sources
+
+`navigation.position` often arrives from several sources at once — an internal GPS, an AIS
+transponder, a plotter echoing its own fix. Signal K decides which one wins through **source
+priority**, and the stream this plugin records from is already filtered by it, so normally only
+the winning source is stored.
+
+When no priority rule matches the path, though, every source comes through. Their fixes are
+metres apart, so the track zigzags between receivers instead of following the boat. If that is
+happening, the plugin says so in its status on the server dashboard, naming the sources it has
+seen. The fix is to set a source priority for `navigation.position` in the server settings.
