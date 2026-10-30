@@ -150,6 +150,18 @@ interface PositionRow {
   lon: number
 }
 
+/** Units of a stored coordinate in a degree: 1e-7 degrees, about 11 mm, as GPX export writes them. */
+const E7 = 10_000_000
+
+/** A coordinate as stored: rounded to the 1e-7 degree, half away from zero as SQLite's round() does in migrate(). */
+const toE7 = (degrees: number): number => Math.sign(degrees) * Math.round(Math.abs(degrees) * E7)
+
+/** A position as the store keeps it: what a read gives back of what was written. */
+const asStored = ([lat, lon]: LatLngTuple): LatLngTuple => [toE7(lat) / E7, toE7(lon) / E7]
+
+/** A position's stored coordinates, read back in degrees as `lat` and `lon`. */
+const COORDINATES = `lat_e7 / ${E7}.0 AS lat, lon_e7 / ${E7}.0 AS lon`
+
 /** A row read for more than one context, with the id of its own. */
 interface ContextRow extends PositionRow {
   context_id: number
@@ -493,10 +505,11 @@ class KeptRuns {
 }
 
 /**
- * The schema version `PRAGMA user_version` holds; 0 is a database written
- * before contexts had ids, which `migrate()` rewrites.
+ * The schema version `PRAGMA user_version` holds: 0 is a database written
+ * before contexts had ids, and 1 one written before coordinates were
+ * integers, which `migrate()` rewrites.
  */
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
 /** An id no context has: bound for one the store does not know, it matches no row, as its name did. */
 const NO_CONTEXT = -1
@@ -511,11 +524,14 @@ const TABLES = `
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     context   TEXT    NOT NULL UNIQUE
   );
+  -- Coordinates in units of 1e-7 degrees (about 11 mm), as GPX export
+  -- writes them: half the bytes of a REAL, in the table and the index that
+  -- carries them.
   CREATE TABLE IF NOT EXISTS positions (
     context_id INTEGER NOT NULL,
     timestamp  INTEGER NOT NULL,
-    lat        REAL    NOT NULL,
-    lon        REAL    NOT NULL,
+    lat_e7     INTEGER NOT NULL,
+    lon_e7     INTEGER NOT NULL,
     s2cell     INTEGER NOT NULL
   );
   -- A separate table rather than a column on positions: short of rewriting
@@ -577,8 +593,8 @@ const TABLES = `
     bin_id     INTEGER NOT NULL,
     context_id INTEGER NOT NULL,
     timestamp  INTEGER NOT NULL,
-    lat        REAL    NOT NULL,
-    lon        REAL    NOT NULL,
+    lat_e7     INTEGER NOT NULL,
+    lon_e7     INTEGER NOT NULL,
     s2cell     INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_binned_positions ON binned_positions(bin_id);
@@ -625,8 +641,8 @@ const TABLES = `
     position    INTEGER NOT NULL,
     context_id  INTEGER NOT NULL,
     timestamp   INTEGER NOT NULL,
-    lat         REAL    NOT NULL,
-    lon         REAL    NOT NULL,
+    lat_e7      INTEGER NOT NULL,
+    lon_e7      INTEGER NOT NULL,
     level       INTEGER NOT NULL
   );
   -- The hours of refined days each context had a position in each cell
@@ -702,7 +718,7 @@ const INDEXES = `
   -- The position rides along with the vessel and time, so a read of a track
   -- is answered from the index alone, without a lookup in the table for
   -- every row.
-  CREATE INDEX IF NOT EXISTS idx_context_time_position ON positions(context_id, timestamp, lat, lon);
+  CREATE INDEX IF NOT EXISTS idx_context_time_position ON positions(context_id, timestamp, lat_e7, lon_e7);
   -- Reads a box for one vessel without its whole window: the cell index
   -- alone mixes every vessel near the box, and the index above finds the
   -- vessel but orders its rows by time.
@@ -713,8 +729,11 @@ const INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_level_visits_hour ON level_visits(context_id, hour);
 `
 
-/** The tables that name a position's context by its id, which a database before SCHEMA_VERSION named in full. */
+/** The tables that name a position's context by its id, which a database of schema 0 named in full. */
 const BY_CONTEXT_ID = ['positions', 'binned_positions', 'significant', 'level_visits']
+
+/** The columns that hold a coordinate in units of 1e-7 degrees, which a database before schema 2 held in degrees. */
+const IN_E7: Record<string, string> = { lat_e7: 'lat', lon_e7: 'lon' }
 
 /** SQLITE_BUSY and SQLITE_LOCKED, which node:sqlite reports as extended codes: another connection holds the database. */
 const HELD = new Set([5, 6])
@@ -774,10 +793,10 @@ function migrate(path: string, debug: Debug): void {
     }
     // By its columns rather than its version: a new database set up only in
     // part, before its version was written, has the new ones.
-    const named = (old.prepare('PRAGMA table_info(positions)').all() as { name: string }[]).some(
-      ({ name }) => name === 'context',
+    const older = (old.prepare('PRAGMA table_info(positions)').all() as { name: string }[]).some(
+      ({ name }) => name === 'context' || name === 'lat',
     )
-    if (!named) {
+    if (!older) {
       return
     }
     // Waited out by the tries below, not by every statement in them.
@@ -986,20 +1005,41 @@ function rewrite(file: string, next: string): void {
       ),
     )
     const byId = BY_CONTEXT_ID.filter((table) => held.has(table))
+    // Schema 0 named contexts in full; schema 1 has their ids already, and
+    // keeps them, with how far AUTOINCREMENT got, so that no id is reused.
+    const named = columns('old', 'positions').includes('context')
     db.exec('BEGIN')
-    // Each table's own, which its index by context gives without sorting
-    // every row in the temporary directory.
-    db.exec(
-      `INSERT INTO contexts (context) ${byId.map((table) => `SELECT DISTINCT context FROM old.${table}`).join(' UNION ')} ORDER BY 1`,
-    )
+    if (named) {
+      // Each table's own, which its index by context gives without sorting
+      // every row in the temporary directory.
+      db.exec(
+        `INSERT INTO contexts (context) ${byId.map((table) => `SELECT DISTINCT context FROM old.${table}`).join(' UNION ')} ORDER BY 1`,
+      )
+    } else {
+      db.exec('INSERT INTO contexts (id, context) SELECT id, context FROM old.contexts')
+      db.exec("DELETE FROM sqlite_sequence WHERE name = 'contexts'")
+      db.exec(
+        `INSERT INTO sqlite_sequence (name, seq) SELECT 'contexts', MAX(
+           COALESCE((SELECT seq FROM old.sqlite_sequence WHERE name = 'contexts'), 0),
+           COALESCE((SELECT MAX(id) FROM contexts), 0))`,
+      )
+    }
     for (const table of byId) {
+      const kept = new Set(columns('old', table))
       const rest = columns('main', table).filter((column) => column !== 'context_id')
+      // A coordinate the old file held in degrees, rounded to the 1e-7 degree.
+      const valueOf = (column: string) => {
+        const degrees = IN_E7[column]
+        return degrees !== undefined && kept.has(degrees)
+          ? `CAST(round(t.${degrees} * ${E7}) AS INTEGER)`
+          : `t.${column}`
+      }
       // A position keeps its rowid, which significant refers to it by.
       const rowid = table === 'positions' ? ['rowid'] : []
       db.exec(
         `INSERT INTO main.${table} (${[...rowid, 'context_id', ...rest].join(', ')})
-         SELECT ${[...rowid.map((r) => `t.${r}`), 'c.id', ...rest.map((column) => `t.${column}`)].join(', ')}
-         FROM old.${table} AS t JOIN contexts AS c ON c.context = t.context${rowid.length > 0 ? ' ORDER BY t.rowid' : ''}`,
+         SELECT ${[...rowid.map((r) => `t.${r}`), named ? 'c.id' : 't.context_id', ...rest.map(valueOf)].join(', ')}
+         FROM old.${table} AS t${named ? ' JOIN contexts AS c ON c.context = t.context' : ''}${rowid.length > 0 ? ' ORDER BY t.rowid' : ''}`,
       )
     }
     const others = (
@@ -1179,7 +1219,7 @@ export class SqliteTrackStore implements TrackStore {
       )
       .run(now, now)
     this.insert = this.db.prepare(
-      'INSERT INTO positions (context_id, timestamp, lat, lon, s2cell) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO positions (context_id, timestamp, lat_e7, lon_e7, s2cell) VALUES (?, ?, ?, ?, ?)',
     )
     // Newer wins: a corrected or changed name replaces what is stored, while
     // an older observation arriving late leaves it alone.
@@ -1263,10 +1303,10 @@ export class SqliteTrackStore implements TrackStore {
     }
     const statements = (this.neighbourStatements ??= {
       before: this.db.prepare(
-        'SELECT timestamp, lat, lon FROM positions WHERE context_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT 1',
+        `SELECT timestamp, ${COORDINATES} FROM positions WHERE context_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT 1`,
       ),
       after: this.db.prepare(
-        'SELECT timestamp, lat, lon FROM positions WHERE context_id = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1',
+        `SELECT timestamp, ${COORDINATES} FROM positions WHERE context_id = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1`,
       ),
     })
     const id = this.idOf(context)
@@ -1314,7 +1354,10 @@ export class SqliteTrackStore implements TrackStore {
   }
 
   private store(context: Context, position: LatLngTuple, timestamp: number): void {
-    this.insert.run(this.idFor(context), timestamp, position[0], position[1], toSigned(cellIdFor(position)))
+    const lat = toE7(position[0])
+    const lon = toE7(position[1])
+    // Of the position as stored, so that a read finds it in the cell it lies in.
+    this.insert.run(this.idFor(context), timestamp, lat, lon, toSigned(cellIdFor([lat / E7, lon / E7])))
   }
 
   initialTrack(context: Context, track: LatLngTuple[], timestamps?: number[]): void {
@@ -1342,7 +1385,9 @@ export class SqliteTrackStore implements TrackStore {
     // track is stored at timestamp 0 throughout, and the index alone would
     // order those by position.
     return this.db
-      .prepare(`SELECT timestamp, lat, lon FROM positions WHERE ${clauses.join(' AND ')} ORDER BY timestamp, rowid`)
+      .prepare(
+        `SELECT timestamp, ${COORDINATES} FROM positions WHERE ${clauses.join(' AND ')} ORDER BY timestamp, rowid`,
+      )
       .all(...params) as unknown as PositionRow[]
   }
 
@@ -1553,7 +1598,7 @@ export class SqliteTrackStore implements TrackStore {
     )
     const day = ' AND timestamp >= ? AND timestamp < ?'
     // Ordered as rowsFor() orders them, so equal times keep the order they were stored in.
-    const positions = 'SELECT timestamp, lat, lon FROM positions WHERE context_id = ?'
+    const positions = `SELECT timestamp, ${COORDINATES} FROM positions WHERE context_id = ?`
     const whole = {
       day: this.db.prepare(`${positions}${day} ORDER BY timestamp, rowid`),
       last: this.db.prepare(`${positions}${inRange(range)} ORDER BY timestamp, rowid`),
@@ -1561,7 +1606,7 @@ export class SqliteTrackStore implements TrackStore {
     // Sorted below: read level by level, they come in level order.
     const significant =
       levels &&
-      `SELECT position AS id, timestamp, lat, lon FROM significant INDEXED BY idx_significant_time WHERE context_id = ? AND level IN (${levels.join(', ')})`
+      `SELECT position AS id, timestamp, ${COORDINATES} FROM significant INDEXED BY idx_significant_time WHERE context_id = ? AND level IN (${levels.join(', ')})`
     const byLevel =
       significant && refined
         ? { day: this.db.prepare(`${significant}${day}`), last: this.db.prepare(`${significant}${inRange(range)}`) }
@@ -1573,7 +1618,7 @@ export class SqliteTrackStore implements TrackStore {
     const edge = (order: string) =>
       this.db
         .prepare(
-          `SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context_id = ?${inRange(range)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`,
+          `SELECT rowid AS id, timestamp, ${COORDINATES} FROM positions WHERE context_id = ?${inRange(range)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`,
         )
         .get(id, range.from, range.to) as unknown as (PositionRow & { id: number }) | undefined
     const edges = byLevel ? [edge('ASC'), edge('DESC')] : []
@@ -1658,8 +1703,10 @@ export class SqliteTrackStore implements TrackStore {
     const groups = this.db
       .prepare(
         `SELECT context_id, COUNT(*) AS count, MIN(timestamp) AS first, MAX(timestamp) AS last,
-                MIN(lat) AS south, MAX(lat) AS north, MIN(lon) AS lowest, MAX(lon) AS highest,
-                MIN(lon) FILTER (WHERE lon >= 0) AS lowestEast, MAX(lon) FILTER (WHERE lon < 0) AS highestWest
+                MIN(lat_e7) / ${E7}.0 AS south, MAX(lat_e7) / ${E7}.0 AS north,
+                MIN(lon_e7) / ${E7}.0 AS lowest, MAX(lon_e7) / ${E7}.0 AS highest,
+                MIN(lon_e7) FILTER (WHERE lon_e7 >= 0) / ${E7}.0 AS lowestEast,
+                MAX(lon_e7) FILTER (WHERE lon_e7 < 0) / ${E7}.0 AS highestWest
          ${rows} GROUP BY context_id`,
       )
       .all(...params) as unknown as ({
@@ -1674,7 +1721,7 @@ export class SqliteTrackStore implements TrackStore {
     // worker's connection makes every write and this runs without yielding,
     // so the two statements read the same rows.
     const longitudes = this.db.prepare(
-      `SELECT DISTINCT lon FROM positions WHERE ${['context_id = ?', ...inWindow].join(' AND ')}`,
+      `SELECT DISTINCT lon_e7 / ${E7}.0 AS lon FROM positions WHERE ${['context_id = ?', ...inWindow].join(' AND ')}`,
     )
     const summaries = groups.map(({ context_id: id, count, first, last, south, north, ...extremes }): TrackSummary => {
       const [west, east] =
@@ -1818,7 +1865,7 @@ export class SqliteTrackStore implements TrackStore {
     }
     const { where, params, cells } = clause
 
-    const stmt = this.db.prepare(`SELECT DISTINCT context_id, lat, lon FROM positions WHERE ${where}`)
+    const stmt = this.db.prepare(`SELECT DISTINCT context_id, ${COORDINATES} FROM positions WHERE ${where}`)
     const rows = stmt.all(...params) as unknown as { context_id: number; lat: number; lon: number }[]
 
     const inBounds = createInBounds(bounds)
@@ -1880,13 +1927,13 @@ export class SqliteTrackStore implements TrackStore {
       }
       if (windowRows < boxRows) {
         byTime ??= this.db.prepare(
-          `SELECT context_id, timestamp, lat, lon FROM positions INDEXED BY idx_context_time_position WHERE context_id = ? AND (${clause.where})${inWindow}`,
+          `SELECT context_id, timestamp, ${COORDINATES} FROM positions INDEXED BY idx_context_time_position WHERE context_id = ? AND (${clause.where})${inWindow}`,
         )
         yield* byTime.all(id, ...clause.params, ...timeParams) as unknown as ContextRow[]
         continue
       }
       byCell ??= this.db.prepare(
-        `SELECT context_id, timestamp, lat, lon FROM positions INDEXED BY idx_context_s2cell WHERE context_id = ? AND s2cell BETWEEN ? AND ?${inWindow}`,
+        `SELECT context_id, timestamp, ${COORDINATES} FROM positions INDEXED BY idx_context_s2cell WHERE context_id = ? AND s2cell BETWEEN ? AND ?${inWindow}`,
       )
       for (let i = 0; i < clause.params.length; i += 2) {
         yield* byCell.all(id, clause.params[i]!, clause.params[i + 1]!, ...timeParams) as unknown as ContextRow[]
@@ -1939,7 +1986,7 @@ export class SqliteTrackStore implements TrackStore {
       ? this.namedNearBounds(named, clause, inWindow, timeParams)
       : (this.db
           .prepare(
-            `SELECT context_id, timestamp, lat, lon FROM positions WHERE (${clause.where})${inWindow} ORDER BY context_id, timestamp`,
+            `SELECT context_id, timestamp, ${COORDINATES} FROM positions WHERE (${clause.where})${inWindow} ORDER BY context_id, timestamp`,
           )
           .all(...clause.params, ...timeParams) as unknown as ContextRow[])
     const inBounds = createInBounds(bounds)
@@ -1963,7 +2010,7 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
 
-    const columns = 'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context_id = ?'
+    const columns = `SELECT rowid AS id, timestamp, ${COORDINATES} FROM positions WHERE context_id = ?`
     const between = this.db.prepare(`${columns} AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp, rowid`)
     const before = this.db.prepare(
       `${columns} AND timestamp < ?${inWindow} ORDER BY timestamp DESC, rowid DESC LIMIT 1`,
@@ -2073,8 +2120,8 @@ export class SqliteTrackStore implements TrackStore {
       }
       return statement
     }
-    const fromSignificant = `SELECT position AS id, timestamp, lat, lon FROM significant INDEXED BY idx_significant_time WHERE context_id = ?`
-    const fromPositions = 'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context_id = ?'
+    const fromSignificant = `SELECT position AS id, timestamp, ${COORDINATES} FROM significant INDEXED BY idx_significant_time WHERE context_id = ?`
+    const fromPositions = `SELECT rowid AS id, timestamp, ${COORDINATES} FROM positions WHERE context_id = ?`
     const visited = this.db.prepare(
       `SELECT DISTINCT hour FROM level_visits
        WHERE context_id = ? AND lat_cell BETWEEN ? AND ? AND lon_cell BETWEEN ? AND ? AND hour >= ? AND hour <= ?`,
@@ -2461,11 +2508,11 @@ export class SqliteTrackStore implements TrackStore {
   private refining() {
     return (this.refineStatements ??= {
       select: this.db.prepare(
-        'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?',
+        `SELECT rowid AS id, timestamp, ${COORDINATES} FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?`,
       ),
       copy: this.db.prepare(
-        `INSERT INTO significant (position, context_id, timestamp, lat, lon, level)
-         SELECT rowid, context_id, timestamp, lat, lon, ? FROM positions WHERE rowid = ?`,
+        `INSERT INTO significant (position, context_id, timestamp, lat_e7, lon_e7, level)
+         SELECT rowid, context_id, timestamp, lat_e7, lon_e7, ? FROM positions WHERE rowid = ?`,
       ),
       visit: this.db.prepare(
         'INSERT OR IGNORE INTO level_visits (context_id, lat_cell, lon_cell, hour) VALUES (?, ?, ?, ?)',
@@ -2658,7 +2705,7 @@ export class SqliteTrackStore implements TrackStore {
   private simplifying() {
     return (this.simplifyStatements ??= {
       select: this.db.prepare(
-        'SELECT rowid AS id, timestamp, lat, lon FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?',
+        `SELECT rowid AS id, timestamp, ${COORDINATES} FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp, rowid LIMIT ?`,
       ),
       held: this.db.prepare(
         `SELECT position FROM significant WHERE context_id = ? AND level IN (${SIGNIFICANT_LEVELS}) AND timestamp >= ? AND timestamp < ?`,
@@ -3185,9 +3232,12 @@ export class SqliteTrackStore implements TrackStore {
    */
   private fill(
     context: Context,
-    segments: TimedPosition[][],
+    given: TimedPosition[][],
     mine: ReadonlyMap<number, number> = new Map(),
   ): Map<number, number> {
+    // As they will be stored, so that what simplifying leaves of them is
+    // what simplifying the stored day would.
+    const segments = given.map((points) => points.map((point) => ({ ...point, position: asStored(point.position) })))
     for (const points of segments) {
       const first = points[0]
       const last = points.at(-1)
@@ -3529,8 +3579,8 @@ export class SqliteTrackStore implements TrackStore {
     const moved = Number(
       this.db
         .prepare(
-          `INSERT INTO binned_positions (bin_id, context_id, timestamp, lat, lon, s2cell)
-           SELECT ?, context_id, timestamp, lat, lon, s2cell FROM positions
+          `INSERT INTO binned_positions (bin_id, context_id, timestamp, lat_e7, lon_e7, s2cell)
+           SELECT ?, context_id, timestamp, lat_e7, lon_e7, s2cell FROM positions
            WHERE context_id = ? AND timestamp >= ? AND timestamp <= ?`,
         )
         .run(id, this.idOf(context), lower, to).changes,
@@ -3650,8 +3700,8 @@ export class SqliteTrackStore implements TrackStore {
         .all(id) as unknown as { context_id: number; first: number; last: number }[]
       this.db
         .prepare(
-          `INSERT INTO positions (context_id, timestamp, lat, lon, s2cell)
-           SELECT context_id, timestamp, lat, lon, s2cell FROM binned_positions WHERE bin_id = ?`,
+          `INSERT INTO positions (context_id, timestamp, lat_e7, lon_e7, s2cell)
+           SELECT context_id, timestamp, lat_e7, lon_e7, s2cell FROM binned_positions WHERE bin_id = ?`,
         )
         .run(id)
       for (const { context_id: contextId, first, last } of spans) {

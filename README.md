@@ -53,13 +53,14 @@ before stays until those days run out, or for good when they are set to 0. The w
 they are not being recorded. Another vessel's track can still be imported.
 
 Each position names its vessel by a number, which a table in the file turns back into the vessel,
-rather than in full: the file takes about half the space an older version's did. The first start
-after updating from such a version rewrites `tracks.db` once, as a new file that then replaces it.
-The new file is built beside `tracks.db`, or, where that is a link, beside the file it points to.
-That takes about 8 seconds for two million positions on a Raspberry Pi 5, while the plugin waits.
-It needs room on the disk for the new file: about half the old one where recorded positions take
-most of it, and up to its whole size where imported tracks do, since those are
-copied as they are. It needs room in the temporary directory too, for sorting its largest index,
+rather than in full, and holds its coordinates as whole numbers of 1e-7 degrees (about 11 mm, as
+GPX export writes them): the file takes well under half the space an older version's took. The
+first start after updating from such a version rewrites `tracks.db` once, as a new file that then
+replaces it. The new file is built beside `tracks.db`, or, where that is a link, beside the file it
+points to. That takes about 9 seconds for two million positions on a Raspberry Pi 5, while the
+plugin waits. It needs room on the disk for the new file: well under half the old one where
+recorded positions take most of it, and up to its whole size where imported tracks do, since those
+are copied as they are. It needs room in the temporary directory too, for sorting its largest index,
 about an eighth of the old file. Close other programs that have the file open, an `sqlite3` shell
 say, before updating. One that holds a lock on it when the plugin starts keeps it from being
 rewritten: the plugin then does not start, says why, and tries again at its next start. A write
