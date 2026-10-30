@@ -58,7 +58,9 @@ describe('StateGate', () => {
     const setting = (schema.properties as Record<string, { default: unknown; description: string }>).pauseWhenState!
 
     expect(setting.default).toEqual(DEFAULT_PAUSE_STATES)
+    expect(setting.description).toMatch(/by default it pauses while/i)
     for (const state of DEFAULT_PAUSE_STATES) expect(setting.description).toContain(state)
+    expect(setting.description).toMatch(/clear the list to always record/i)
   })
 
   it('does not offer anchored as a default', () => {
