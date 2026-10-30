@@ -644,7 +644,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         const scopes = [scope, track.scope, root.scope]
         if (inGpx(prefix, scopes, true)) {
           track.group ??= group(track.name ?? '')
-          segment = { scopes, inGpx: !empty, plain: inGpx(undefined, scopes.slice(1), true) }
+          segment = { scopes, inGpx: !empty, plain: inGpx(undefined, scopes, true) }
         }
       } else if (track && level === 2 && name === 'name' && track.group === undefined && capture === undefined) {
         if (inGpx(prefix, [scopeOf(chunk, match.index, match[0]), track.scope, root.scope], true)) {

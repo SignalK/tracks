@@ -1598,6 +1598,16 @@ describe('a GPX file uploaded in slices', () => {
       'A',
     ],
     [
+      'a <trkseg> that binds another default namespace',
+      `<trk><name>A</name><g:trkseg xmlns:g="${GPX}" xmlns="urn:v">${twoPoints}</g:trkseg><trkseg>${twoPoints}</trkseg></trk>`,
+      'A',
+    ],
+    [
+      'a <trkseg> that binds GPX’s as the default namespace',
+      `<v:trk xmlns:v="${GPX}" xmlns="urn:v"><v:name>A</v:name><v:trkseg xmlns="${GPX}">${twoPoints}</v:trkseg></v:trk>`,
+      'A',
+    ],
+    [
       'a <trk> of another namespace',
       `<v:trk xmlns:v="urn:v"><v:name>B</v:name><v:trkseg>${twoPoints}</v:trkseg></v:trk><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk>`,
       'A',
