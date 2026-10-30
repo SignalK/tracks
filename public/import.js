@@ -49,16 +49,21 @@ export function progress({ received, size }) {
   return `Importing: ${share}%, ${(received / MB).toFixed(0)} of ${(size / MB).toFixed(0)} MB.`
 }
 
-/** A track of the scanned file as its row in the list to choose from. */
-export function trackChoice({ name, points: count, from, to }) {
+const titled = (name) => (name === '' ? '(no name)' : name)
+
+/** A track of the scanned file as its row in the list to choose from (see `scanGpx` for what the scan says of it). */
+export function trackChoice({ name, points: count, from, to, elsewhere, partly, foreign }) {
   const times =
     from === undefined ? 'no times' : from === to ? from.slice(0, 10) : `${from.slice(0, 10)} to ${to.slice(0, 10)}`
+  const seen =
+    elsewhere === undefined ? '' : `, ${partly ? 'partly ' : ''}elsewhere than ${titled(elsewhere)} at the same time`
   return {
     name,
-    label: `${name === '' ? '(no name)' : name}: ${points(count)}, ${times}`,
+    label: `${titled(name)}: ${points(count)}, ${times}${seen}`,
     // A track without times cannot be placed in the recording.
     disabled: from === undefined,
-    checked: from !== undefined && !isOtherVessel(name),
+    // Another vessel's track written into the recording would draw lines to wherever it was.
+    checked: from !== undefined && !isOtherVessel(name) && foreign !== true,
   }
 }
 
