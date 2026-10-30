@@ -1599,7 +1599,7 @@ describe('a GPX file uploaded in slices', () => {
     ],
     [
       'a <trkseg> that binds another default namespace',
-      `<trk><name>A</name><g:trkseg xmlns:g="${GPX}" xmlns="urn:v">${twoPoints}</g:trkseg><trkseg>${twoPoints}</trkseg></trk>`,
+      `<trk><name>A</name><g:trkseg xmlns:g="${GPX}" xmlns="urn:v">${twoPoints}${trkpt('2023-08-30T01:00:00Z')}</g:trkseg><trkseg>${twoPoints}</trkseg></trk>`,
       'A',
     ],
     [
@@ -1610,6 +1610,11 @@ describe('a GPX file uploaded in slices', () => {
     [
       'a <trk> of another namespace',
       `<v:trk xmlns:v="urn:v"><v:name>B</v:name><v:trkseg>${twoPoints}</v:trkseg></v:trk><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk>`,
+      'A',
+    ],
+    [
+      'times outside its points',
+      `<trk><name>A</name><trkseg><extensions><time>2020-01-01T00:00:00Z</time></extensions>${trkpt('2023-08-29T21:57:38Z')}<trkpt lat="1" lon="2"><v:time xmlns:v="urn:v">2019-01-01T00:00:00Z</v:time><time>2023-08-30T08:00:00Z</time><extensions><v:trkpt xmlns:v="urn:v"><time>2024-01-01T00:00:00Z</time></v:trkpt></extensions></trkpt></trkseg></trk>`,
       'A',
     ],
     [
@@ -1661,7 +1666,11 @@ describe('a GPX file uploaded in slices', () => {
     ['1.0', 'Own\u2028Ship\u0085'],
   ])('reads XML %s’s line ends in a name as the server does', async (version, name) => {
     const xml = `<?xml version="${version}"?><gpx xmlns="${GPX}"><trk><name>Own\u2028Ship\u0085</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
-    expect((await scanGpx(new Blob([xml]))).map((track: { name: string }) => track.name)).toEqual([name])
+    for (const chunk of [7, 64, 1 << 20]) {
+      expect((await scanGpx(new Blob([xml]), () => {}, chunk)).map((track: { name: string }) => track.name)).toEqual([
+        name,
+      ])
+    }
     const read = await new GpxReader(new Set([name]), { offset: 0, open: [], segments: 0 }).read(
       new TextEncoder().encode(xml),
       true,

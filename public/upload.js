@@ -498,6 +498,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   const targets = new Set()
   const decoder = new TextDecoder()
   let xml11 = false
+  let begun = false
   let carry = ''
   let track
   // Elements open in the document: GPX's are told by where they are, from the root down.
@@ -512,7 +513,8 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let pointText
   let pointAt = 0
   let inPoint = false
-  let pointTime = false
+  // What that point's tag binds, undefined where it binds nothing.
+  let pointScope
   // The prefix of that point's <time> and what it binds, and the <trkseg> it is in.
   let timePrefix
   let timeScope
@@ -575,9 +577,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         const time = textOf(text, xml11)
         track.group.from ??= time
         track.group.to = time
-        if (pointTime && !targets.has(track.group)) {
-          sample(track, time)
-        }
+        if (!targets.has(track.group)) sample(track, time)
       }
       capture = undefined
     } else if (name === 'trkseg' && level === 2) {
@@ -596,7 +596,6 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   }
   read: for (let at = 0; at < file.size; at += chunkBytes) {
     const chunk = carry + decoder.decode(await file.slice(at, at + chunkBytes).arrayBuffer(), { stream: true })
-    if (at === 0) xml11 = isXml11(chunk)
     let end = 0
     // The chunk up to the first markup it does not close, which is read whole with the next chunk.
     let scanned = chunk
@@ -620,6 +619,9 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       if (capture && level === captureLevel + 1) text += chunk.slice(end, match.index)
       end = TAG.lastIndex
       if (markup !== undefined && markup.end >= 0 && markup.at < end) markupAfter(end)
+      // The XML declaration, read whole however the chunks cut it, is the first markup or none is.
+      if (!begun) xml11 = match.index === 0 && isXml11(match[0])
+      begun = true
       if (match[3] === undefined) {
         if (capture && level === captureLevel + 1) text += match[0]
         continue
@@ -654,23 +656,25 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         }
       } else if (track && level === 3 && name === 'trkpt' && segment.inGpx) {
         // Most points bind no namespace and have no prefix: their segment's default says.
-        const own = prefix !== undefined || match[0].includes('xmlns')
-        if (own ? inGpx(prefix, [scopeOf(chunk, match.index, match[0]), ...segment.scopes], true) : segment.plain) {
+        const scope = prefix !== undefined || match[0].includes('xmlns') ? scopeOf(chunk, match.index, match[0]) : false
+        if (scope === false ? segment.plain : inGpx(prefix, [scope, ...segment.scopes], true)) {
           track.group.points++
           if (!empty) {
             pointText = chunk
             pointAt = match.index
+            pointScope = scope === false ? undefined : scope
             inPoint = true
           }
         }
-      } else if (track?.group && name === 'time' && capture === undefined) {
-        capture = 'time'
-        captureLevel = level
-        text = ''
-        pointTime = inPoint && level === 4
-        if (pointTime) {
+      } else if (inPoint && level === 4 && name === 'time' && capture === undefined) {
+        // A track's times are its points' own, as the server reads them.
+        const scope = scopeOf(chunk, match.index, match[0])
+        if (inGpx(prefix, [scope, pointScope, ...segment.scopes], true)) {
+          capture = 'time'
+          captureLevel = level
+          text = ''
           timePrefix = prefix
-          timeScope = scopeOf(chunk, match.index, match[0])
+          timeScope = scope
         }
       }
       if (!empty) level++
