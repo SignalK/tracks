@@ -66,58 +66,57 @@ function textOf(raw) {
     .trim()
 }
 
+// XML's white space, with the line ends XML 1.1 adds, and a character of a
+// name as XML allows it, beyond ASCII too, and of a name's part either side
+// of a prefix's `:`. JavaScript's `\s` takes U+FEFF for white space, which
+// XML takes for a name's.
+const SPACE = String.raw`[\t\n\r \u0085\u2028]`
+const NAME_CHAR = String.raw`[^\t\n\r \u0085\u2028"'<>/=]`
+const PART_CHAR = String.raw`[^\t\n\r \u0085\u2028"'<>/=:!?]`
+
 // A CDATA section or a comment is matched whole, so that markup inside one is not taken for a tag.
-const TAG = /<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<(\/?)(?:[\w.-]+:)?([\w.-]+)[^>]*?(\/?)>/g
+// A tag ends at its own `>`, not at one in a quoted value, as the server's parser reads it.
+// Its name is read whole: a run of name characters with no `>` after it is
+// then given up at once, not tried again at every length.
+const TAG = new RegExp(
+  String.raw`<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<(\/?)(?:${PART_CHAR}+:)?(${PART_CHAR}+)(?!${PART_CHAR})(?:[^<>"']|"[^"<]*"|'[^'<]*')*?(\/?)>`,
+  'g',
+)
 
-// A start tag read with its quotes, which TAG is not: a `>` in a value
-// ends TAG's match early.
-const START_TAG = /<[\w.:-]+((?:\s+[\w.:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*\/?>/y
-const ATTRIBUTE = /([\w.:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
-const PREFIX = /^<\/?([\w.-]+):/
-
-/** The longest start tag carried into the next chunk when it runs past this one; a longer one is not GPX's. */
-const MAX_CARRIED_TAG = 64 * 1024
-
-/**
- * The quote a run of `text` from `from` to `to` ends inside, given the one it
- * starts in (0 for none): attribute values are quoted with `"` or `'`.
- */
-function quoteAfter(text, from, to, quote = 0) {
-  for (let i = from; i < to; i++) {
-    const c = text.charCodeAt(i)
-    if (quote !== 0) {
-      if (c === quote) quote = 0
-    } else if (c === 34 || c === 39) {
-      quote = c
-    }
-  }
-  return quote
-}
+// A start tag's attributes, read with their quotes. The two must agree on
+// names, or ATTRIBUTE would read one out of a value.
+const START_TAG = new RegExp(
+  String.raw`<${NAME_CHAR}+((?:${SPACE}+${NAME_CHAR}+${SPACE}*=${SPACE}*(?:"[^"]*"|'[^']*'))*)${SPACE}*\/?>`,
+  'y',
+)
+const ATTRIBUTE = new RegExp(String.raw`(${NAME_CHAR}+)${SPACE}*=${SPACE}*(?:"([^"]*)"|'([^']*)')`, 'g')
+const PREFIX = new RegExp(String.raw`^<\/?(${PART_CHAR}+):`)
 
 /**
- * Whether TAG's `match` in `text` is a start tag that a `>` in a quoted value
- * ended early and that runs on past the end of `text`: read whole with the
- * next chunk. Only a tag whose `>` lies inside a value is read on from it,
- * and a tag without attributes not at all; the scan asks only of the last
- * tag of a chunk.
+ * The longest start tag carried into the next chunk when it runs past this
+ * one: as long as the server takes (MAX_PENDING_CHARS in src/gpxUpload.ts).
  */
-function runsOn(text, match) {
-  const tag = match[0]
-  if (match[1] || match[2] === undefined || !tag.includes('=')) return false
-  const end = match.index + tag.length
-  let quote = quoteAfter(text, match.index + 1, end - 1)
-  if (quote === 0) return false
-  for (let i = end; i < text.length; i++) {
-    const c = text.charCodeAt(i)
-    if (quote !== 0) {
-      if (c === quote) quote = 0
-    } else if (c === 34 || c === 39) {
-      quote = c
-    } else if (c === 62) {
-      return false
+const MAX_CARRIED_TAG = 1024 * 1024
+
+/**
+ * TAG's next match in `text`, past any tag too long for it to read: one of
+ * millions of attributes runs the expression out of stack. No GPX tag is
+ * that long, and the server refuses one.
+ */
+function nextTag(text) {
+  for (;;) {
+    const from = TAG.lastIndex
+    try {
+      return TAG.exec(text)
+    } catch {
+      const next = text.indexOf('<', from + 1)
+      if (next < 0) {
+        TAG.lastIndex = 0
+        return null
+      }
+      TAG.lastIndex = next
     }
   }
-  return text.length - match.index <= MAX_CARRIED_TAG
 }
 
 /** The attributes of the start tag at `at` in `text`, or undefined where it cannot be read whole. */
@@ -154,8 +153,7 @@ function bindings(attributes) {
  * where it binds none, and null where it cannot be read whole.
  */
 function scopeOf(text, at, tag) {
-  // One with a quote may be cut short by a `>` in a value, and bind something after it.
-  if (!tag.includes('xmlns') && !tag.includes('"') && !tag.includes("'")) return undefined
+  if (!tag.includes('xmlns')) return undefined
   const attributes = attributesOf(text, at)
   return attributes === undefined ? null : bindings(attributes)
 }
@@ -482,8 +480,8 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     }
     const at = timeOf(time)
     if (pointTag === undefined) return
-    // Not read whole where a `>` in a value lies across the end of a chunk:
-    // the next point in the ten minutes stands in for it.
+    // Not read where its tag is not one XML allows, with a value unquoted say,
+    // or is too long to read: the next point in the ten minutes stands in for it.
     const attributes = attributesOf(pointText, pointAt)
     if (attributes === undefined) return
     const scopes = [bindings(attributes), segment.scope, track.scope, root?.scope]
@@ -522,12 +520,11 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   }
   for (let at = 0; at < file.size; at += chunkBytes) {
     const chunk = carry + decoder.decode(await file.slice(at, at + chunkBytes).arrayBuffer(), { stream: true })
-    const lastOpen = chunk.lastIndexOf('<')
     let end = 0
     TAG.lastIndex = 0
     // The next `<!` the tags have not reached, kept rather than searched for at every tag.
     let bang = chunk.indexOf('<!')
-    for (let match = TAG.exec(chunk); match; match = TAG.exec(chunk)) {
+    for (let match = nextTag(chunk); match; match = nextTag(chunk)) {
       while (bang >= 0 && bang < end) bang = chunk.indexOf('<!', end)
       // A CDATA section or a comment the chunk does not close: it is read whole with the next chunk.
       while (
@@ -539,8 +536,6 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         bang = chunk.indexOf('<!', bang + 2)
       }
       if (bang >= 0 && bang < match.index) break
-      // Only the last tag of a chunk can run past it: a value holds no `<`.
-      if (match.index === lastOpen && at + chunkBytes < file.size && runsOn(chunk, match)) break
       if (capture) text += chunk.slice(end, match.index)
       end = TAG.lastIndex
       if (match[2] === undefined) {
@@ -607,11 +602,12 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       if (empty) close(name)
       else depth++
     }
-    // A tag cut by the end of the chunk is read whole with the next one.
+    // A tag cut by the end of the chunk is read whole with the next one, unless it is
+    // longer than the server takes: a quote left open would carry the rest of the file.
     // A CDATA section or a comment the chunk does not close is carried from its start.
     const unclosed = [chunk.indexOf('<![CDATA[', end), chunk.indexOf('<!--', end)].filter((at) => at >= 0)
     const open = unclosed.length > 0 ? Math.min(...unclosed) : chunk.lastIndexOf('<')
-    carry = open >= end ? chunk.slice(open) : ''
+    carry = open >= end && (unclosed.length > 0 || chunk.length - open <= MAX_CARRIED_TAG) ? chunk.slice(open) : ''
     if (capture) text += chunk.slice(end, open >= end ? open : chunk.length)
     onProgress(Math.min(file.size, at + chunkBytes) / file.size)
   }

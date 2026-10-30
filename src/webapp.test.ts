@@ -1484,6 +1484,99 @@ describe('a GPX file uploaded in slices', () => {
     expect([...read.parts.keys()]).toEqual([1])
   })
 
+  // A `>` in a value does not end its start tag, as the server reads one.
+  it.each([7, 64, 1 << 20])(
+    'reads a name and times whose tags hold a `>` in a value as the server does, in chunks of %i bytes',
+    async (chunk) => {
+      const quoted = [
+        `<gpx xmlns="${GPX}"><trk><name desc="a/>b">Own Ship</name><trkseg>`,
+        `<trkpt lat="1" lon="2"><time desc='x">y'>2023-08-29T21:57:38Z</time></trkpt>`,
+        `<trkpt lat="1" lon="2"><time desc="a>b">2023-08-30T08:00:00Z</time></trkpt>`,
+        '</trkseg></trk></gpx>',
+      ].join('')
+      expect(await scanGpx(new Blob([quoted]), () => {}, chunk)).toEqual([
+        { name: 'Own Ship', points: 2, from: '2023-08-29T21:57:38Z', to: '2023-08-30T08:00:00Z' },
+      ])
+      const read = await new GpxReader(new Set(['Own Ship']), { offset: 0, open: [], segments: 0 }).read(
+        new TextEncoder().encode(quoted),
+        true,
+      )
+      expect([...read.parts.keys()]).toEqual([1])
+      expect(read.untimed).toBe(0)
+    },
+  )
+
+  // XML 1.1 takes U+2028 and U+0085 for line ends, so for white space in a tag.
+  it('reads a point whose attributes XML 1.1’s line ends part as the server does', async () => {
+    const xml = [
+      `<?xml version="1.1"?><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>`,
+      `<trkpt\u2028lat="1"\u0085lon="2"><time>2023-08-29T21:57:38Z</time></trkpt>`,
+      '</trkseg></trk></gpx>',
+    ].join('')
+    expect(await scanGpx(new Blob([xml]))).toEqual([
+      { name: 'A', points: 1, from: '2023-08-29T21:57:38Z', to: '2023-08-29T21:57:38Z' },
+    ])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeUndefined()
+    expect([...read.parts.values()].flat()).toHaveLength(1)
+  })
+
+  // A start tag cut by the end of a chunk is read whole with the next one.
+  it.each([4096, 1 << 16])('reads start tags of 100 kB across chunks of %i bytes', async (chunk) => {
+    const withValue = (value: string) =>
+      new Blob([
+        `<gpx xmlns="${GPX}"><trk desc="${value}"><name desc="${value}">A</name><trkseg>`,
+        `<trkpt desc="${value}" lat="1" lon="2"><time>2023-08-29T21:57:38Z</time></trkpt>`,
+        `${trkpt('2023-08-30T08:00:00Z')}</trkseg></trk>`,
+        `<trk><name>B</name><trkseg>${trkpt('2023-08-31T08:00:00Z')}</trkseg></trk></gpx>`,
+      ])
+    expect(await scanGpx(withValue('y'.repeat(100_000)), () => {}, chunk)).toEqual(await scanGpx(withValue('y')))
+  })
+
+  // Up to the length the server takes: a quote left open would carry the rest
+  // of the file, and read it again with every chunk.
+  it('carries no quote left open to the end of the file', async () => {
+    const file = new Blob([
+      `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${trkpt('2023-08-29T21:57:38Z')}</trkseg></trk>`,
+      `<trk><name>B</name><extensions><x a="${'y'.repeat(32 << 20)}`,
+    ])
+    const started = performance.now()
+    expect(await scanGpx(file, () => {}, 1 << 16)).toEqual([
+      { name: 'A', points: 1, from: '2023-08-29T21:57:38Z', to: '2023-08-29T21:57:38Z' },
+    ])
+    expect(performance.now() - started).toBeLessThan(5000)
+  })
+
+  // A tag of millions of attributes, which no GPX file has, runs the
+  // expression out of stack: the scan goes on after it.
+  it('goes on past a tag of millions of attributes', async () => {
+    const file = new Blob([
+      `<gpx xmlns="${GPX}"><trk><name>A</name><extensions><x${' a=""'.repeat(2_400_000)}/></extensions>`,
+      `<trkseg>${trkpt('2023-08-29T21:57:38Z')}</trkseg></trk></gpx>`,
+    ])
+    expect(await scanGpx(file, () => {}, 16 << 20)).toEqual([
+      { name: 'A', points: 1, from: '2023-08-29T21:57:38Z', to: '2023-08-29T21:57:38Z' },
+    ])
+  })
+
+  // A `<` in text, which no GPX file has, before a long run of name
+  // characters: given up at once, not tried again at every length, which
+  // took half a minute here. Timed, as the expression holds the thread.
+  it('scans past a `<` in text before a long run of name characters', async () => {
+    const file = new Blob([
+      `<gpx xmlns="${GPX}"><trk><name>A</name><desc><${'a'.repeat(100_000)}</desc>`,
+      `<trkseg>${trkpt('2023-08-29T21:57:38Z')}</trkseg></trk></gpx>`,
+    ])
+    const started = performance.now()
+    expect(await scanGpx(file)).toEqual([
+      { name: 'A', points: 1, from: '2023-08-29T21:57:38Z', to: '2023-08-29T21:57:38Z' },
+    ])
+    expect(performance.now() - started).toBeLessThan(2000)
+  })
+
   const at = (lat: number | string, lon: number | string, time: string) =>
     `<trkpt lat="${lat}" lon="${lon}"><time>${time}</time></trkpt>`
   const track = (name: string, points: string[]) => `<trk><name>${name}</name><trkseg>${points.join('')}</trkseg></trk>`
@@ -1836,6 +1929,85 @@ describe('a GPX file uploaded in slices', () => {
     },
   )
 
+  // Nor does it hide the `/>` that closes an empty element, whatever its
+  // name: the <trkseg> after one is still the <trk>'s own.
+  it.each(
+    ['<link href="a>b"/>', '<v:größe xmlns:v="urn:v" a="x>y"/>', '<trkä:x xmlns:trkä="urn:v"/>'].flatMap((element) =>
+      [7, 64, 1 << 20].map((chunk): [string, number] => [element, chunk]),
+    ),
+  )('reads a track’s points after the empty element %s, in chunks of %i bytes', async (element, chunk) => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      `<trk><name>Passage</name>${element}<trkseg>${steps(0, 3)
+        .map((i) => at(-30, -20, utc(i)))
+        .join('')}</trkseg></trk>`,
+    )
+
+    expect((await verdicts(file, chunk)).Passage).toBe('unticked: Own Ship')
+  })
+
+  // One whose <gpx> cannot be read may name any creator, or bind GPX's
+  // namespace to another prefix: nothing in it is left unticked.
+  it('leaves every track ticked in a file whose <gpx> cannot be read', async () => {
+    const file = new Blob([
+      `<?xml version="1.0"?><gpx version=1.1 xmlns="${GPX}">`,
+      track(
+        'Own Ship',
+        steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Passage',
+        steps(0, 3).map((i) => at(-30, -20, utc(i))),
+      ),
+      '</gpx>',
+    ])
+
+    const tracks = await scanGpx(file)
+    expect(tracks.reduce((sum: number, { points }: { points: number }) => sum + points, 0)).toBe(147)
+    expect(tracks.filter(({ foreign }: Seen) => foreign)).toEqual([])
+  })
+
+  // XML takes U+FEFF for a character of a name, where JavaScript's \s takes
+  // it for white space.
+  it.each([
+    ['an empty element named trk and U+FEFF', '<trk\uFEFF/>', (i: number) => at(-30, -20, utc(i))],
+    [
+      'points with an attribute named a, U+FEFF and b',
+      '',
+      (i: number) => `<trkpt lat="-30" lon="-20" a\uFEFFb="1"><time>${utc(i)}</time></trkpt>`,
+    ],
+  ])('reads a passage with %s as the server does', async (_, element, point) => {
+    const file = gpxOf(
+      track(
+        'Own Ship',
+        steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      `<trk><name>Passage</name>${element}<trkseg>${steps(0, 3).map(point).join('')}</trkseg></trk>`,
+    )
+
+    expect((await verdicts(file)).Passage).toBe('unticked: Own Ship')
+  })
+
+  it('takes a file whose <gpx> holds an attribute named beyond ASCII and no creator for TimeZero’s', async () => {
+    const file = new Blob([
+      `<?xml version="1.0"?><gpx version="1.1" größe="1" xmlns="${GPX}">`,
+      track(
+        'Own Ship',
+        steps(0, 144).map((i) => at(ownAt(i), 24, utc(i, 5))),
+      ),
+      track(
+        'Passage',
+        steps(0, 3).map((i) => at(-30, -20, utc(i))),
+      ),
+      '</gpx>',
+    ])
+
+    expect(await verdicts(file)).toEqual({ 'Own Ship': undefined, Passage: 'unticked: Own Ship' })
+  })
+
   // A point's position from its own attributes, read with their quotes,
   // whole when a `>` in a value puts the tag across two chunks of the scan.
   it.each<[string, number, (i: number) => string]>([
@@ -1843,6 +2015,11 @@ describe('a GPX file uploaded in slices', () => {
     ...[7, 64, 1 << 20].flatMap((chunk): [string, number, (i: number) => string][] => [
       ['after a `>` in a value', chunk, () => 'desc="a>b" lat="-30" lon="-20"'],
       ['after a `>` behind a quote in a value', chunk, () => `desc='x">y' lat="-30" lon="-20"`],
+      [
+        'before an attribute named beyond ASCII',
+        chunk,
+        (i: number) => `lat="-30" lon="-20" ä="lat='${ownAt(i)}' lon='24'"`,
+      ],
     ]),
   ])('reads a point’s position, with one %s, in chunks of %i bytes', async (_, chunk, attributes) => {
     const file = gpxOf(
@@ -1867,6 +2044,13 @@ describe('a GPX file uploaded in slices', () => {
       `<?xml version="1.0"?><g:gpx version="1.1" xmlns:g="${GPX}">`,
       (i: number, lat: number, lon: number) =>
         `<g:trkpt lat="${lat}" lon="${lon}"><g:time>${utc(i)}</g:time></g:trkpt>`,
+      'unticked: Own Ship',
+    ],
+    [
+      'prefixed beyond ASCII with one bound to GPX’s namespace',
+      `<?xml version="1.0"?><gpx version="1.1" xmlns="${GPX}" xmlns:gä="${GPX}">`,
+      (i: number, lat: number, lon: number) =>
+        `<gä:trkpt lat="${lat}" lon="${lon}"><gä:time>${utc(i)}</gä:time></gä:trkpt>`,
       'unticked: Own Ship',
     ],
     [
