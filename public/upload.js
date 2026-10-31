@@ -506,6 +506,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   // The element whose text is read, 'name' or 'time', and how many elements are open outside it.
   let capture
   let captureLevel = 0
+  let capturePrefix
   let text = ''
   // Where the start tag of the point being read is, and that it is one the
   // server reads, for its position once its time is known: plain values, as
@@ -569,10 +570,10 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     doneStretch = stretch
   }
   // An element in the current <trk> ends, `level` elements open outside it.
-  const close = (name) => {
+  const close = (name, prefix) => {
     if (capture !== undefined && level === captureLevel) {
       // An end tag that does not match, which the server refuses, reads nothing.
-      if (name !== capture) {
+      if (name !== capture || prefix !== capturePrefix) {
         capture = undefined
         return
       }
@@ -636,7 +637,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       if (closing) {
         level--
         if (track && level === 1) track = undefined
-        else if (track) close(name)
+        else if (track) close(name, prefix)
         continue
       }
       if (level === 0 && name === 'gpx') {
@@ -661,6 +662,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         if (inGpx(prefix, [scopeOf(chunk, match.index, match[0]), track.scope, root.scope], true)) {
           capture = 'name'
           captureLevel = level
+          capturePrefix = prefix
           text = ''
         }
       } else if (track && level === 3 && name === 'trkpt' && segment.inGpx) {
@@ -681,13 +683,14 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         if (inGpx(prefix, [scope, pointScope, ...segment.scopes], true)) {
           capture = 'time'
           captureLevel = level
+          capturePrefix = prefix
           text = ''
           timePrefix = prefix
           timeScope = scope
         }
       }
       if (!empty) level++
-      else if (track) close(name)
+      else if (track) close(name, prefix)
     }
     // A tag cut by the end of the chunk is read whole with the next one, unless it is
     // longer than the server takes: a quote left open would carry the rest of the file.

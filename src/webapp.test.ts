@@ -1702,8 +1702,10 @@ describe('a GPX file uploaded in slices', () => {
 
   // The server refuses such a file; the scan takes no name from it.
   it('reads no name closed by an end tag that does not match', async () => {
-    const xml = `<gpx xmlns="${GPX}"><trk><name>A</b><trkseg>${twoPoints}</trkseg></trk></gpx>`
-    expect((await scanGpx(new Blob([xml]))).map((track: { name: string }) => track.name)).toEqual([''])
+    for (const end of ['</b>', '</x:name>']) {
+      const xml = `<gpx xmlns="${GPX}" xmlns:x="${GPX}"><trk><name>A${end}<trkseg>${twoPoints}</trkseg></trk></gpx>`
+      expect((await scanGpx(new Blob([xml]))).map((track: { name: string }) => track.name)).toEqual([''])
+    }
   })
 
   it('lists no track of a root outside GPX’s namespace, which the server refuses', async () => {
