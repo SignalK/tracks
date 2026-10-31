@@ -1733,6 +1733,16 @@ describe('a GPX file uploaded in slices', () => {
     expect(read.error).toBeDefined()
   })
 
+  it.each(['<!-- open', '<?pi', '<extra'])('lists no track of a file that ends inside `%s`', async (tail) => {
+    const xml = `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>${tail}`
+    for (const chunk of [7, 1 << 20]) expect(await scanGpx(new Blob([xml]), () => {}, chunk)).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
+  })
+
   // No GPX file nests this deep; the elements open are not held without end.
   it('lists no track of a file nesting elements thousands deep', async () => {
     const xml = `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg>${'<x>'.repeat(5000)}${'</x>'.repeat(5000)}</trk></gpx>`

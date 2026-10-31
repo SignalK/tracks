@@ -717,8 +717,8 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     if (capture && level === captureLevel + 1) text += chunk.slice(end, open >= end ? open : chunk.length)
     onProgress(Math.min(file.size, at + chunkBytes) / file.size)
   }
-  // A file that ends with elements open is refused by the server as well.
-  if (malformed || (!stopped && opened.length > 0)) return []
+  // A file that ends with elements or markup still open is refused by the server as well.
+  if (malformed || (!stopped && (opened.length > 0 || carry !== ''))) return []
   markElsewhere(sampledTracks, namesOwnTrack(root?.creator ?? undefined))
   return [...tracks.values()]
 }
