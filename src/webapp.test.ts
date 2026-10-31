@@ -1778,6 +1778,26 @@ describe('a GPX file uploaded in slices', () => {
     expect(read.error).toBeDefined()
   })
 
+  it.each([
+    ['of version 2.0', '<?xml version="2.0"?>'],
+    ['without a version', '<?xml encoding="UTF-8"?>'],
+    ['with standalone maybe', '<?xml version="1.0" standalone="maybe"?>'],
+    ['with its fields out of order', '<?xml version="1.0" standalone="no" encoding="UTF-8"?>'],
+  ])('lists no track of a file with a declaration %s', async (_, declaration) => {
+    const xml = `${declaration}<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
+  })
+
+  it('lists the tracks of a file with a declaration of every field', async () => {
+    const xml = `<?xml version = '1.1' encoding="UTF-8" standalone='yes' ?><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    expect((await scanGpx(new Blob([xml]))).map((track: { name: string }) => track.name)).toEqual(['A'])
+  })
+
   // The decoder drops a byte order mark, so a first chunk of only that brings no text.
   it('lists no track of a file with white space before the declaration, after a byte order mark', async () => {
     const xml = `\uFEFF <?xml version="1.0"?><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`

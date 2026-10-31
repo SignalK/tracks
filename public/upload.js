@@ -54,7 +54,15 @@ const MARKUP = /(<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<\?[\s\S]*?\?>)/
 const LINE_END = /\r\n?/g
 const LINE_END_11 = /\r[\n\u0085]?|[\u0085\u2028]/g
 
-const XML_DECLARATION = /^<\?xml[\t\n\r ]/
+// An XML declaration as the server's parser takes one: a version 1.x, then
+// an encoding and standalone, in that order, parted by XML 1.0's white space,
+// since the version is not known before it is read.
+const DECLARATION_SPACE = String.raw`[\t\n\r ]`
+const WELL_FORMED_DECLARATION = new RegExp(
+  String.raw`^<\?xml${DECLARATION_SPACE}+version${DECLARATION_SPACE}*=${DECLARATION_SPACE}*(["'])1\.[0-9]+\1` +
+    String.raw`(?:${DECLARATION_SPACE}+encoding${DECLARATION_SPACE}*=${DECLARATION_SPACE}*(["'])[A-Za-z][A-Za-z0-9._-]*\2)?` +
+    String.raw`(?:${DECLARATION_SPACE}+standalone${DECLARATION_SPACE}*=${DECLARATION_SPACE}*(["'])(?:yes|no)\3)?${DECLARATION_SPACE}*\?>$`,
+)
 // A processing instruction of the reserved target, in any case: the server takes one for a declaration.
 const XML_TARGET = /^<\?xml(?=[\t\n\r ?])/i
 
@@ -655,7 +663,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       if (
         match[0][1] === '?' &&
         XML_TARGET.test(match[0]) &&
-        (!XML_DECLARATION.test(match[0]) || begun || doctyped || late || match.index !== 0)
+        (!WELL_FORMED_DECLARATION.test(match[0]) || begun || doctyped || late || match.index !== 0)
       ) {
         malformed = true
         break read
