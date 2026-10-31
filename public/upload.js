@@ -55,6 +55,8 @@ const LINE_END = /\r\n?/g
 const LINE_END_11 = /\r[\n\u0085]?|[\u0085\u2028]/g
 
 const XML_DECLARATION = /^<\?xml[\t\n\r ]/
+// A processing instruction of the reserved target, in any case: the server takes one for a declaration.
+const XML_TARGET = /^<\?xml(?=[\t\n\r ?])/i
 
 /** Whether the document starting `text` declares itself XML 1.1, whose line ends the parser reads differently. */
 function isXml11(text) {
@@ -506,6 +508,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let begun = false
   // Whether the file starts with anything but markup, which puts any declaration out of place.
   let late = false
+  let lateKnown = false
   let carry = ''
   let track
   // Elements open in the document: GPX's are told by where they are, from the root down.
@@ -613,7 +616,11 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   }
   read: for (let at = 0; at < file.size; at += chunkBytes) {
     const chunk = carry + decoder.decode(await file.slice(at, at + chunkBytes).arrayBuffer(), { stream: true })
-    if (at === 0) late = chunk.length > 0 && !chunk.startsWith('<')
+    // A first chunk can hold nothing but a byte order mark, which the decoder drops.
+    if (!lateKnown && chunk.length > 0) {
+      lateKnown = true
+      late = !chunk.startsWith('<')
+    }
     let end = 0
     // The chunk up to the first markup it does not close, which is read whole with the next chunk.
     let scanned = chunk
@@ -645,7 +652,11 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       if (markup !== undefined && markup.end >= 0 && markup.at < end) markupAfter(end)
       // The XML declaration, read whole however the chunks cut it, is the first markup or none is.
       // Anywhere else, the server refuses it.
-      if (match[0][1] === '?' && XML_DECLARATION.test(match[0]) && (begun || doctyped || late || match.index !== 0)) {
+      if (
+        match[0][1] === '?' &&
+        XML_TARGET.test(match[0]) &&
+        (!XML_DECLARATION.test(match[0]) || begun || doctyped || late || match.index !== 0)
+      ) {
         malformed = true
         break read
       }

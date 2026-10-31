@@ -1766,6 +1766,8 @@ describe('a GPX file uploaded in slices', () => {
     ['after a comment', '<!-- c --><?xml version="1.0"?>'],
     ['after a DOCTYPE', '<!DOCTYPE gpx><?xml version="1.0"?>'],
     ['after white space', '  <?xml version="1.0"?>'],
+    ['in upper case', '<?XML version="1.0"?>'],
+    ['twice, the second in another case', '<?xml version="1.0"?><?Xml x?>'],
   ])('lists no track of a file with an XML declaration %s', async (_, head) => {
     const xml = `${head}<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
     for (const chunk of [7, 64, 1 << 20]) expect(await scanGpx(new Blob([xml]), () => {}, chunk)).toEqual([])
@@ -1774,6 +1776,21 @@ describe('a GPX file uploaded in slices', () => {
       true,
     )
     expect(read.error).toBeDefined()
+  })
+
+  // The decoder drops a byte order mark, so a first chunk of only that brings no text.
+  it('lists no track of a file with white space before the declaration, after a byte order mark', async () => {
+    const xml = `\uFEFF <?xml version="1.0"?><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    expect(await scanGpx(new Blob([xml]), () => {}, 3)).toEqual([])
+  })
+
+  it('lists the tracks of a file with a byte order mark and a declaration', async () => {
+    const xml = `\uFEFF<?xml version="1.0"?><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    for (const chunk of [3, 7, 1 << 20]) {
+      expect((await scanGpx(new Blob([xml]), () => {}, chunk)).map((track: { name: string }) => track.name)).toEqual([
+        'A',
+      ])
+    }
   })
 
   it('lists no track of a file with two DOCTYPEs', async () => {
