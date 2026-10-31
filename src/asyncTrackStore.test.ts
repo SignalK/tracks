@@ -239,11 +239,18 @@ describe('worker-owned SQLite', () => {
   it('answers whether refining left work for another call', async () => {
     const DAY = 24 * 60 * 60 * 1000
     const start = Math.floor(Date.now() / DAY) * DAY - 5 * DAY
-    // Finished days with more positions than one call's budget.
+    // Finished days with more positions than one call's budget. The budget is
+    // small and the seed one transaction because Windows runners are slow
+    // enough at committing to a file that thousands of positions, each in a
+    // transaction of its own, take longer than the test timeout there.
+    const refineBudget = 500
     const seed = new SqliteTrackStore({ file: join(dir, 'tracks.db'), resolution: 0 }, debug)
-    for (let i = 0; i < 8000; i++) seed.newPosition('self', [60 + i * 1e-5, 24 + (i % 7) * 1e-5], start + i * 20_000)
+    seed.transaction(() => {
+      for (let i = 0; i < 800; i++) seed.newPosition('self', [60 + i * 1e-5, 24 + (i % 7) * 1e-5], start + i * 200_000)
+    })
     seed.close()
-    const store = create()
+    const store = new AsyncTrackStore({ file: join(dir, 'tracks.db'), resolution: 0, refineBudget }, debug)
+    open.push(store)
     const answers: boolean[] = []
     for (let i = 0; i < 10 && answers.at(-1) !== false; i++) answers.push(await store.refineLevels())
     expect(answers[0]).toBe(true)
