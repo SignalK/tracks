@@ -503,10 +503,13 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let track
   // Elements open in the document: GPX's are told by where they are, from the root down.
   let level = 0
+  // The qualified names of the elements open, for an end tag that does not
+  // match its start tag: the server refuses such a file, so none of it is listed.
+  const opened = []
+  let malformed = false
   // The element whose text is read, 'name' or 'time', and how many elements are open outside it.
   let capture
   let captureLevel = 0
-  let capturePrefix
   let text = ''
   // Where the start tag of the point being read is, and that it is one the
   // server reads, for its position once its time is known: plain values, as
@@ -570,13 +573,8 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     doneStretch = stretch
   }
   // An element in the current <trk> ends, `level` elements open outside it.
-  const close = (name, prefix) => {
+  const close = (name) => {
     if (capture !== undefined && level === captureLevel) {
-      // An end tag that does not match, which the server refuses, reads nothing.
-      if (name !== capture || prefix !== capturePrefix) {
-        capture = undefined
-        return
-      }
       if (capture === 'name') {
         track.name ??= textOf(text, xml11)
       } else {
@@ -635,9 +633,13 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       }
       const [, closing, prefix, name, empty] = match
       if (closing) {
+        if (opened.pop() !== (prefix === undefined ? name : `${prefix}:${name}`)) {
+          malformed = true
+          break read
+        }
         level--
         if (track && level === 1) track = undefined
-        else if (track) close(name, prefix)
+        else if (track) close(name)
         continue
       }
       if (level === 0 && name === 'gpx') {
@@ -662,7 +664,6 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         if (inGpx(prefix, [scopeOf(chunk, match.index, match[0]), track.scope, root.scope], true)) {
           capture = 'name'
           captureLevel = level
-          capturePrefix = prefix
           text = ''
         }
       } else if (track && level === 3 && name === 'trkpt' && segment.inGpx) {
@@ -683,14 +684,15 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         if (inGpx(prefix, [scope, pointScope, ...segment.scopes], true)) {
           capture = 'time'
           captureLevel = level
-          capturePrefix = prefix
           text = ''
           timePrefix = prefix
           timeScope = scope
         }
       }
-      if (!empty) level++
-      else if (track) close(name, prefix)
+      if (!empty) {
+        level++
+        opened.push(prefix === undefined ? name : `${prefix}:${name}`)
+      } else if (track) close(name)
     }
     // A tag cut by the end of the chunk is read whole with the next one, unless it is
     // longer than the server takes: a quote left open would carry the rest of the file.
@@ -703,6 +705,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     if (capture && level === captureLevel + 1) text += chunk.slice(end, open >= end ? open : chunk.length)
     onProgress(Math.min(file.size, at + chunkBytes) / file.size)
   }
+  if (malformed) return []
   markElsewhere(sampledTracks, namesOwnTrack(root?.creator ?? undefined))
   return [...tracks.values()]
 }

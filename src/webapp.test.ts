@@ -1700,11 +1700,11 @@ describe('a GPX file uploaded in slices', () => {
     expect(await scanGpx(new Blob([xml]))).toEqual([])
   })
 
-  // The server refuses such a file; the scan takes no name from it.
-  it('reads no name closed by an end tag that does not match', async () => {
+  // The server refuses a file whose end tags do not match, so nothing of it is listed.
+  it('lists no track of a file with a name closed by an end tag that does not match', async () => {
     for (const end of ['</b>', '</x:name>']) {
       const xml = `<gpx xmlns="${GPX}" xmlns:x="${GPX}"><trk><name>A${end}<trkseg>${twoPoints}</trkseg></trk></gpx>`
-      expect((await scanGpx(new Blob([xml]))).map((track: { name: string }) => track.name)).toEqual([''])
+      expect(await scanGpx(new Blob([xml]))).toEqual([])
     }
   })
 
@@ -1718,10 +1718,9 @@ describe('a GPX file uploaded in slices', () => {
     expect(read.error).toMatch(/not GPX/)
   })
 
-  // The server refuses a file whose end tags do not match; the scan must not stop on one.
-  it('scans past end tags that do not match', async () => {
+  it('lists no track of a file with end tags that do not match a point', async () => {
     const xml = `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg><trkpt lat="1" lon="2"></x></trkseg><a><b><time>2023-08-29T21:57:38Z</time></b></a></trk></gpx>`
-    expect(await scanGpx(new Blob([xml]))).toEqual([{ name: 'A', points: 1 }])
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
   })
 
   // Markup cut by the end of a chunk is searched for its end once, not once
