@@ -512,6 +512,8 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let malformed = false
   // Ended early at a tag or markup longer than the server takes: what came before is listed.
   let stopped = false
+  // Whether the root has started: XML has one, and the server refuses a second.
+  let rooted = false
   // The element whose text is read, 'name' or 'time', and how many elements are open outside it.
   let capture
   let captureLevel = 0
@@ -646,6 +648,13 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         if (track && level === 1) track = undefined
         else if (track) close(name)
         continue
+      }
+      if (level === 0) {
+        if (rooted) {
+          malformed = true
+          break read
+        }
+        rooted = true
       }
       if (level === 0 && name === 'gpx') {
         // The server refuses a file whose root is not GPX's: none of its tracks is read.
