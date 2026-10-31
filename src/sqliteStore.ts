@@ -408,8 +408,8 @@ const DEFAULT_SEGMENT_GAP = 5 * 60 * 1000
 /**
  * How many rows a thinned read must hold per position it can keep before
  * getTimed() seeks the positions rather than reading the rows: a kept
- * position costs two seeks, and the walk for pauses a few more, against a
- * row read in bulk at about the cost of one.
+ * position costs two seeks against a row read in bulk at about the cost of
+ * one. Each step of the walk for pauses is a seek, counted on top.
  */
 const SEEK_RATIO = 16
 /**
@@ -1455,7 +1455,8 @@ export class SqliteTrackStore implements TrackStore {
    * and the pauses longer than `segmentGap` come from a walk that steps a gap
    * at a time. Four years thinned to a few thousand points would otherwise
    * read millions of rows to keep them. Undefined where the range holds fewer
-   * than SEEK_RATIO rows per position kept, which a read is faster for.
+   * rows than SEEK_RATIO per position the spacing can keep plus the most
+   * steps the walk can take, which a read is faster for.
    *
    * The positions are the ones `Thinner` keeps, in the same order where times
    * are shared. Their `pauseBefore` is the longest pause before them where
@@ -1475,7 +1476,13 @@ export class SqliteTrackStore implements TrackStore {
     if (!first || !last) {
       return undefined
     }
-    const limit = Math.ceil(((last.timestamp - first.timestamp) / resolution + 1) * SEEK_RATIO)
+    // Times are whole milliseconds, so a spacing keeps what its next whole
+    // millisecond keeps, and one below a millisecond keeps every new time.
+    const spacing = Math.max(1, Math.ceil(resolution))
+    const span = last.timestamp - first.timestamp
+    // Two steps of the pause walk cover more than a gap, so this bounds it.
+    const walk = this.segmentGap > 0 ? 2 * Math.ceil(span / this.segmentGap) + 2 : 0
+    const limit = Math.ceil((span / spacing + 1) * SEEK_RATIO) + walk
     if (!Number.isSafeInteger(limit)) {
       return undefined
     }
@@ -1508,7 +1515,7 @@ export class SqliteTrackStore implements TrackStore {
     const kept: TimedPosition[] = [toTimed(first)]
     let keptLast = first
     for (;;) {
-      const next = nextTime.get(id, keptLast.timestamp + resolution, range.to) as { timestamp: number } | undefined
+      const next = nextTime.get(id, keptLast.timestamp + spacing, range.to) as { timestamp: number } | undefined
       if (!next) {
         break
       }

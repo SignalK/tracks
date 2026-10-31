@@ -307,6 +307,23 @@ describe('a resolution much wider than the recording spacing', () => {
     store.close()
   })
 
+  it('keeps every new time at a resolution below a millisecond', async () => {
+    const store = newStore()
+    const track: LatLngTuple[] = []
+    const times: number[] = []
+    // All at one time, so a spacing that rounds away finds the same time again.
+    for (let i = 0; i < 40; i++) {
+      times.push(1000)
+      track.push([60 + ((i * 7) % 40) * 1e-4, 24])
+    }
+    store.initialTrack(ctx, track, times)
+    const all = await store.getTimed(ctx)
+    for (const resolution of [0.5, 1e-20]) {
+      expect(shaped(await store.getTimed(ctx, undefined, resolution))).toEqual(shaped(thin(all, resolution)))
+    }
+    store.close()
+  })
+
   it('keeps the same positions where tracks are not split at pauses', async () => {
     const { store } = seeded(0)
     const all = await store.getTimed(ctx)
