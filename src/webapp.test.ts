@@ -1746,6 +1746,7 @@ describe('a GPX file uploaded in slices', () => {
   it.each([
     ['a second root', `<gpx xmlns="${GPX}"></gpx>`],
     ['an element after the root', '<x/>'],
+    ['a DOCTYPE after the root', '<!DOCTYPE gpx>'],
   ])('lists no track of a file with %s', async (_, second) => {
     const trk = `<trk><name>A</name><trkseg>${twoPoints}</trkseg></trk>`
     for (const xml of [
@@ -1759,6 +1760,16 @@ describe('a GPX file uploaded in slices', () => {
       )
       expect(read.error).toBeDefined()
     }
+  })
+
+  it('lists no track of a file with two DOCTYPEs', async () => {
+    const xml = `<!DOCTYPE gpx><!DOCTYPE gpx><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
   })
 
   // No GPX file nests this deep; the elements open are not held without end.

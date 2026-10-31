@@ -514,6 +514,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let stopped = false
   // Whether the root has started: XML has one, and the server refuses a second.
   let rooted = false
+  let doctyped = false
   // The element whose text is read, 'name' or 'time', and how many elements are open outside it.
   let capture
   let captureLevel = 0
@@ -623,6 +624,12 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       const match = nextTag(scanned)
       // The DOCTYPE, which the server reads past whole, whatever it holds.
       if (markup?.doctype && markup.end >= 0 && (match === null || markup.at < match.index + match[0].length)) {
+        // It comes before the root, and once: the server refuses one anywhere else.
+        if (rooted || doctyped) {
+          malformed = true
+          break read
+        }
+        doctyped = true
         TAG.lastIndex = end = markup.end
         markupAfter(end)
         continue
