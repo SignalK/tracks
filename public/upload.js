@@ -283,8 +283,8 @@ function far(one, other) {
 const apartIn = ({ far, near }) => far >= APART_STRETCHES && far > near
 const togetherIn = ({ far, near }) => near >= APART_STRETCHES && near > far
 
-/** Where no `<trkseg>` is open: no point is read there. */
-const NO_SEGMENT = { scope: undefined, inGpx: false }
+/** Where no `<trkseg>` of GPX's is open: no point is read there. */
+const NO_SEGMENT = { scopes: [], inGpx: false, plain: false }
 
 /** The most `<trk>` of the own name one stretch can hold before they are all doubted. */
 const MAX_OWN_TOGETHER = 16
@@ -582,6 +582,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       capture = undefined
     } else if (name === 'trkseg' && level === 2) {
       segment = NO_SEGMENT
+      inPoint = false
     } else if (name === 'trkpt' && level === 3) {
       inPoint = false
     }
@@ -634,7 +635,9 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         continue
       }
       if (level === 0 && name === 'gpx') {
-        root ??= rootOf(chunk, match.index)
+        // The server refuses a file whose root is not GPX's: none of its tracks is read.
+        const read = rootOf(chunk, match.index)
+        if (inGpx(prefix, [read.scope], true)) root ??= read
       } else if (level === 1 && name === 'trk' && root !== undefined) {
         const scope = scopeOf(chunk, match.index, match[0])
         track = inGpx(prefix, [scope, root.scope], true) && !empty ? { scope } : undefined

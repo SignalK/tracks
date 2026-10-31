@@ -1679,6 +1679,35 @@ describe('a GPX file uploaded in slices', () => {
     expect([...read.parts.values()].flat()).toHaveLength(2)
   })
 
+  // Without a declaration, or where it is not the first markup, the file is XML 1.0.
+  it.each([
+    ['no declaration', ''],
+    ['a comment before the declaration', '<!-- first --><?xml version="1.1"?>'],
+  ])('reads a name as XML 1.0 with %s', async (_, head) => {
+    const xml = `${head}<gpx xmlns="${GPX}"><trk><name>Own\u2028Ship</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    for (const chunk of [7, 64, 1 << 20]) {
+      expect((await scanGpx(new Blob([xml]), () => {}, chunk)).map((track: { name: string }) => track.name)).toEqual([
+        'Own\u2028Ship',
+      ])
+    }
+  })
+
+  it('lists no track of a root outside GPX’s namespace, which the server refuses', async () => {
+    const xml = `<v:gpx xmlns:v="urn:v" xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></v:gpx>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toMatch(/not GPX/)
+  })
+
+  // The server refuses a file whose end tags do not match; the scan must not stop on one.
+  it('scans past end tags that do not match', async () => {
+    const xml = `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg><trkpt lat="1" lon="2"></x></trkseg><a><b><time>2023-08-29T21:57:38Z</time></b></a></trk></gpx>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([{ name: 'A', points: 1 }])
+  })
+
   // Markup cut by the end of a chunk is searched for its end once, not once
   // for every `<!--` inside it. Timed, as the search holds the thread.
   it('scans a CDATA section of many `<!--` across chunks in linear time', async () => {
