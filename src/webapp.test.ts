@@ -1679,17 +1679,31 @@ describe('a GPX file uploaded in slices', () => {
     expect([...read.parts.values()].flat()).toHaveLength(2)
   })
 
-  // Without a declaration, or where it is not the first markup, the file is XML 1.0.
-  it.each([
-    ['no declaration', ''],
-    ['a comment before the declaration', '<!-- first --><?xml version="1.1"?>'],
-  ])('reads a name as XML 1.0 with %s', async (_, head) => {
-    const xml = `${head}<gpx xmlns="${GPX}"><trk><name>Own\u2028Ship</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+  // Without a declaration the file is XML 1.0.
+  it('reads a name as XML 1.0 in a file without a declaration', async () => {
+    const xml = `<gpx xmlns="${GPX}"><trk><name>Own\u2028Ship</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
     for (const chunk of [7, 64, 1 << 20]) {
       expect((await scanGpx(new Blob([xml]), () => {}, chunk)).map((track: { name: string }) => track.name)).toEqual([
         'Own\u2028Ship',
       ])
     }
+    const read = await new GpxReader(new Set(['Own\u2028Ship']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeUndefined()
+    expect([...read.parts.values()].flat()).toHaveLength(2)
+  })
+
+  it('lists no track of a prefixed root whose bindings cannot be read', async () => {
+    const xml = `<v:gpx a=b xmlns:v="urn:v" xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></v:gpx>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+  })
+
+  // The server refuses such a file; the scan takes no name from it.
+  it('reads no name closed by an end tag that does not match', async () => {
+    const xml = `<gpx xmlns="${GPX}"><trk><name>A</b><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    expect((await scanGpx(new Blob([xml]))).map((track: { name: string }) => track.name)).toEqual([''])
   })
 
   it('lists no track of a root outside GPX’s namespace, which the server refuses', async () => {

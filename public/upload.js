@@ -571,6 +571,11 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   // An element in the current <trk> ends, `level` elements open outside it.
   const close = (name) => {
     if (capture !== undefined && level === captureLevel) {
+      // An end tag that does not match, which the server refuses, reads nothing.
+      if (name !== capture) {
+        capture = undefined
+        return
+      }
       if (capture === 'name') {
         track.name ??= textOf(text, xml11)
       } else {
@@ -637,7 +642,8 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       if (level === 0 && name === 'gpx') {
         // The server refuses a file whose root is not GPX's: none of its tracks is read.
         const read = rootOf(chunk, match.index)
-        if (inGpx(prefix, [read.scope], true)) root ??= read
+        // One whose bindings cannot be read is taken for GPX's only without a prefix.
+        if (read.scope === null ? prefix === undefined : inGpx(prefix, [read.scope])) root ??= read
       } else if (level === 1 && name === 'trk' && root !== undefined) {
         const scope = scopeOf(chunk, match.index, match[0])
         track = inGpx(prefix, [scope, root.scope], true) && !empty ? { scope } : undefined
