@@ -112,6 +112,9 @@ const ATTRIBUTE = new RegExp(String.raw`(${NAME_CHAR}+)${SPACE}*=${SPACE}*(?:"([
  */
 const MAX_CARRIED_TAG = 1024 * 1024
 
+/** The most elements open at once the scan follows: GPX nests a handful, so more is no GPX file. */
+const MAX_OPEN_ELEMENTS = 4096
+
 /**
  * TAG's next match in `text`, past any tag too long for it to read: one of
  * millions of attributes runs the expression out of stack. No GPX tag is
@@ -507,6 +510,8 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   // match its start tag: the server refuses such a file, so none of it is listed.
   const opened = []
   let malformed = false
+  // Ended early at a tag or markup longer than the server takes: what came before is listed.
+  let stopped = false
   // The element whose text is read, 'name' or 'time', and how many elements are open outside it.
   let capture
   let captureLevel = 0
@@ -691,21 +696,29 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       }
       if (!empty) {
         level++
+        if (opened.length >= MAX_OPEN_ELEMENTS) {
+          malformed = true
+          break read
+        }
         opened.push(prefix === undefined ? name : `${prefix}:${name}`)
       } else if (track) close(name)
     }
-    // A tag cut by the end of the chunk is read whole with the next one, unless it is
-    // longer than the server takes: a quote left open would carry the rest of the file.
-    // Markup the chunk does not close is carried from its start, as long as
-    // the server takes too: it refuses the file past that, so the scan ends there.
+    // A tag cut by the end of the chunk is read whole with the next one, and
+    // markup the chunk does not close is carried from its start, as long as
+    // the server takes either: it refuses the file past that, so the scan ends
+    // there, rather than carry a quote left open to the end of the file.
     const unclosed = scanned !== chunk
     const open = unclosed ? scanned.length : chunk.lastIndexOf('<')
-    if (unclosed && chunk.length - open > MAX_CARRIED_TAG) break read
-    carry = open >= end && (unclosed || chunk.length - open <= MAX_CARRIED_TAG) ? chunk.slice(open) : ''
+    if (open >= end && chunk.length - open > MAX_CARRIED_TAG) {
+      stopped = true
+      break read
+    }
+    carry = open >= end ? chunk.slice(open) : ''
     if (capture && level === captureLevel + 1) text += chunk.slice(end, open >= end ? open : chunk.length)
     onProgress(Math.min(file.size, at + chunkBytes) / file.size)
   }
-  if (malformed) return []
+  // A file that ends with elements open is refused by the server as well.
+  if (malformed || (!stopped && opened.length > 0)) return []
   markElsewhere(sampledTracks, namesOwnTrack(root?.creator ?? undefined))
   return [...tracks.values()]
 }

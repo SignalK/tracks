@@ -1723,6 +1723,22 @@ describe('a GPX file uploaded in slices', () => {
     expect(await scanGpx(new Blob([xml]))).toEqual([])
   })
 
+  it('lists no track of a file that ends with elements open', async () => {
+    const xml = `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
+  })
+
+  // No GPX file nests this deep; the elements open are not held without end.
+  it('lists no track of a file nesting elements thousands deep', async () => {
+    const xml = `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg>${'<x>'.repeat(5000)}${'</x>'.repeat(5000)}</trk></gpx>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+  })
+
   // Markup cut by the end of a chunk is searched for its end once, not once
   // for every `<!--` inside it. Timed, as the search holds the thread.
   it('scans a CDATA section of many `<!--` across chunks in linear time', async () => {
