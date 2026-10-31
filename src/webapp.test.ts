@@ -1817,6 +1817,7 @@ describe('a GPX file uploaded in slices', () => {
     ['before the root', 'junk', ''],
     ['after the root', '', 'junk'],
     ['a reference after the root', '', '&amp;'],
+    ['a CDATA section before the root', '<![CDATA[x]]>', ''],
     ['a CDATA section after the root', '', '<![CDATA[x]]>'],
     ['U+0085 before the root of XML 1.0', '\u0085', ''],
     ['U+2028 after the root of XML 1.0', '', '\u2028'],
