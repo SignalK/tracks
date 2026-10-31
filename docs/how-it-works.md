@@ -75,7 +75,9 @@ simplified instead, to the smallest tolerance up to 32 m whose significance leve
 the budget. It is spaced in time to fit instead where the query sets `maxPoints`, which asks for
 spacing, where no tolerance up to 32 m holds it, or where tracks split at pauses (**Split a track
 after this many minutes without a fix**). The answer says which in `epsilon` or `resolution`. A
-track within the budget is answered as before. A query with a box and `clip`, which the server
+spacing far wider than the recording's own is found by seeking each kept position in the index,
+not by reading every position between them, and the pauses that split the track by a walk a
+split's length at a time. A track within the budget is answered as before. A query with a box and `clip`, which the server
 sets for any box from 2.34, is not counted: it reads the stretches near the box, which for a box
 around the whole track is all of it. Nor is a query with a box that names no vessel. Without
 `clip`, a query that names a vessel would read its whole track, so that read is counted, every

@@ -51,7 +51,7 @@ vi.mock('node:fs', async (importOriginal) => {
 import { s2 } from 's2js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
 import { simplify } from './simplify.js'
-import { thin } from './timeWindow.js'
+import { segment, thin } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import {
   clipToBounds,
@@ -239,9 +239,96 @@ describe('a window read at a resolution', () => {
         !window || (time >= window.from && (window.inclusiveEnd ? time <= window.to : time < window.to))
       expect(all.map(({ timestamp }) => timestamp)).toEqual(times.filter(inside))
       for (const resolution of [5 * MINUTE, HOUR]) {
-        expect(await store.getTimed(ctx, window, resolution)).toEqual(thin(all, resolution))
+        expect(shaped(await store.getTimed(ctx, window, resolution))).toEqual(shaped(thin(all, resolution)))
       }
     }
+    store.close()
+  })
+})
+
+/**
+ * A thinned track as it is drawn: its points, split where `segment()` splits
+ * them at the store's gap. A resolution read by seeking bounds a pause shorter
+ * than the gap rather than measuring it, which nothing past `segment()` sees.
+ */
+const shaped = (points: TimedPosition[], gap = 5 * 60_000) =>
+  segment(points, gap).map((stretch) => stretch.map(({ position, timestamp }) => ({ position, timestamp })))
+
+describe('a resolution much wider than the recording spacing', () => {
+  const SECOND = 1000
+  const MINUTE = 60 * SECOND
+  const HOUR = 60 * MINUTE
+  // A fix a second, every third sharing the time of the one before and stored
+  // out of the index's order, with pauses shorter than the gap and longer.
+  const recording = (): { track: LatLngTuple[]; times: number[] } => {
+    const track: LatLngTuple[] = []
+    const times: number[] = []
+    let t = 0
+    for (let i = 0; i < 20_000; i++) {
+      if (i % 4000 === 3999) {
+        t += 3 * HOUR
+      } else if (i % 1000 === 999) {
+        t += 4 * MINUTE
+      } else if (i % 3 !== 0) {
+        t += SECOND
+      }
+      times.push(t)
+      track.push([60 + ((i * 7919) % 20_000) * 1e-6, 24 + i * 1e-6])
+    }
+    // The last time shared too, so the last position is not the one kept there.
+    for (let i = 0; i < 2; i++) {
+      times.push(t)
+      track.push([61 - i * 1e-3, 25])
+    }
+    return { track, times }
+  }
+  const seeded = (gap?: number): { store: SqliteTrackStore; times: number[] } => {
+    const store = new SqliteTrackStore({ file: ':memory:', ...(gap === undefined ? {} : { segmentGap: gap }) }, debug)
+    const { track, times } = recording()
+    store.initialTrack(ctx, track, times)
+    return { store, times }
+  }
+
+  it('keeps the positions thinning keeps, split where the recording paused', async () => {
+    const { store, times } = seeded()
+    const windows: (TimeWindow | undefined)[] = [
+      undefined,
+      { from: times[500]!, to: times[15_002]! },
+      { from: times[500]!, to: times[15_002]!, inclusiveEnd: true },
+    ]
+    for (const window of windows) {
+      const all = await store.getTimed(ctx, window)
+      for (const resolution of [10 * SECOND, 10 * MINUTE, 2 * HOUR]) {
+        expect(shaped(await store.getTimed(ctx, window, resolution))).toEqual(shaped(thin(all, resolution)))
+      }
+    }
+    // The pauses of three hours split it; those of four minutes do not.
+    expect(segment(await store.getTimed(ctx, undefined, 10 * MINUTE), 5 * MINUTE)).toHaveLength(6)
+    store.close()
+  })
+
+  it('keeps every new time at a resolution below a millisecond', async () => {
+    const store = newStore()
+    const track: LatLngTuple[] = []
+    const times: number[] = []
+    // All at one time, so a spacing that rounds away finds the same time again.
+    for (let i = 0; i < 40; i++) {
+      times.push(1000)
+      track.push([60 + ((i * 7) % 40) * 1e-4, 24])
+    }
+    store.initialTrack(ctx, track, times)
+    const all = await store.getTimed(ctx)
+    for (const resolution of [0.5, 1e-20]) {
+      expect(shaped(await store.getTimed(ctx, undefined, resolution))).toEqual(shaped(thin(all, resolution)))
+    }
+    store.close()
+  })
+
+  it('keeps the same positions where tracks are not split at pauses', async () => {
+    const { store } = seeded(0)
+    const all = await store.getTimed(ctx)
+    const read = await store.getTimed(ctx, undefined, 10 * MINUTE)
+    expect(shaped(read, 0)).toEqual(shaped(thin(all, 10 * MINUTE), 0))
     store.close()
   })
 })
