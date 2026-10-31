@@ -1762,9 +1762,23 @@ describe('a GPX file uploaded in slices', () => {
     }
   })
 
+  it.each([
+    ['after a comment', '<!-- c --><?xml version="1.0"?>'],
+    ['after a DOCTYPE', '<!DOCTYPE gpx><?xml version="1.0"?>'],
+    ['after white space', '  <?xml version="1.0"?>'],
+  ])('lists no track of a file with an XML declaration %s', async (_, head) => {
+    const xml = `${head}<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    for (const chunk of [7, 64, 1 << 20]) expect(await scanGpx(new Blob([xml]), () => {}, chunk)).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
+  })
+
   it('lists no track of a file with two DOCTYPEs', async () => {
     const xml = `<!DOCTYPE gpx><!DOCTYPE gpx><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
-    expect(await scanGpx(new Blob([xml]))).toEqual([])
+    for (const chunk of [7, 64, 1 << 20]) expect(await scanGpx(new Blob([xml]), () => {}, chunk)).toEqual([])
     const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
       new TextEncoder().encode(xml),
       true,
