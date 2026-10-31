@@ -48,19 +48,49 @@ export function isOwnVessel(name) {
   return name === 'Own Ship' || name === 'Eigenes Schiff'
 }
 
-const MARKUP = /(<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->)/
+const MARKUP = /(<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<\?[\s\S]*?\?>)/
+
+// The line ends XML reads as line feeds: XML 1.1 adds U+0085 and U+2028 to 1.0's.
+const LINE_END = /\r\n?/g
+const LINE_END_11 = /\r[\n\u0085]?|[\u0085\u2028]/g
+
+// An XML declaration as the server's parser takes one: a version 1.x, then
+// an encoding and standalone, in that order, parted by XML 1.0's white space,
+// since the version is not known before it is read.
+const DECLARATION_SPACE = String.raw`[\t\n\r ]`
+const WELL_FORMED_DECLARATION = new RegExp(
+  String.raw`^<\?xml${DECLARATION_SPACE}+version${DECLARATION_SPACE}*=${DECLARATION_SPACE}*(["'])1\.[0-9]+\1` +
+    String.raw`(?:${DECLARATION_SPACE}+encoding${DECLARATION_SPACE}*=${DECLARATION_SPACE}*(["'])[A-Za-z][A-Za-z0-9._-]*\2)?` +
+    String.raw`(?:${DECLARATION_SPACE}+standalone${DECLARATION_SPACE}*=${DECLARATION_SPACE}*(["'])(?:yes|no)\3)?${DECLARATION_SPACE}*\?>$`,
+)
+// Text other than white space, which the server refuses outside the root:
+// XML 1.1 reads U+0085 and U+2028 as line ends there too.
+const OUTSIDE_TEXT = /[^\t\n\r ]/
+const OUTSIDE_TEXT_11 = /[^\t\n\r \u0085\u2028]/
+
+// A processing instruction of the reserved target, in any case: the server takes one for a declaration.
+const XML_TARGET = /^<\?xml(?=[\t\n\r ?])/i
+
+/** Whether the document starting `text` declares itself XML 1.1, whose line ends the parser reads differently. */
+function isXml11(text) {
+  return /^<\?xml[\t\n\r ]+version[\t\n\r ]*=[\t\n\r ]*(["'])1\.1\1/.test(text)
+}
 
 /**
  * An element's text from its raw content, as the parser reads it:
  * line ends as line feeds, references decoded, a CDATA section's content as
- * it is and a comment left out.
+ * it is and a comment or processing instruction left out.
  */
-function textOf(raw) {
+function textOf(raw, xml11) {
   return raw
-    .replace(/\r\n?/g, '\n')
+    .replace(xml11 ? LINE_END_11 : LINE_END, '\n')
     .split(MARKUP)
     .map((part) =>
-      part.startsWith('<![CDATA[') ? part.slice(9, -3) : part.startsWith('<!--') ? '' : decodeEntities(part),
+      part.startsWith('<![CDATA[')
+        ? part.slice(9, -3)
+        : part.startsWith('<!--') || part.startsWith('<?')
+          ? ''
+          : decodeEntities(part),
     )
     .join('')
     .trim()
@@ -74,12 +104,14 @@ const SPACE = String.raw`[\t\n\r \u0085\u2028]`
 const NAME_CHAR = String.raw`[^\t\n\r \u0085\u2028"'<>/=]`
 const PART_CHAR = String.raw`[^\t\n\r \u0085\u2028"'<>/=:!?]`
 
-// A CDATA section or a comment is matched whole, so that markup inside one is not taken for a tag.
+// A CDATA section, a comment or a processing instruction is matched whole,
+// so that markup inside one is not taken for a tag.
 // A tag ends at its own `>`, not at one in a quoted value, as the server's parser reads it.
 // Its name is read whole: a run of name characters with no `>` after it is
-// then given up at once, not tried again at every length.
+// then given up at once, not tried again at every length. Its prefix is
+// kept, for the namespace it is in.
 const TAG = new RegExp(
-  String.raw`<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<(\/?)(?:${PART_CHAR}+:)?(${PART_CHAR}+)(?!${PART_CHAR})(?:[^<>"']|"[^"<]*"|'[^'<]*')*?(\/?)>`,
+  String.raw`<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<(\/?)(?:(${PART_CHAR}+):)?(${PART_CHAR}+)(?!${PART_CHAR})(?:[^<>"']|"[^"<]*"|'[^'<]*')*?(\/?)>`,
   'g',
 )
 
@@ -90,13 +122,15 @@ const START_TAG = new RegExp(
   'y',
 )
 const ATTRIBUTE = new RegExp(String.raw`(${NAME_CHAR}+)${SPACE}*=${SPACE}*(?:"([^"]*)"|'([^']*)')`, 'g')
-const PREFIX = new RegExp(String.raw`^<\/?(${PART_CHAR}+):`)
 
 /**
  * The longest start tag carried into the next chunk when it runs past this
  * one: as long as the server takes (MAX_PENDING_CHARS in src/gpxUpload.ts).
  */
 const MAX_CARRIED_TAG = 1024 * 1024
+
+/** The most elements open at once the scan follows: GPX nests a handful, so more is no GPX file. */
+const MAX_OPEN_ELEMENTS = 4096
 
 /**
  * TAG's next match in `text`, past any tag too long for it to read: one of
@@ -159,20 +193,21 @@ function scopeOf(text, at, tag) {
 }
 
 /**
- * Whether the element of start tag `tag` is in GPX's namespace or in none,
- * as the server reads one, its prefix looked up in `scopes`, innermost
- * first: those of its own tag and of the `<trkpt>`, `<trkseg>`, `<trk>` and
- * `<gpx>` it is in, the only ones the server reads it under. One that
- * could not be read whole counts against it.
+ * Whether an element of `prefix`, undefined for none, is in GPX's namespace
+ * or in none, as the server reads one, its prefix looked up in `scopes`,
+ * innermost first: those of its own tag and of the `<trkpt>`, `<trkseg>`,
+ * `<trk>` and `<gpx>` it is in, the only ones the server reads it under. One
+ * that could not be read whole counts against it, unless `unread` says
+ * otherwise: an element the scan counts is not given up for it, only a point
+ * it samples.
  */
-function inGpx(tag, scopes) {
-  const prefix = PREFIX.exec(tag)?.[1] ?? ''
+function inGpx(prefix, scopes, unread = false) {
   for (const scope of scopes) {
-    if (scope === null) return false
-    const namespace = scope?.get(prefix)
+    if (scope === null) return unread
+    const namespace = scope?.get(prefix ?? '')
     if (namespace !== undefined) return namespace === '' || namespace === GPX_NAMESPACE
   }
-  return prefix === ''
+  return prefix === undefined
 }
 
 /**
@@ -268,8 +303,8 @@ function far(one, other) {
 const apartIn = ({ far, near }) => far >= APART_STRETCHES && far > near
 const togetherIn = ({ far, near }) => near >= APART_STRETCHES && near > far
 
-/** Where no `<trkseg>` is open: no point is read there. */
-const NO_SEGMENT = { scope: undefined, inGpx: false }
+/** Where no `<trkseg>` of GPX's is open: no point is read there. */
+const NO_SEGMENT = { scopes: [], inGpx: false, plain: false }
 
 /** The most `<trk>` of the own name one stretch can hold before they are all doubted. */
 const MAX_OWN_TOGETHER = 16
@@ -403,6 +438,60 @@ function markElsewhere(sampledTracks, ownNames) {
   }
 }
 
+/** Where the DOCTYPE at `at` in `text` ends, or -1 where `text` does not close it. */
+function doctypeEnd(text, at) {
+  let subset = false
+  for (let i = at + 9; i < text.length; i++) {
+    let open
+    let close
+    if (subset && text.startsWith('<!--', i)) [open, close] = ['<!--', '-->']
+    else if (subset && text.startsWith('<?', i)) [open, close] = ['<?', '?>']
+    else if (text[i] === '"' || text[i] === "'") open = close = text[i]
+    if (close !== undefined) {
+      const found = text.indexOf(close, i + open.length)
+      if (found < 0) return -1
+      i = found + close.length - 1
+    } else if (subset) {
+      subset = text[i] !== ']'
+    } else if (text[i] === '[') {
+      subset = true
+    } else if (text[i] === '>') {
+      return i + 1
+    }
+  }
+  return -1
+}
+
+const MARKUP_START = /<[!?]/g
+const OPENERS = [
+  ['<![CDATA[', ']]>'],
+  ['<!--', '-->'],
+  ['<?', '?>'],
+]
+
+/**
+ * The first CDATA section, comment, processing instruction or DOCTYPE at or
+ * after `from` in `text`: where it starts, where it ends (-1 where `text`
+ * does not close it), and whether it is the DOCTYPE, which TAG does not
+ * match whole. Each is searched for its end once, so that markup inside an
+ * unclosed one is not searched again and again.
+ */
+function markupFrom(text, from) {
+  MARKUP_START.lastIndex = from
+  for (let found = MARKUP_START.exec(text); found; found = MARKUP_START.exec(text)) {
+    const at = found.index
+    const opener = OPENERS.find(([start]) => text.startsWith(start, at))
+    if (opener === undefined) {
+      if (text.startsWith('<!DOCTYPE', at)) return { at, end: doctypeEnd(text, at), doctype: true }
+      continue
+    }
+    const [start, close] = opener
+    const closed = text.indexOf(close, at + start.length)
+    return { at, end: closed < 0 ? -1 : closed + close.length, doctype: false }
+  }
+  return undefined
+}
+
 /**
  * The tracks of a GPX file by name, `''` for one without, each with how many
  * points it has and the times of its first and last point as written, and
@@ -412,8 +501,11 @@ function markElsewhere(sampledTracks, ownNames) {
  * It picks out tags rather than parsing, which reads a gigabyte in seconds
  * where a parser would take minutes; the server parses the upload properly
  * and imports only the names chosen here, so a file odd enough to fool this
- * scan costs a track in the list, never a wrong position. A track's name is
- * the `<name>` it has before its first segment, as the server reads it.
+ * scan costs a track in the list, never a wrong position. It reads the
+ * elements the server does: a `<trk>` under the root `<gpx>`, a `<trkseg>`
+ * under it and a `<trkpt>` under that, each in GPX's namespace or none. A
+ * track's name is the `<name>` it has before its first segment, its text
+ * without that of elements inside it, as the server reads it.
  */
 export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYTES) {
   const tracks = new Map()
@@ -425,22 +517,38 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   // Tracks named like an AIS target, which are never compared.
   const targets = new Set()
   const decoder = new TextDecoder()
+  let xml11 = false
+  let begun = false
+  // Whether the file starts with anything but markup, which puts any declaration out of place.
+  let late = false
+  let lateKnown = false
   let carry = ''
   let track
-  // Elements open inside the current <trk>, so its own <name> is told from one in <extensions>.
-  let depth = 0
+  // Elements open in the document: GPX's are told by where they are, from the root down.
+  let level = 0
+  // The qualified names of the elements open, for an end tag that does not
+  // match its start tag: the server refuses such a file, so none of it is listed.
+  const opened = []
+  let malformed = false
+  // Ended early at a tag or markup longer than the server takes: what came before is listed.
+  let stopped = false
+  // Whether the root has started: XML has one, and the server refuses a second.
+  let rooted = false
+  let doctyped = false
+  // The element whose text is read, 'name' or 'time', and how many elements are open outside it.
   let capture
+  let captureLevel = 0
   let text = ''
-  // Where the start tag of the point being read is, and the tag itself, for
-  // its position once its time is known, and how deep it is, so that only its
-  // own <time> dates it: plain values, as a gigabyte holds millions of points.
+  // Where the start tag of the point being read is, and that it is one the
+  // server reads, for its position once its time is known: plain values, as
+  // a gigabyte holds millions of points.
   let pointText
   let pointAt = 0
-  let pointTag
-  let pointDepth = 0
-  let pointTime = false
-  // The <time> of that point and what it binds, and the <trkseg> it is in.
-  let timeTag
+  let inPoint = false
+  // What that point's tag binds, undefined where it binds nothing.
+  let pointScope
+  // The prefix of that point's <time> and what it binds, and the <trkseg> it is in.
+  let timePrefix
   let timeScope
   let segment = NO_SEGMENT
   const sampledOf = (key) => {
@@ -479,13 +587,12 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       return
     }
     const at = timeOf(time)
-    if (pointTag === undefined) return
+    if (!inPoint) return
     // Not read where its tag is not one XML allows, with a value unquoted say,
     // or is too long to read: the next point in the ten minutes stands in for it.
     const attributes = attributesOf(pointText, pointAt)
     if (attributes === undefined) return
-    const scopes = [bindings(attributes), segment.scope, track.scope, root?.scope]
-    if (!inGpx(pointTag, scopes) || !inGpx(timeTag, [timeScope, ...scopes])) return
+    if (!inGpx(timePrefix, [timeScope, bindings(attributes), ...segment.scopes])) return
     const lat = coordinate(attributes.get('lat'))
     const lon = coordinate(attributes.get('lon'))
     if (Number.isNaN(at) || !inRange(lat, lon)) return
@@ -493,22 +600,24 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     doneKey = key
     doneStretch = stretch
   }
+  // An element in the current <trk> ends, `level` elements open outside it.
   const close = (name) => {
-    if (name === 'name' && capture === 'name' && track.name === undefined) {
-      track.name = textOf(text)
-    } else if (name === 'time' && capture === 'time' && track.group) {
-      const time = textOf(text)
-      track.group.from ??= time
-      track.group.to = time
-      if (pointTime && !targets.has(track.group)) {
-        sample(track, time)
+    if (capture !== undefined && level === captureLevel) {
+      if (capture === 'name') {
+        track.name ??= textOf(text, xml11)
+      } else {
+        const time = textOf(text, xml11)
+        track.group.from ??= time
+        track.group.to = time
+        if (!targets.has(track.group)) sample(track, time)
       }
-    } else if (name === 'trkseg' && depth === 0) {
+      capture = undefined
+    } else if (name === 'trkseg' && level === 2) {
       segment = NO_SEGMENT
-    } else if (name === 'trkpt') {
-      pointTag = undefined
+      inPoint = false
+    } else if (name === 'trkpt' && level === 3) {
+      inPoint = false
     }
-    capture = undefined
   }
   const group = (name) => {
     let found = tracks.get(name)
@@ -518,99 +627,162 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     }
     return found
   }
-  for (let at = 0; at < file.size; at += chunkBytes) {
+  read: for (let at = 0; at < file.size; at += chunkBytes) {
     const chunk = carry + decoder.decode(await file.slice(at, at + chunkBytes).arrayBuffer(), { stream: true })
-    let end = 0
-    TAG.lastIndex = 0
-    // The next `<!` the tags have not reached, kept rather than searched for at every tag.
-    let bang = chunk.indexOf('<!')
-    for (let match = nextTag(chunk); match; match = nextTag(chunk)) {
-      while (bang >= 0 && bang < end) bang = chunk.indexOf('<!', end)
-      // A CDATA section or a comment the chunk does not close: it is read whole with the next chunk.
-      while (
-        bang >= 0 &&
-        bang < match.index &&
-        !chunk.startsWith('<![CDATA[', bang) &&
-        !chunk.startsWith('<!--', bang)
-      ) {
-        bang = chunk.indexOf('<!', bang + 2)
-      }
-      if (bang >= 0 && bang < match.index) break
-      if (capture) text += chunk.slice(end, match.index)
-      end = TAG.lastIndex
-      if (match[2] === undefined) {
-        if (capture) text += match[0]
-        continue
-      }
-      const [, closing, name, empty] = match
-      if (name === 'gpx' && !closing && !track) {
-        root ??= rootOf(chunk, match.index)
-        continue
-      }
-      if (name === 'trk') {
-        if (closing) {
-          track = undefined
-        } else {
-          const scope = scopeOf(chunk, match.index, match[0])
-          track = { scope, inGpx: inGpx(match[0], [scope, root?.scope]) }
-          depth = 0
-          pointTag = undefined
-          segment = NO_SEGMENT
-        }
-        continue
-      }
-      if (!track) continue
-      if (closing) {
-        depth--
-        close(name)
-        continue
-      }
-      if (name === 'trkseg' && track.group === undefined) {
-        track.group = group(track.name ?? '')
-      }
-      // The <trk>'s own: one in its or a point's extensions is no segment.
-      if (name === 'trkseg' && depth === 0) {
-        const scope = scopeOf(chunk, match.index, match[0])
-        segment = { scope, inGpx: track.inGpx && inGpx(match[0], [scope, track.scope, root?.scope]) }
-      }
-      if (
-        name === 'name' &&
-        depth === 0 &&
-        track.group === undefined &&
-        inGpx(match[0], [scopeOf(chunk, match.index, match[0]), track.scope, root?.scope])
-      ) {
-        capture = 'name'
-        text = ''
-      } else if (name === 'trkpt' && track.group) {
-        track.group.points++
-        // Only where the server reads it: its namespaces are checked when it is sampled.
-        if (!empty && segment.inGpx && depth === 1) {
-          pointText = chunk
-          pointAt = match.index
-          pointTag = match[0]
-          pointDepth = depth
-        }
-      } else if (name === 'time' && track.group) {
-        capture = 'time'
-        text = ''
-        pointTime = pointTag !== undefined && depth === pointDepth + 1
-        if (pointTime) {
-          timeTag = match[0]
-          timeScope = scopeOf(chunk, match.index, match[0])
-        }
-      }
-      if (empty) close(name)
-      else depth++
+    // A first chunk can hold nothing but a byte order mark, which the decoder drops.
+    if (!lateKnown && chunk.length > 0) {
+      lateKnown = true
+      late = !chunk.startsWith('<')
     }
-    // A tag cut by the end of the chunk is read whole with the next one, unless it is
-    // longer than the server takes: a quote left open would carry the rest of the file.
-    // A CDATA section or a comment the chunk does not close is carried from its start.
-    const unclosed = [chunk.indexOf('<![CDATA[', end), chunk.indexOf('<!--', end)].filter((at) => at >= 0)
-    const open = unclosed.length > 0 ? Math.min(...unclosed) : chunk.lastIndexOf('<')
-    carry = open >= end && (unclosed.length > 0 || chunk.length - open <= MAX_CARRIED_TAG) ? chunk.slice(open) : ''
-    if (capture) text += chunk.slice(end, open >= end ? open : chunk.length)
+    let end = 0
+    // The chunk up to the first markup it does not close, which is read whole with the next chunk.
+    let scanned = chunk
+    // The next markup the tags have not reached, found once rather than at every tag.
+    let markup
+    const markupAfter = (from) => {
+      markup = markupFrom(chunk, from)
+      if (markup?.end === -1) scanned = chunk.slice(0, markup.at)
+    }
+    markupAfter(0)
+    const outside = (from, to) => level === 0 && (xml11 ? OUTSIDE_TEXT_11 : OUTSIDE_TEXT).test(chunk.slice(from, to))
+    TAG.lastIndex = 0
+    for (;;) {
+      const match = nextTag(scanned)
+      // The DOCTYPE, which the server reads past whole, whatever it holds.
+      if (markup?.doctype && markup.end >= 0 && (match === null || markup.at < match.index + match[0].length)) {
+        // It comes before the root, and once: the server refuses one anywhere else.
+        if (rooted || doctyped || outside(end, markup.at)) {
+          malformed = true
+          break read
+        }
+        doctyped = true
+        TAG.lastIndex = end = markup.end
+        markupAfter(end)
+        continue
+      }
+      if (match === null) break
+      if (outside(end, match.index)) {
+        malformed = true
+        break read
+      }
+      if (capture && level === captureLevel + 1) text += chunk.slice(end, match.index)
+      end = TAG.lastIndex
+      if (markup !== undefined && markup.end >= 0 && markup.at < end) markupAfter(end)
+      // The XML declaration, read whole however the chunks cut it, is the first markup or none is.
+      // Anywhere else, the server refuses it.
+      if (
+        match[0][1] === '?' &&
+        XML_TARGET.test(match[0]) &&
+        (!WELL_FORMED_DECLARATION.test(match[0]) || begun || doctyped || late || match.index !== 0)
+      ) {
+        malformed = true
+        break read
+      }
+      if (!begun) xml11 = match.index === 0 && isXml11(match[0])
+      begun = true
+      if (match[3] === undefined) {
+        // A CDATA section is text, which the server refuses outside the root.
+        if (level === 0 && match[0].startsWith('<![CDATA[')) {
+          malformed = true
+          break read
+        }
+        if (capture && level === captureLevel + 1) text += match[0]
+        continue
+      }
+      const [, closing, prefix, name, empty] = match
+      if (closing) {
+        if (opened.pop() !== (prefix === undefined ? name : `${prefix}:${name}`)) {
+          malformed = true
+          break read
+        }
+        level--
+        if (track && level === 1) track = undefined
+        else if (track) close(name)
+        continue
+      }
+      if (level === 0) {
+        if (rooted) {
+          malformed = true
+          break read
+        }
+        rooted = true
+      }
+      if (level === 0 && name === 'gpx') {
+        // The server refuses a file whose root is not GPX's: none of its tracks is read.
+        const read = rootOf(chunk, match.index)
+        // One whose bindings cannot be read is taken for GPX's only without a prefix.
+        if (read.scope === null ? prefix === undefined : inGpx(prefix, [read.scope])) root ??= read
+      } else if (level === 1 && name === 'trk' && root !== undefined) {
+        const scope = scopeOf(chunk, match.index, match[0])
+        track = inGpx(prefix, [scope, root.scope], true) && !empty ? { scope } : undefined
+        capture = undefined
+        inPoint = false
+        segment = NO_SEGMENT
+      } else if (track && level === 2 && name === 'trkseg') {
+        const scope = scopeOf(chunk, match.index, match[0])
+        const scopes = [scope, track.scope, root.scope]
+        if (inGpx(prefix, scopes, true)) {
+          track.group ??= group(track.name ?? '')
+          segment = { scopes, inGpx: !empty, plain: inGpx(undefined, scopes, true) }
+        }
+      } else if (track && level === 2 && name === 'name' && track.group === undefined && capture === undefined) {
+        if (inGpx(prefix, [scopeOf(chunk, match.index, match[0]), track.scope, root.scope], true)) {
+          capture = 'name'
+          captureLevel = level
+          text = ''
+        }
+      } else if (track && level === 3 && name === 'trkpt' && segment.inGpx) {
+        // Most points bind no namespace and have no prefix: their segment's default says.
+        const scope = prefix !== undefined || match[0].includes('xmlns') ? scopeOf(chunk, match.index, match[0]) : false
+        if (scope === false ? segment.plain : inGpx(prefix, [scope, ...segment.scopes], true)) {
+          track.group.points++
+          if (!empty) {
+            pointText = chunk
+            pointAt = match.index
+            pointScope = scope === false ? undefined : scope
+            inPoint = true
+          }
+        }
+      } else if (inPoint && level === 4 && name === 'time' && capture === undefined) {
+        // A track's times are its points' own, as the server reads them.
+        const scope = scopeOf(chunk, match.index, match[0])
+        if (inGpx(prefix, [scope, pointScope, ...segment.scopes], true)) {
+          capture = 'time'
+          captureLevel = level
+          text = ''
+          timePrefix = prefix
+          timeScope = scope
+        }
+      }
+      if (!empty) {
+        level++
+        if (opened.length >= MAX_OPEN_ELEMENTS) {
+          malformed = true
+          break read
+        }
+        opened.push(prefix === undefined ? name : `${prefix}:${name}`)
+      } else if (track) close(name)
+    }
+    // A tag cut by the end of the chunk is read whole with the next one, and
+    // markup the chunk does not close is carried from its start, as long as
+    // the server takes either: it refuses the file past that, so the scan ends
+    // there, rather than carry a quote left open to the end of the file.
+    const unclosed = scanned !== chunk
+    const open = unclosed ? scanned.length : chunk.lastIndexOf('<')
+    if (open >= end && chunk.length - open > MAX_CARRIED_TAG) {
+      stopped = true
+      break read
+    }
+    if (outside(end, open >= end ? open : chunk.length)) {
+      malformed = true
+      break read
+    }
+    carry = open >= end ? chunk.slice(open) : ''
+    if (capture && level === captureLevel + 1) text += chunk.slice(end, open >= end ? open : chunk.length)
     onProgress(Math.min(file.size, at + chunkBytes) / file.size)
   }
+  // A file that ends with elements or markup still open is refused by the server as well.
+  if (malformed || (!stopped && (opened.length > 0 || carry !== ''))) return []
   markElsewhere(sampledTracks, namesOwnTrack(root?.creator ?? undefined))
   return [...tracks.values()]
 }

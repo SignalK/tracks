@@ -1577,6 +1577,312 @@ describe('a GPX file uploaded in slices', () => {
     expect(performance.now() - started).toBeLessThan(2000)
   })
 
+  // The server reads only GPX's own elements, where they belong, and a name
+  // without the text of elements inside it: a track the scan names otherwise
+  // imports nothing.
+  const twoPoints = `${trkpt('2023-08-29T21:57:38Z')}${trkpt('2023-08-30T08:00:00Z')}`
+  it.each([
+    [
+      'a <trk> in extensions after the name',
+      `<trk><name>A</name><extensions><v:trk xmlns:v="urn:v"/></extensions><trkseg>${twoPoints}</trkseg></trk>`,
+      'A',
+    ],
+    [
+      'a <trkseg> in extensions before the name',
+      `<trk><extensions><trkseg/></extensions><name>A</name><trkseg>${twoPoints}</trkseg></trk>`,
+      'A',
+    ],
+    [
+      'a <trkpt> in a point’s extensions',
+      `<trk><name>A</name><trkseg>${trkpt('2023-08-29T21:57:38Z')}<trkpt lat="1" lon="2"><extensions><v:trkpt xmlns:v="urn:v" lat="5" lon="5"/></extensions><time>2023-08-30T08:00:00Z</time></trkpt></trkseg></trk>`,
+      'A',
+    ],
+    [
+      'a <trkseg> that binds another default namespace',
+      `<trk><name>A</name><g:trkseg xmlns:g="${GPX}" xmlns="urn:v">${twoPoints}${trkpt('2023-08-30T01:00:00Z')}</g:trkseg><trkseg>${twoPoints}</trkseg></trk>`,
+      'A',
+    ],
+    [
+      'a <trkseg> that binds GPX’s as the default namespace',
+      `<v:trk xmlns:v="${GPX}" xmlns="urn:v"><v:name>A</v:name><v:trkseg xmlns="${GPX}">${twoPoints}</v:trkseg></v:trk>`,
+      'A',
+    ],
+    [
+      'a <trk> of another namespace',
+      `<v:trk xmlns:v="urn:v"><v:name>B</v:name><v:trkseg>${twoPoints}</v:trkseg></v:trk><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk>`,
+      'A',
+    ],
+    [
+      'times outside its points',
+      `<trk><name>A</name><trkseg><extensions><time>2020-01-01T00:00:00Z</time></extensions>${trkpt('2023-08-29T21:57:38Z')}<trkpt lat="1" lon="2"><v:time xmlns:v="urn:v">2019-01-01T00:00:00Z</v:time><time>2023-08-30T08:00:00Z</time><extensions><v:trkpt xmlns:v="urn:v"><time>2024-01-01T00:00:00Z</time></v:trkpt></extensions></trkpt></trkseg></trk>`,
+      'A',
+    ],
+    [
+      'an element inside the name',
+      `<trk><name>Own<b>x</b><c/> Ship</name><trkseg>${twoPoints}</trkseg></trk>`,
+      'Own Ship',
+    ],
+    [
+      'a processing instruction inside the name',
+      `<trk><name>Own<?pi x?> Ship</name><trkseg>${twoPoints}</trkseg></trk>`,
+      'Own Ship',
+    ],
+  ])('names and counts a track with %s as the server does', async (_, trk, name) => {
+    const xml = `<?xml version="1.0"?><gpx xmlns="${GPX}">${trk}</gpx>`
+    for (const chunk of [7, 64, 1 << 20]) {
+      expect(await scanGpx(new Blob([xml]), () => {}, chunk)).toEqual([
+        { name, points: 2, from: '2023-08-29T21:57:38Z', to: '2023-08-30T08:00:00Z' },
+      ])
+    }
+    const read = await new GpxReader(new Set([name]), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeUndefined()
+    expect([...read.parts.values()].flat()).toHaveLength(2)
+  })
+
+  it.each([
+    ['with a `<!--` in its system id', '<!DOCTYPE gpx SYSTEM "<!--">'],
+    ['with an internal subset', '<!DOCTYPE gpx [<!ENTITY e "<trk>"><!-- ]> --><?pi ]>?>]>'],
+  ])('reads past a DOCTYPE %s as the server does', async (_, doctype) => {
+    const xml = `<?xml version="1.0"?>${doctype}<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    for (const chunk of [7, 64, 1 << 20]) {
+      expect(await scanGpx(new Blob([xml]), () => {}, chunk)).toEqual([
+        { name: 'A', points: 2, from: '2023-08-29T21:57:38Z', to: '2023-08-30T08:00:00Z' },
+      ])
+    }
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeUndefined()
+    expect([...read.parts.values()].flat()).toHaveLength(2)
+  })
+
+  // XML 1.1 reads U+0085 and U+2028 as line ends, XML 1.0 as characters.
+  it.each([
+    ['1.1', 'Own\nShip'],
+    ['1.0', 'Own\u2028Ship\u0085'],
+  ])('reads XML %s’s line ends in a name as the server does', async (version, name) => {
+    const xml = `<?xml version="${version}"?><gpx xmlns="${GPX}"><trk><name>Own\u2028Ship\u0085</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    for (const chunk of [7, 64, 1 << 20]) {
+      expect((await scanGpx(new Blob([xml]), () => {}, chunk)).map((track: { name: string }) => track.name)).toEqual([
+        name,
+      ])
+    }
+    const read = await new GpxReader(new Set([name]), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeUndefined()
+    expect([...read.parts.values()].flat()).toHaveLength(2)
+  })
+
+  // U+2028 is a character of a name in XML 1.0, and a line end in XML 1.1.
+  it('reads a name as XML 1.0 in a file without a declaration', async () => {
+    const xml = `<gpx xmlns="${GPX}"><trk><name>Own\u2028Ship</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    for (const chunk of [7, 64, 1 << 20]) {
+      expect((await scanGpx(new Blob([xml]), () => {}, chunk)).map((track: { name: string }) => track.name)).toEqual([
+        'Own\u2028Ship',
+      ])
+    }
+    const read = await new GpxReader(new Set(['Own\u2028Ship']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeUndefined()
+    expect([...read.parts.values()].flat()).toHaveLength(2)
+  })
+
+  it('lists no track of a prefixed root whose bindings cannot be read', async () => {
+    const xml = `<v:gpx a=b xmlns:v="urn:v" xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></v:gpx>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+  })
+
+  // The server refuses a file whose end tags do not match, so nothing of it is listed.
+  it('lists no track of a file with a name closed by an end tag that does not match', async () => {
+    for (const end of ['</b>', '</x:name>']) {
+      const xml = `<gpx xmlns="${GPX}" xmlns:x="${GPX}"><trk><name>A${end}<trkseg>${twoPoints}</trkseg></trk></gpx>`
+      expect(await scanGpx(new Blob([xml]))).toEqual([])
+    }
+  })
+
+  it('lists no track of a root outside GPX’s namespace, which the server refuses', async () => {
+    const xml = `<v:gpx xmlns:v="urn:v" xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></v:gpx>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toMatch(/not GPX/)
+  })
+
+  it('lists no track of a file with end tags that do not match a point', async () => {
+    const xml = `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg><trkpt lat="1" lon="2"></x></trkseg><a><b><time>2023-08-29T21:57:38Z</time></b></a></trk></gpx>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+  })
+
+  it('lists no track of a file that ends with elements open', async () => {
+    const xml = `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
+  })
+
+  it.each(['<!-- open', '<?pi', '<extra'])('lists no track of a file that ends inside `%s`', async (tail) => {
+    const xml = `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>${tail}`
+    for (const chunk of [7, 1 << 20]) expect(await scanGpx(new Blob([xml]), () => {}, chunk)).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
+  })
+
+  it.each([
+    ['a second root', `<gpx xmlns="${GPX}"></gpx>`],
+    ['an element after the root', '<x/>'],
+    ['a DOCTYPE after the root', '<!DOCTYPE gpx>'],
+  ])('lists no track of a file with %s', async (_, second) => {
+    const trk = `<trk><name>A</name><trkseg>${twoPoints}</trkseg></trk>`
+    for (const xml of [
+      `<gpx xmlns="${GPX}">${trk}</gpx>${second}`,
+      `<gpx xmlns="${GPX}"/>${second.replace('></gpx>', `>${trk}</gpx>`)}`,
+    ]) {
+      expect(await scanGpx(new Blob([xml]))).toEqual([])
+      const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+        new TextEncoder().encode(xml),
+        true,
+      )
+      expect(read.error).toBeDefined()
+    }
+  })
+
+  it.each([
+    ['after a comment', '<!-- c --><?xml version="1.0"?>'],
+    ['after a DOCTYPE', '<!DOCTYPE gpx><?xml version="1.0"?>'],
+    ['after white space', '  <?xml version="1.0"?>'],
+    ['in upper case', '<?XML version="1.0"?>'],
+    ['twice, the second in another case', '<?xml version="1.0"?><?Xml x?>'],
+  ])('lists no track of a file with an XML declaration %s', async (_, head) => {
+    const xml = `${head}<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    for (const chunk of [7, 64, 1 << 20]) expect(await scanGpx(new Blob([xml]), () => {}, chunk)).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
+  })
+
+  it.each([
+    ['of version 2.0', '<?xml version="2.0"?>'],
+    ['without a version', '<?xml encoding="UTF-8"?>'],
+    ['with standalone maybe', '<?xml version="1.0" standalone="maybe"?>'],
+    ['with its fields out of order', '<?xml version="1.0" standalone="no" encoding="UTF-8"?>'],
+  ])('lists no track of a file with a declaration %s', async (_, declaration) => {
+    const xml = `${declaration}<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
+  })
+
+  it('lists the tracks of a file with a declaration of every field', async () => {
+    const xml = `<?xml version = '1.1' encoding="UTF-8" standalone='yes' ?><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    expect((await scanGpx(new Blob([xml]))).map((track: { name: string }) => track.name)).toEqual(['A'])
+  })
+
+  // The decoder drops a byte order mark, so a first chunk of only that brings no text.
+  it('lists no track of a file with white space before the declaration, after a byte order mark', async () => {
+    const xml = `\uFEFF <?xml version="1.0"?><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    expect(await scanGpx(new Blob([xml]), () => {}, 3)).toEqual([])
+  })
+
+  it('lists the tracks of a file with a byte order mark and a declaration', async () => {
+    const xml = `\uFEFF<?xml version="1.0"?><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    for (const chunk of [3, 7, 1 << 20]) {
+      expect((await scanGpx(new Blob([xml]), () => {}, chunk)).map((track: { name: string }) => track.name)).toEqual([
+        'A',
+      ])
+    }
+  })
+
+  it.each([
+    ['before the root', 'junk', ''],
+    ['after the root', '', 'junk'],
+    ['a reference after the root', '', '&amp;'],
+    ['a CDATA section before the root', '<![CDATA[x]]>', ''],
+    ['a CDATA section after the root', '', '<![CDATA[x]]>'],
+    ['U+0085 before the root of XML 1.0', '\u0085', ''],
+    ['U+2028 after the root of XML 1.0', '', '\u2028'],
+  ])('lists no track of a file with text %s', async (_, before, after) => {
+    const xml = `${before}<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>${after}`
+    for (const chunk of [7, 64, 1 << 20]) expect(await scanGpx(new Blob([xml]), () => {}, chunk)).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
+  })
+
+  it('lists the tracks of a file with white space around the root', async () => {
+    const xml = `<?xml version="1.1"?>\n\u0085<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>\r\n\u2028`
+    for (const chunk of [7, 1 << 20]) {
+      expect((await scanGpx(new Blob([xml]), () => {}, chunk)).map((track: { name: string }) => track.name)).toEqual([
+        'A',
+      ])
+    }
+  })
+
+  it('lists no track of a file with two DOCTYPEs', async () => {
+    const xml = `<!DOCTYPE gpx><!DOCTYPE gpx><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
+    for (const chunk of [7, 64, 1 << 20]) expect(await scanGpx(new Blob([xml]), () => {}, chunk)).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
+  })
+
+  // No GPX file nests this deep; the elements open are not held without end.
+  it('lists no track of a file nesting elements thousands deep', async () => {
+    const xml = `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg>${'<x>'.repeat(5000)}${'</x>'.repeat(5000)}</trk></gpx>`
+    expect(await scanGpx(new Blob([xml]))).toEqual([])
+  })
+
+  // Markup cut by the end of a chunk is searched for its end once, not once
+  // for every `<!--` inside it. Timed, as the search holds the thread.
+  it('scans a CDATA section of many `<!--` across chunks in linear time', async () => {
+    const file = new Blob([
+      `<gpx xmlns="${GPX}"><trk><name>A</name><desc><![CDATA[${'<!--'.repeat(1 << 17)}]]></desc>`,
+      `<trkseg>${trkpt('2023-08-29T21:57:38Z')}</trkseg></trk></gpx>`,
+    ])
+    const started = performance.now()
+    expect(await scanGpx(file, () => {}, 1 << 16)).toEqual([
+      { name: 'A', points: 1, from: '2023-08-29T21:57:38Z', to: '2023-08-29T21:57:38Z' },
+    ])
+    expect(performance.now() - started).toBeLessThan(2000)
+  })
+
+  // The server refuses a file with this much and no markup ending, so the scan ends there.
+  it.each(['<!--', '<![CDATA['])('carries no `%s` left open to the end of the file', async (open) => {
+    const file = new Blob([
+      `<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${trkpt('2023-08-29T21:57:38Z')}</trkseg></trk>`,
+      `<trk><name>B</name><desc>${open}${'y'.repeat(32 << 20)}`,
+    ])
+    const started = performance.now()
+    expect(await scanGpx(file, () => {}, 1 << 16)).toEqual([
+      { name: 'A', points: 1, from: '2023-08-29T21:57:38Z', to: '2023-08-29T21:57:38Z' },
+    ])
+    expect(performance.now() - started).toBeLessThan(5000)
+  })
+
   const at = (lat: number | string, lon: number | string, time: string) =>
     `<trkpt lat="${lat}" lon="${lon}"><time>${time}</time></trkpt>`
   const track = (name: string, points: string[]) => `<trk><name>${name}</name><trkseg>${points.join('')}</trkseg></trk>`

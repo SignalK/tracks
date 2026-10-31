@@ -130,7 +130,7 @@ export function start() {
       return
     }
     if (tracks.length === 0) {
-      show('No track found: the file is not GPX, or has no track with points.', 'error')
+      show('No track found: the file is not GPX, has no track with points, or nests too deeply to scan.', 'error')
       return
     }
     scanned = file
