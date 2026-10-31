@@ -63,6 +63,11 @@ const WELL_FORMED_DECLARATION = new RegExp(
     String.raw`(?:${DECLARATION_SPACE}+encoding${DECLARATION_SPACE}*=${DECLARATION_SPACE}*(["'])[A-Za-z][A-Za-z0-9._-]*\2)?` +
     String.raw`(?:${DECLARATION_SPACE}+standalone${DECLARATION_SPACE}*=${DECLARATION_SPACE}*(["'])(?:yes|no)\3)?${DECLARATION_SPACE}*\?>$`,
 )
+// Text other than white space, which the server refuses outside the root:
+// XML 1.1 reads U+0085 and U+2028 as line ends there too.
+const OUTSIDE_TEXT = /[^\t\n\r ]/
+const OUTSIDE_TEXT_11 = /[^\t\n\r \u0085\u2028]/
+
 // A processing instruction of the reserved target, in any case: the server takes one for a declaration.
 const XML_TARGET = /^<\?xml(?=[\t\n\r ?])/i
 
@@ -639,13 +644,14 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       if (markup?.end === -1) scanned = chunk.slice(0, markup.at)
     }
     markupAfter(0)
+    const outside = (from, to) => level === 0 && (xml11 ? OUTSIDE_TEXT_11 : OUTSIDE_TEXT).test(chunk.slice(from, to))
     TAG.lastIndex = 0
     for (;;) {
       const match = nextTag(scanned)
       // The DOCTYPE, which the server reads past whole, whatever it holds.
       if (markup?.doctype && markup.end >= 0 && (match === null || markup.at < match.index + match[0].length)) {
         // It comes before the root, and once: the server refuses one anywhere else.
-        if (rooted || doctyped) {
+        if (rooted || doctyped || outside(end, markup.at)) {
           malformed = true
           break read
         }
@@ -655,6 +661,10 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         continue
       }
       if (match === null) break
+      if (outside(end, match.index)) {
+        malformed = true
+        break read
+      }
       if (capture && level === captureLevel + 1) text += chunk.slice(end, match.index)
       end = TAG.lastIndex
       if (markup !== undefined && markup.end >= 0 && markup.at < end) markupAfter(end)
@@ -756,6 +766,10 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     const open = unclosed ? scanned.length : chunk.lastIndexOf('<')
     if (open >= end && chunk.length - open > MAX_CARRIED_TAG) {
       stopped = true
+      break read
+    }
+    if (outside(end, open >= end ? open : chunk.length)) {
+      malformed = true
       break read
     }
     carry = open >= end ? chunk.slice(open) : ''

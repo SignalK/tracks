@@ -1679,7 +1679,7 @@ describe('a GPX file uploaded in slices', () => {
     expect([...read.parts.values()].flat()).toHaveLength(2)
   })
 
-  // Without a declaration the file is XML 1.0.
+  // U+2028 is a character of a name in XML 1.0, and a line end in XML 1.1.
   it('reads a name as XML 1.0 in a file without a declaration', async () => {
     const xml = `<gpx xmlns="${GPX}"><trk><name>Own\u2028Ship</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
     for (const chunk of [7, 64, 1 << 20]) {
@@ -1807,6 +1807,29 @@ describe('a GPX file uploaded in slices', () => {
   it('lists the tracks of a file with a byte order mark and a declaration', async () => {
     const xml = `\uFEFF<?xml version="1.0"?><gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>`
     for (const chunk of [3, 7, 1 << 20]) {
+      expect((await scanGpx(new Blob([xml]), () => {}, chunk)).map((track: { name: string }) => track.name)).toEqual([
+        'A',
+      ])
+    }
+  })
+
+  it.each([
+    ['before the root', 'junk', ''],
+    ['after the root', '', 'junk'],
+    ['a reference after the root', '', '&amp;'],
+  ])('lists no track of a file with text %s', async (_, before, after) => {
+    const xml = `${before}<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>${after}`
+    for (const chunk of [7, 64, 1 << 20]) expect(await scanGpx(new Blob([xml]), () => {}, chunk)).toEqual([])
+    const read = await new GpxReader(new Set(['A']), { offset: 0, open: [], segments: 0 }).read(
+      new TextEncoder().encode(xml),
+      true,
+    )
+    expect(read.error).toBeDefined()
+  })
+
+  it('lists the tracks of a file with white space around the root', async () => {
+    const xml = `<?xml version="1.1"?>\n\u0085<gpx xmlns="${GPX}"><trk><name>A</name><trkseg>${twoPoints}</trkseg></trk></gpx>\r\n\u2028`
+    for (const chunk of [7, 1 << 20]) {
       expect((await scanGpx(new Blob([xml]), () => {}, chunk)).map((track: { name: string }) => track.name)).toEqual([
         'A',
       ])
