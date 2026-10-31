@@ -681,6 +681,11 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       if (!begun) xml11 = match.index === 0 && isXml11(match[0])
       begun = true
       if (match[3] === undefined) {
+        // A CDATA section is text, which the server refuses outside the root.
+        if (level === 0 && match[0].startsWith('<![CDATA[')) {
+          malformed = true
+          break read
+        }
         if (capture && level === captureLevel + 1) text += match[0]
         continue
       }
