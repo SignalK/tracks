@@ -406,6 +406,13 @@ const DETAIL_JOIN_GAP = 10 * 60 * 1000
 const DETAIL_SAVE_INTERVAL = 60 * 1000
 const DEFAULT_SEGMENT_GAP = 5 * 60 * 1000
 /**
+ * How many rows a thinned read must hold per position it can keep before
+ * getTimed() seeks the positions rather than reading the rows: a kept
+ * position costs two seeks, and the walk for pauses a few more, against a
+ * row read in bulk at about the cost of one.
+ */
+const SEEK_RATIO = 16
+/**
  * How far apart two fixes inside a clipping box may be and still be read as
  * one stretch. A vessel cannot get far between fixes this close, so reading
  * what lies between them costs less than the two extra queries a separate
@@ -1424,9 +1431,14 @@ export class SqliteTrackStore implements TrackStore {
       to: window?.to ?? Number.POSITIVE_INFINITY,
       inclusiveEnd: !window || window.inclusiveEnd === true,
     }
+    const levels = this.levelsFrom(tolerance)
+    const sought = resolution && !levels ? this.seekThinned(context, range, resolution) : undefined
+    if (sought) {
+      return Promise.resolve(sought)
+    }
     const thinner = resolution ? new Thinner(resolution) : undefined
     const points: TimedPosition[] = []
-    for (const row of this.daysOf(context, range, this.levelsFrom(tolerance))) {
+    for (const row of this.daysOf(context, range, levels)) {
       if (thinner) {
         thinner.push(toTimed(row))
       } else {
@@ -1434,6 +1446,111 @@ export class SqliteTrackStore implements TrackStore {
       }
     }
     return Promise.resolve(thinner ? thinner.finish() : points)
+  }
+
+  /**
+   * getTimed() thinned to a `resolution` much wider than the recording's own
+   * spacing, found by seeking rather than by reading every row: each kept
+   * position is the first at or after the last kept one plus the resolution,
+   * and the pauses longer than `segmentGap` come from a walk that steps a gap
+   * at a time. Four years thinned to a few thousand points would otherwise
+   * read millions of rows to keep them. Undefined where the range holds fewer
+   * than SEEK_RATIO rows per position kept, which a read is faster for.
+   *
+   * The positions are the ones `Thinner` keeps, in the same order where times
+   * are shared. Their `pauseBefore` is the longest pause before them where
+   * that is longer than `segmentGap`, which is all `segment()` judges by, and
+   * otherwise no more than it.
+   */
+  private seekThinned(context: Context, range: TimeRange, resolution: number): TimedPosition[] | undefined {
+    const id = this.idOf(context)
+    const edge = (order: string) =>
+      this.db
+        .prepare(
+          `SELECT rowid AS id, timestamp, ${COORDINATES} FROM positions WHERE context_id = ?${inRange(range)} ORDER BY timestamp ${order}, rowid ${order} LIMIT 1`,
+        )
+        .get(id, range.from, range.to) as unknown as (PositionRow & { id: number }) | undefined
+    const first = edge('ASC')
+    const last = edge('DESC')
+    if (!first || !last) {
+      return undefined
+    }
+    const limit = Math.ceil(((last.timestamp - first.timestamp) / resolution + 1) * SEEK_RATIO)
+    if (!Number.isSafeInteger(limit)) {
+      return undefined
+    }
+    const { n } = this.db
+      .prepare(`SELECT count(*) AS n FROM (SELECT 1 FROM positions WHERE context_id = ?${inRange(range)} LIMIT ?)`)
+      .get(id, range.from, range.to, limit) as { n: number }
+    if (n < limit) {
+      return undefined
+    }
+    const end = range.inclusiveEnd ? '<=' : '<'
+    const nextTime = this.db.prepare(
+      `SELECT timestamp FROM positions WHERE context_id = ? AND timestamp >= ? AND timestamp ${end} ? ORDER BY timestamp LIMIT 1`,
+    )
+    // Stored first of those sharing the time, as a read in rowid order meets them.
+    const firstAt = this.db.prepare(
+      `SELECT rowid AS id, timestamp, ${COORDINATES} FROM positions WHERE context_id = ? AND timestamp = ? ORDER BY rowid LIMIT 1`,
+    )
+    const pauses = this.pausesBetween(id, first.timestamp, last.timestamp)
+    let pause = 0
+    // The longest pause the walk found from the last kept position on, or
+    // what bounds it where none is longer than segmentGap.
+    const pauseUpTo = (from: number, to: number): number => {
+      let longest: number | undefined
+      while (pause < pauses.length && pauses[pause]!.end <= to) {
+        longest = Math.max(longest ?? 0, pauses[pause]!.length)
+        pause++
+      }
+      return longest ?? Math.min(to - from, this.segmentGap)
+    }
+    const kept: TimedPosition[] = [toTimed(first)]
+    let keptLast = first
+    for (;;) {
+      const next = nextTime.get(id, keptLast.timestamp + resolution, range.to) as { timestamp: number } | undefined
+      if (!next) {
+        break
+      }
+      const row = firstAt.get(id, next.timestamp) as unknown as PositionRow & { id: number }
+      kept.push({ ...toTimed(row), pauseBefore: pauseUpTo(keptLast.timestamp, row.timestamp) })
+      keptLast = row
+    }
+    if (keptLast.id !== last.id) {
+      kept.push({ ...toTimed(last), pauseBefore: pauseUpTo(keptLast.timestamp, last.timestamp) })
+    }
+    return kept
+  }
+
+  /**
+   * The pauses longer than `segmentGap` between a context's positions from
+   * `from` to `to`, each by the time it ends, found a gap at a time: the last
+   * position within a gap of one is a step on, and where there is none, the
+   * next is the end of a pause. Two steps cover at least a gap, so the walk
+   * costs a seek per few minutes recorded, however densely.
+   */
+  private pausesBetween(id: number, from: number, to: number): { end: number; length: number }[] {
+    const pauses: { end: number; length: number }[] = []
+    if (this.segmentGap <= 0) {
+      return pauses
+    }
+    const lastWithin = this.db.prepare(
+      'SELECT timestamp FROM positions WHERE context_id = ? AND timestamp > ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1',
+    )
+    const after = this.db.prepare(
+      'SELECT timestamp FROM positions WHERE context_id = ? AND timestamp > ? AND timestamp <= ? ORDER BY timestamp LIMIT 1',
+    )
+    for (let at = from; at < to;) {
+      const step = lastWithin.get(id, at, Math.min(at + this.segmentGap, to)) as { timestamp: number } | undefined
+      if (step) {
+        at = step.timestamp
+        continue
+      }
+      const { timestamp } = after.get(id, at, to) as { timestamp: number }
+      pauses.push({ end: timestamp, length: timestamp - at })
+      at = timestamp
+    }
+    return pauses
   }
 
   timeExtent(context: Context, window?: TimeWindow): Promise<TimeExtent | undefined> {
