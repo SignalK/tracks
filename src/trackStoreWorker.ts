@@ -220,7 +220,13 @@ if (store) {
                 break
               }
               case 'getFilteredTimedTracksJson': {
-                const fragments = await target.getFilteredTimedTracksJson(...operation.args)
+                const fragments = await target.getFilteredTimedTracksJson(
+                  operation.args[0],
+                  operation.args[1],
+                  debug,
+                  operation.args[3],
+                  operation.args[4],
+                )
                 for (const fragment of Object.values(fragments)) transfer.push(fragment.buffer as ArrayBuffer)
                 value = fragments
                 break

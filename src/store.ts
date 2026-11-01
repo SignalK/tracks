@@ -90,6 +90,7 @@ export interface TrackStore {
   getFilteredTimedTracksJson?(
     params: TrackParams,
     selfPosition: LatLngTuple | undefined,
+    debug: Debug | undefined,
     query: TrackQuery | undefined,
     segmentGap: number,
   ): Promise<Record<string, Uint8Array>>

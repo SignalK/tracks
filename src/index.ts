@@ -1310,7 +1310,7 @@ export default function ThePlugin(app: App): Plugin {
         // otherwise come back, most of them as an empty line.
         const result: Promise<Buffer | AllTracksResult> = query.times
           ? (
-              tracks.getFilteredTimedTracksJson?.(params, selfPosition, query, segmentGap) ??
+              tracks.getFilteredTimedTracksJson?.(params, selfPosition, app.debug, query, segmentGap) ??
               tracks
                 .getFilteredTimedTracks(params, selfPosition, app.debug, query)
                 .then((tc: TimedTrackCollection) => timedTracksJson(tc, segmentGap))

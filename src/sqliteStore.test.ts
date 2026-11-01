@@ -216,6 +216,15 @@ describe('a window read at a resolution', () => {
     store.close()
   })
 
+  it('logs a radius match of the timed JSON list to the debug it is given', async () => {
+    const store = seeded()
+    const said: string[] = []
+    const logged = Object.assign((...m: unknown[]) => said.push(String(m[0])), { enabled: true })
+    await store.getFilteredTimedTracksJson({ bbox: null, radius: 1_000_000 }, [60.1, 24.9], logged, undefined, MINUTE)
+    expect(said.some((m) => m.includes(' => '))).toBe(true)
+    store.close()
+  })
+
   // Four days from late on the first, with a pause longer than a day, so a
   // read crosses midnight, skips a whole day, and ends inside a day it read.
   it('reads every position of windows that span several days', async () => {

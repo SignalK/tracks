@@ -125,10 +125,11 @@ export class Tracks implements TrackStore {
   async getFilteredTimedTracksJson(
     params: TrackParams,
     selfPosition: LatLngTuple | undefined,
+    debug: Debug | undefined,
     query: TrackQuery | undefined,
     segmentGap: number,
   ): Promise<Record<string, Uint8Array>> {
-    return timedTracksJson(await this.getFilteredTimedTracks(params, selfPosition, undefined, query), segmentGap)
+    return timedTracksJson(await this.getFilteredTimedTracks(params, selfPosition, debug, query), segmentGap)
   }
 
   /**
