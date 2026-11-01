@@ -1,3 +1,4 @@
+import type { PackedTimedTrack, PackedTrack } from './packedTrack.js'
 import type { SqliteTrackStore } from './sqliteStore.js'
 
 export type StoreMethod =
@@ -33,6 +34,14 @@ export type StoreMethod =
 export type Operation = {
   [K in StoreMethod]: { id: number; method: K; args: Parameters<SqliteTrackStore[K]> }
 }[StoreMethod]
+/** What the worker answers the reads that return positions with, in place of the store's answer. */
+export interface PackedReads {
+  get: PackedTrack
+  getTimed: PackedTimedTrack
+  getAllTracks: { context: string; track: PackedTrack }[]
+  getFilteredTracks: Record<string, PackedTrack>
+  getFilteredTimedTracks: Record<string, PackedTimedTrack>
+}
 export interface StoredName {
   context: string
   name: string

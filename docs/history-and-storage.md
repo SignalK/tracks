@@ -36,8 +36,9 @@ SQLite runs in a dedicated worker, including opening the database, queries,
 pruning and WAL checkpointing. A slow storage operation therefore does not block
 the Signal K server's event loop. This does not make slow storage faster: a track
 query can still wait behind earlier writes, while unrelated server requests can
-continue. Large query results still arrive via structured cloning, and their
-materialization and HTTP serialization take main-thread time, so the worker
+continue. Query results that hold positions come back as typed arrays whose
+buffers are transferred rather than copied, but building the positions from
+them and serializing the HTTP answer still take main-thread time, so the worker
 does not remove every source of server latency.
 
 Positions retain their arrival timestamp (or the supplied observation timestamp)

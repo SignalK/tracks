@@ -3,12 +3,13 @@ import { SelfPositionUnavailableError, UnknownContextError } from './utils.js'
 import { SqliteTrackStore, TransactionStateError } from './sqliteStore.js'
 import type { SqliteStoreConfig } from './sqliteStore.js'
 import type { Debug } from './types.js'
-import type { Operation, WorkerMessage } from './trackStoreProtocol.js'
+import type { Operation, PackedReads, WorkerMessage } from './trackStoreProtocol.js'
+import { packPositions, packTimed } from './packedTrack.js'
 
 if (!parentPort) throw new Error('Track store must run in a worker')
 const port = parentPort
 const config = workerData as { config: SqliteStoreConfig; debugEnabled: boolean }
-const send = (message: WorkerMessage): void => port.postMessage(message)
+const send = (message: WorkerMessage, transfer: ArrayBuffer[] = []): void => port.postMessage(message, transfer)
 const debug: Debug = Object.assign(
   (...args: unknown[]) => {
     if (config.debugEnabled) send({ kind: 'debug', text: args.map(String).join(' ') })
@@ -99,6 +100,7 @@ if (store) {
     }
     processing = true
     const results: Extract<WorkerMessage, { kind: 'result' }>['results'] = []
+    const transfer: ArrayBuffer[] = []
     try {
       for (let i = 0; i < operations.length;) {
         const operation = operations[i]!
@@ -182,25 +184,41 @@ if (store) {
             let value: unknown
             switch (operation.method) {
               case 'get':
-                value = await target.get(...operation.args)
+                value = packPositions(await target.get(...operation.args), transfer) satisfies PackedReads['get']
                 break
               case 'getTimed':
-                value = await target.getTimed(...operation.args)
+                value = packTimed(await target.getTimed(...operation.args), transfer) satisfies PackedReads['getTimed']
                 break
               case 'getAllTracks':
-                value = await target.getAllTracks(...operation.args)
+                value = (await target.getAllTracks(...operation.args)).map(({ context, track }) => ({
+                  context,
+                  track: packPositions(track, transfer),
+                })) satisfies PackedReads['getAllTracks']
                 break
-              case 'getFilteredTracks':
-                value = await target.getFilteredTracks(operation.args[0], operation.args[1], debug, operation.args[3])
-                break
-              case 'getFilteredTimedTracks':
-                value = await target.getFilteredTimedTracks(
+              case 'getFilteredTracks': {
+                const tracks = await target.getFilteredTracks(
                   operation.args[0],
                   operation.args[1],
                   debug,
                   operation.args[3],
                 )
+                const packed: PackedReads['getFilteredTracks'] = {}
+                for (const [context, track] of Object.entries(tracks)) packed[context] = packPositions(track, transfer)
+                value = packed
                 break
+              }
+              case 'getFilteredTimedTracks': {
+                const tracks = await target.getFilteredTimedTracks(
+                  operation.args[0],
+                  operation.args[1],
+                  debug,
+                  operation.args[3],
+                )
+                const packed: PackedReads['getFilteredTimedTracks'] = {}
+                for (const [context, points] of Object.entries(tracks)) packed[context] = packTimed(points, transfer)
+                value = packed
+                break
+              }
               case 'summarize':
                 value = target.summarize(...operation.args)
                 break
@@ -242,7 +260,7 @@ if (store) {
           }
         }
       }
-      send({ kind: 'result', results })
+      send({ kind: 'result', results }, transfer)
     } catch (error) {
       fatal(error)
     } finally {
