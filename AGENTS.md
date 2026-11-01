@@ -21,8 +21,9 @@ npm ci
 npm run build      # vite library build -> dist/index.js, trackStoreWorker.js + index.d.ts; then web/ -> public/
 npm test           # vitest; global setup builds the worker entry first
 npm run test:watch # rebuilds the worker before each rerun
+npm run watch:web  # rebuilds public/ from web/ on each change
 npm run test:e2e   # real signalk-server + real QuestDB; its own CI job
-npm run typecheck  # tsc over src/, web/src/ and web/test/ (also run inside the build, via vite-plugin-checker)
+npm run typecheck  # tsc over src/, web/src/ and web/test/ (the build checks src/ and web/src/ too, via vite-plugin-checker)
 npm run lint       # eslint flat config
 npm run format     # prettier --write
 ```

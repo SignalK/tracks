@@ -2909,6 +2909,29 @@ describe('a GPX file uploaded in slices', () => {
     ])
   })
 
+  // The tracks chosen are compared as a set: in another order they are the
+  // same choice, and a repeated name is not another one.
+  it.each([
+    [['Own', 'Own ship'], ['Own ship', 'Own'], 'resumes'],
+    [['Own', 'Own'], ['Own', 'Own ship'], 'starts anew'],
+    [['Own'], ['Own', 'Own ship'], 'starts anew'],
+  ])('with %j uploading and %j chosen, %s', async (carried, chosen, outcome) => {
+    const size = SLICE_BYTES + 5
+    const current = {
+      id: 'u0',
+      state: 'receiving',
+      received: SLICE_BYTES,
+      size,
+      filename: 'f.gpx',
+      tracks: carried,
+      onOverlap: 'keep',
+      fingerprint: await fingerprintOf(blob(size)),
+    }
+    const { calls, request } = server(size, { current })
+    await uploadGpx({ ...options, tracks: chosen, file: blob(size), request })
+    expect(calls[1]?.method).toBe(outcome === 'resumes' ? 'PUT' : 'POST')
+  })
+
   it('starts anew with another file of the same name and size', async () => {
     const size = SLICE_BYTES + 5
     const other = Object.assign(new Blob([new Uint8Array(size).fill(1)]), { name: 'f.gpx' })
@@ -3084,8 +3107,8 @@ describe('the history import section', () => {
       const view = historyView({ provider: true, state: running })
       const day = new Date(running.nextDay).toLocaleDateString(undefined, { timeZone: 'UTC' })
       expect(day).not.toBe(new Date(running.nextDay).toLocaleDateString())
-      expect(view?.text).toBe(`Importing: 40% done, up to ${day}. 1234 positions filled so far.`)
-      expect(view?.button).toBeUndefined()
+      expect(view!.text).toBe(`Importing: 40% done, up to ${day}. 1234 positions filled so far.`)
+      expect(view!.button).toBeUndefined()
     } finally {
       if (zone === undefined) delete process.env.TZ
       else process.env.TZ = zone
@@ -3098,17 +3121,17 @@ describe('the history import section', () => {
   it('offers to resume an import that stopped, and to import again once it finished', () => {
     const stopped = { ...running, running: false }
     const failed = historyView({ provider: true, state: { ...stopped, error: 'provider unavailable' } })
-    expect(failed?.text).toMatch(/^The import stopped at .+: provider unavailable\. 1234 positions filled\.$/)
+    expect(failed!.text).toMatch(/^The import stopped at .+: provider unavailable\. 1234 positions filled\.$/)
     expect(failed).toMatchObject({ button: 'Resume', state: 'error' })
-    expect(historyView({ provider: true, state: stopped })?.button).toBe('Resume')
+    expect(historyView({ provider: true, state: stopped })!.button).toBe('Resume')
     const done = historyView({ provider: true, state: { ...stopped, finishedAt: '2026-06-11T01:00:00.000Z' } })
-    expect(done?.text).toMatch(/^Imported on .+: 1234 positions filled\.$/)
-    expect(done?.button).toBe('Import again')
+    expect(done!.text).toMatch(/^Imported on .+: 1234 positions filled\.$/)
+    expect(done!.button).toBe('Import again')
     // Shown, but with nothing to read from there is nothing to offer.
     expect(
-      historyView({ provider: false, state: { ...stopped, finishedAt: running.startedAt } })?.button,
+      historyView({ provider: false, state: { ...stopped, finishedAt: running.startedAt } })!.button,
     ).toBeUndefined()
-    expect(historyView({ provider: false, state: stopped })?.button).toBeUndefined()
+    expect(historyView({ provider: false, state: stopped })!.button).toBeUndefined()
   })
 
   /** The section's elements, as stubs the script writes to. */

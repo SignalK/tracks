@@ -2,9 +2,9 @@
  * What the routes the page reads answer, as JSON. Types only: nothing here
  * reaches the built page.
  *
- * The page checks the shape of every answer it uses, since a proxy or an
- * older server can answer something else; these say what a well-formed one
- * holds.
+ * These say what a well-formed answer holds. They are not checked as a
+ * whole: the page checks the parts it goes by, such as the top-level shape,
+ * since a proxy or an older server can answer something else.
  */
 import type { TrackProperties } from '../../src/trackApi.js'
 

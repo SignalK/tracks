@@ -9,7 +9,7 @@
  * server enforces.
  */
 import type { GpxUploadStatus, ImportAnswer, Refusal } from './api.js'
-import { refusal } from './bin.js'
+import { errorName, refusal } from './bin.js'
 import { byId, within } from './dom.js'
 import { isOtherVessel, scanGpx, uploadGpx } from './upload.js'
 import type { ScannedTrack } from './upload.js'
@@ -223,7 +223,7 @@ export function start(): void {
       setTimeout(() => location.reload(), 1500)
     } catch (err) {
       show(
-        err instanceof Error && err.name === 'AbortError'
+        errorName(err) === 'AbortError'
           ? 'Stopped. What was imported stays; importing the file again fills in the rest.'
           : err instanceof Error
             ? err.message
