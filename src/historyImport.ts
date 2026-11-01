@@ -201,9 +201,13 @@ export async function importDay(
  * Read once at a coarse bucket from the epoch, and moved back by one bucket
  * for a provider that stamps buckets on their end.
  */
-export async function historyStart(until: number, history: HistoryImportDeps['history']): Promise<number | undefined> {
-  const seconds = Math.max(FINEST_SECONDS, Math.ceil(until / 1000 / START_PROBE_BUCKETS))
-  const probe = await history(0, until, seconds)
+export async function historyStart(
+  until: number,
+  history: HistoryImportDeps['history'],
+  from = 0,
+): Promise<number | undefined> {
+  const seconds = Math.max(FINEST_SECONDS, Math.ceil((until - from) / 1000 / START_PROBE_BUCKETS))
+  const probe = await history(from, until, seconds)
   if (probe.length === 0) {
     return undefined
   }
@@ -211,7 +215,7 @@ export async function historyStart(until: number, history: HistoryImportDeps['hi
   for (const { timestamp } of probe) {
     earliest = Math.min(earliest, timestamp)
   }
-  return Math.max(0, earliest - seconds * 1000)
+  return Math.max(from, earliest - seconds * 1000)
 }
 
 /**
@@ -240,7 +244,9 @@ export async function runHistoryImport(
   }
   try {
     if (current.nextDay === undefined) {
-      const start = await historyStart(current.startedAt, deps.history)
+      // Not from the epoch with a retention set: what lies before its cutoff
+      // is never imported, and a provider may refuse so long a range.
+      const start = await historyStart(current.startedAt, deps.history, Math.max(0, firstKept()))
       if (start === undefined) {
         await advance({ ...current, finishedAt: now() })
         return current

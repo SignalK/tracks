@@ -145,6 +145,16 @@ describe('historyStart', () => {
   })
 })
 
+describe('historyStart from a cutoff', () => {
+  it('probes only from the cutoff on, at buckets sized for that range', async () => {
+    const { history, calls } = fakeHistory(fixes(day0 + 12 * HOUR, day0 + 13 * HOUR))
+    const start = await historyStart(day0 + DAY_MS, history, day0)
+    expect(calls).toEqual([{ from: day0, to: day0 + DAY_MS, seconds: Math.ceil(DAY_MS / 1000 / 1000) }])
+    expect(start).toBeGreaterThanOrEqual(day0 + 12 * HOUR - 2 * 87_000)
+    expect(start).toBeLessThanOrEqual(day0 + 12 * HOUR)
+  })
+})
+
 describe('runHistoryImport', () => {
   it('fills a recording that has nothing at the finest resolution, day by day', async () => {
     const held = fixes(day0 + 22 * HOUR, day0 + DAY_MS + 2 * HOUR)
@@ -218,11 +228,11 @@ describe('runHistoryImport', () => {
       stopped: () => false,
       keepFrom,
     })
-    expect(final.firstDay).toBe(day0 + DAY_MS)
+    expect(final.firstDay).toBe(day0 + 2 * DAY_MS)
     expect(store.written.map(({ timestamp }) => timestamp)).toEqual(later.map(({ timestamp }) => timestamp))
     expect(final.filled).toBe(later.length)
-    // The days before it are never read.
-    expect(calls.slice(1).some(({ from }) => from < day0 + DAY_MS)).toBe(false)
+    // Nothing before it is read, not even to find where history begins.
+    expect(calls.some(({ from }) => from < day0 + DAY_MS)).toBe(false)
   })
 
   it('leaves out what lies before the cutoff on the first day it keeps', async () => {

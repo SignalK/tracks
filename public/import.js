@@ -21,10 +21,13 @@ const IMPORT_URL = '../../plugins/tracks/imports'
  */
 export const MAX_FILE_BYTES = 25 * 1024 * 1024
 
-/** Points the own vessel's retention, in the plugin's danger zone, would delete within the hour. */
-const EXPIRED = "older than your vessel's track is kept left out."
-
 const points = (count) => `${count.toLocaleString()} point${count === 1 ? '' : 's'}`
+
+/** Points the own vessel's retention, in the plugin's danger zone, would delete within the hour. */
+const tooOld = (count) =>
+  count === 1
+    ? "1 point was left out because it is older than your vessel's track is kept."
+    : `${points(count)} were left out because they are older than your vessel's track is kept.`
 
 /** What an import came to, in words. */
 export function imported({ ids, skippedPoints, overlappingPoints = 0, expiredPoints = 0 }) {
@@ -32,7 +35,7 @@ export function imported({ ids, skippedPoints, overlappingPoints = 0, expiredPoi
     `Imported ${ids.length} track${ids.length === 1 ? '' : 's'}.`,
     ...(skippedPoints > 0 ? [`${points(skippedPoints)} without a time left out.`] : []),
     ...(overlappingPoints > 0 ? [`${points(overlappingPoints)} left out where your vessel already has a track.`] : []),
-    ...(expiredPoints > 0 ? [`${points(expiredPoints)} ${EXPIRED}`] : []),
+    ...(expiredPoints > 0 ? [tooOld(expiredPoints)] : []),
   ].join(' ')
 }
 
@@ -42,7 +45,7 @@ export function uploaded({ imported: count, overlapping, untimed, expired = 0 })
     `Imported ${points(count)} into your vessel's track.`,
     ...(untimed > 0 ? [`${points(untimed)} without a time left out.`] : []),
     ...(overlapping > 0 ? [`${points(overlapping)} left out where your vessel already has a track.`] : []),
-    ...(expired > 0 ? [`${points(expired)} ${EXPIRED}`] : []),
+    ...(expired > 0 ? [tooOld(expired)] : []),
   ].join(' ')
 }
 
