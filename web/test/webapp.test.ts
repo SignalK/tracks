@@ -1375,7 +1375,7 @@ describe('the import form', () => {
   })
 
   /** Stand-ins for the form's elements, enough for start() to wire up. */
-  const formStub = (over: { self?: object; file?: object } = {}) => {
+  const formStub = (over: { self?: object; file?: object; choices?: object; stop?: object } = {}) => {
     const listening = () => ({ addEventListener: () => {} })
     const self = { checked: false, ...listening(), ...over.self }
     const replace = { checked: false, disabled: false }
@@ -1392,10 +1392,13 @@ describe('the import form', () => {
     const elements: Record<string, unknown> = {
       'import-form': form,
       'import-status': status,
-      'import-tracks': { hidden: true, replaceChildren: () => {}, ...listening() },
-      'import-stop': { hidden: true, ...listening() },
+      'import-tracks': { hidden: true, replaceChildren: () => {}, ...listening(), ...over.choices },
+      'import-stop': { hidden: true, ...listening(), ...over.stop },
     }
-    vi.stubGlobal('document', { getElementById: (id: string) => elements[id] })
+    vi.stubGlobal('document', {
+      getElementById: (id: string) => elements[id],
+      createElement: () => ({ append: () => {} }),
+    })
     return { self, replace, button, status, submit: (event: { preventDefault: () => void }) => submit(event) }
   }
 
@@ -1442,6 +1445,49 @@ describe('the import form', () => {
     answer({ ok: false, status: 400, json: () => Promise.resolve({ message: 'No track found' }) })
     await first
     expect(status.textContent).toBe('No track found')
+    expect(button.disabled).toBe(false)
+  })
+
+  it('says an upload of the own vessel was stopped when Stop is pressed', async () => {
+    const xml =
+      '<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Own</name><trkseg>' +
+      '<trkpt lat="1" lon="2"><time>2023-08-29T21:57:38Z</time></trkpt></trkseg></trk></gpx>'
+    const file = Object.assign(new Blob([xml]), { name: 'own.gpx' })
+    let scan: () => Promise<void> = async () => {}
+    let press: () => void = () => {}
+    let posted: () => void = () => {}
+    const posting = new Promise<void>((resolve) => (posted = resolve))
+    const { button, status, submit } = formStub({
+      self: { checked: true },
+      file: {
+        files: [file],
+        addEventListener: (_type: string, handler: () => Promise<void>) => {
+          scan = handler
+        },
+      },
+      choices: { append: () => {}, querySelectorAll: () => [{ value: 'Own' }] },
+      stop: {
+        addEventListener: (_type: string, handler: () => void) => {
+          press = handler
+        },
+      },
+    })
+    // The upload's start is never answered, so only Stop ends it.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: { method?: string }) => {
+        if (init?.method !== 'POST') return Promise.resolve({ ok: false, status: 404 })
+        posted()
+        return new Promise(() => {})
+      }),
+    )
+    startImport()
+    await scan()
+    const uploading = submit({ preventDefault: () => {} })
+    await posting
+    press()
+    await uploading
+    expect(status.textContent).toBe('Stopped. What was imported stays; importing the file again fills in the rest.')
     expect(button.disabled).toBe(false)
   })
 })
@@ -2915,6 +2961,7 @@ describe('a GPX file uploaded in slices', () => {
     [['Own', 'Own ship'], ['Own ship', 'Own'], 'resumes'],
     [['Own', 'Own'], ['Own', 'Own ship'], 'starts anew'],
     [['Own'], ['Own', 'Own ship'], 'starts anew'],
+    [[{}, 'Own'], ['Own', 'Own ship'], 'starts anew'],
   ])('with %j uploading and %j chosen, %s', async (carried, chosen, outcome) => {
     const size = SLICE_BYTES + 5
     const current = {
@@ -3368,6 +3415,20 @@ describe('the danger zone', () => {
     expect(button.disabled).toBe(true)
     expect(keptOpen('Esc')).toBe(false)
     expect(reload).not.toHaveBeenCalled()
+  })
+
+  // What a timed-out fetch rejects with need not be an Error, in a browser or in a stand-in for one.
+  it('says the server did not answer whatever the timeout rejects with', async () => {
+    const { handlers, button, confirm, error, submit } = mount(() => Promise.reject({ name: 'TimeoutError' }))
+    handlers.click!()
+    confirm.value = 'DELETE'
+    handlers.input!()
+    await submit()
+    expect(error.textContent).toBe(
+      'The server did not answer. The database may still have been deleted: reload the page to see.',
+    )
+    expect(confirm.value).toBe('')
+    expect(button.disabled).toBe(true)
   })
 
   it('asks for the word again when the connection fails', async () => {

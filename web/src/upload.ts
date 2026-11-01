@@ -940,8 +940,10 @@ async function bodyOf(response: Response): Promise<UploadAnswer> {
 /** Whether the tracks an upload carries, as the server reported them, are the ones chosen, in any order. */
 function sameTracks(carried: unknown, chosen: readonly string[]): boolean {
   if (!Array.isArray(carried) || carried.length !== chosen.length) return false
+  const names: unknown[] = carried
+  if (!names.every((name): name is string => typeof name === 'string')) return false
   const sorted = [...chosen].sort()
-  return [...(carried as unknown[])].sort().every((name, i) => name === sorted[i])
+  return [...names].sort().every((name, i) => name === sorted[i])
 }
 
 /** Tries at ending an upload, a retry delay apart: a slice still being written holds it. */
