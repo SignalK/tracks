@@ -193,6 +193,8 @@ export interface GpxUploadState {
   overlapping: number
   /** Points of the chosen tracks without a usable time, which a recording cannot place. */
   untimed: number
+  /** Points older than the own vessel's retention keeps, left out; absent in an upload an older version began. */
+  expired?: number
   startedAt: number
   updatedAt: number
 }

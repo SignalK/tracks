@@ -17,7 +17,10 @@ track is asked for. What it holds of the own vessel reaches the store once, thro
 provider installed. See [history-and-storage.md](history-and-storage.md) for what that
 means in practice.
 
-The own vessel is kept indefinitely. Other vessels' positions are kept for the number of
+The own vessel is kept indefinitely, unless **Days to keep the own vessel's track** in the
+plugin settings' danger zone says otherwise: then its positions older than that are deleted for
+good every hour, what GPX imports and the history import wrote into its track included, and
+both imports leave out anything older. Other vessels' positions are kept for the number of
 days set in the plugin settings, also for a vessel that never leaves receiver range — a harbour
 puts hundreds of AIS targets past a receiver in a day, and keeping every one of them forever is
 rarely what anybody wants. Space freed by removing positions is reused for new ones, which slows
@@ -54,7 +57,7 @@ backup of `tracks.db` taken before updating.
 
 ### Keeping tracks for years
 
-The own vessel's track is kept here indefinitely. For a track recorded before Signal K, or while
+The own vessel's track is kept here indefinitely by default. For a track recorded before Signal K, or while
 this plugin was not running, a history provider can hold more:
 [the history import](#importing-from-a-history-provider) copies what the server's default
 provider holds of the own vessel into this plugin's store. Where several providers are installed,

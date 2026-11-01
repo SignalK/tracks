@@ -1301,6 +1301,12 @@ describe('the import form', () => {
     expect(imported({ ids: ['a'], skippedPoints: 0, overlappingPoints: 1 })).toBe(
       'Imported 1 track. 1 point left out where your vessel already has a track.',
     )
+    expect(imported({ ids: ['a'], skippedPoints: 0, expiredPoints: 1 })).toBe(
+      "Imported 1 track. 1 point was left out because it is older than your vessel's track is kept.",
+    )
+    expect(imported({ ids: ['a'], skippedPoints: 0, expiredPoints: 2 })).toBe(
+      "Imported 1 track. 2 points were left out because they are older than your vessel's track is kept.",
+    )
   })
 
   it('says what an upload into the own recording came to, and how far one got', () => {
@@ -1310,6 +1316,9 @@ describe('the import form', () => {
     expect(uploaded({ imported: 1, overlapping: 2, untimed: 3 })).toBe(
       "Imported 1 point into your vessel's track. 3 points without a time left out. " +
         '2 points left out where your vessel already has a track.',
+    )
+    expect(uploaded({ imported: 1, overlapping: 0, untimed: 0, expired: 5 })).toBe(
+      "Imported 1 point into your vessel's track. 5 points were left out because they are older than your vessel's track is kept.",
     )
     expect(progress({ received: 512 * 1024 * 1024, size: 1024 * 1024 * 1024 })).toBe('Importing: 50%, 512 of 1024 MB.')
   })

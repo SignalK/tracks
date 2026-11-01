@@ -145,6 +145,73 @@ describe('historyStart', () => {
   })
 })
 
+describe('historyStart from a cutoff', () => {
+  it('starts at or before the first kept fix for an end-stamped provider', async () => {
+    const { history } = fakeHistory(fixes(day0 + 12 * HOUR, day0 + 13 * HOUR), { stampAtEnd: true })
+    const start = await historyStart(day0 + DAY_MS, history, day0)
+    expect(start).toBeDefined()
+    expect(start).toBeLessThanOrEqual(day0 + 12 * HOUR)
+  })
+
+  it('asks nothing when the cutoff is not before the end', async () => {
+    const { history, calls } = fakeHistory(fixes(day0, day0 + HOUR))
+    await expect(historyStart(day0 + DAY_MS, history, day0 + DAY_MS)).resolves.toBeUndefined()
+    await expect(historyStart(day0 + DAY_MS, history, day0 + 2 * DAY_MS)).resolves.toBeUndefined()
+    expect(calls).toEqual([])
+  })
+
+  it('probes nothing when the cutoff is later on the day the import started', async () => {
+    const { history, calls } = fakeHistory(fixes(day0, day0 + HOUR))
+    const store = fakeStore()
+    const final = await runHistoryImport(begin(day0 + 10 * HOUR), {
+      ...store.deps,
+      history,
+      stopped: () => false,
+      keepFrom: () => day0 + 12 * HOUR,
+    })
+    expect(final.finishedAt).toBeDefined()
+    expect(calls).toEqual([])
+    expect(store.written).toEqual([])
+  })
+
+  it('probes from the exact cutoff, and starts the import at its day', async () => {
+    const { history, calls } = fakeHistory(fixes(day0 + 13 * HOUR, day0 + 14 * HOUR))
+    const store = fakeStore()
+    const final = await runHistoryImport(begin(day0 + DAY_MS), {
+      ...store.deps,
+      history,
+      stopped: () => false,
+      keepFrom: () => day0 + 12 * HOUR,
+    })
+    expect(calls[0]!.from).toBe(day0 + 12 * HOUR)
+    expect(final.firstDay).toBe(day0)
+    expect(store.written).toHaveLength(3600)
+  })
+
+  it('finishes an import whose start lies before the retention cutoff', async () => {
+    const { history, calls } = fakeHistory(fixes(day0, day0 + HOUR))
+    const store = fakeStore()
+    const final = await runHistoryImport(begin(day0 + DAY_MS), {
+      ...store.deps,
+      history,
+      stopped: () => false,
+      keepFrom: () => day0 + 3 * DAY_MS,
+    })
+    expect(final.finishedAt).toBeDefined()
+    expect(final.error).toBeUndefined()
+    expect(calls).toEqual([])
+    expect(store.written).toEqual([])
+  })
+
+  it('probes only from the cutoff on, at buckets sized for that range', async () => {
+    const { history, calls } = fakeHistory(fixes(day0 + 12 * HOUR, day0 + 13 * HOUR))
+    const start = await historyStart(day0 + DAY_MS, history, day0)
+    expect(calls).toEqual([{ from: day0, to: day0 + DAY_MS, seconds: Math.ceil(DAY_MS / 1000 / 1000) }])
+    expect(start).toBeGreaterThanOrEqual(day0 + 12 * HOUR - 2 * 87_000)
+    expect(start).toBeLessThanOrEqual(day0 + 12 * HOUR)
+  })
+})
+
 describe('runHistoryImport', () => {
   it('fills a recording that has nothing at the finest resolution, day by day', async () => {
     const held = fixes(day0 + 22 * HOUR, day0 + DAY_MS + 2 * HOUR)
@@ -204,6 +271,56 @@ describe('runHistoryImport', () => {
     expect(fine).toHaveLength(1)
     expect(fine[0]!.to - fine[0]!.from).toBeLessThanOrEqual(HOUR + 2 * PROBE_SECONDS * 1000)
     expect(store.written).toHaveLength(3600)
+  })
+
+  it('starts at the day the own vessel retention keeps from', async () => {
+    const held = fixes(day0 + 12 * HOUR, day0 + 13 * HOUR)
+    const later = fixes(day0 + 2 * DAY_MS + 12 * HOUR, day0 + 2 * DAY_MS + 13 * HOUR)
+    const { history, calls } = fakeHistory([...held, ...later])
+    const store = fakeStore()
+    const keepFrom = () => day0 + DAY_MS + 6 * HOUR
+    const final = await runHistoryImport(begin(day0 + 3 * DAY_MS), {
+      ...store.deps,
+      history,
+      stopped: () => false,
+      keepFrom,
+    })
+    expect(final.firstDay).toBe(day0 + 2 * DAY_MS)
+    expect(store.written.map(({ timestamp }) => timestamp)).toEqual(later.map(({ timestamp }) => timestamp))
+    expect(final.filled).toBe(later.length)
+    // Nothing before it is read, not even to find where history begins.
+    expect(calls.some(({ from }) => from < day0 + DAY_MS)).toBe(false)
+  })
+
+  it('leaves out what lies before the cutoff on the first day it keeps', async () => {
+    const held = fixes(day0 + 10 * HOUR, day0 + 12 * HOUR)
+    const { history } = fakeHistory(held)
+    const store = fakeStore()
+    const final = await runHistoryImport(begin(day0 + DAY_MS), {
+      ...store.deps,
+      history,
+      stopped: () => false,
+      keepFrom: () => day0 + 11 * HOUR,
+    })
+    const kept = held.filter(({ timestamp }) => timestamp >= day0 + 11 * HOUR)
+    expect(store.written.map(({ timestamp }) => timestamp)).toEqual(kept.map(({ timestamp }) => timestamp))
+    expect(final.filled).toBe(kept.length)
+  })
+
+  it('skips ahead when the retention has moved past the day a resumed import is at', async () => {
+    const held = fixes(day0 + 12 * HOUR, day0 + 13 * HOUR)
+    const later = fixes(day0 + 2 * DAY_MS + 12 * HOUR, day0 + 2 * DAY_MS + 13 * HOUR)
+    const { history } = fakeHistory([...held, ...later])
+    const store = fakeStore()
+    const resumed: HistoryImportState = { ...begin(day0 + 3 * DAY_MS), firstDay: day0, nextDay: day0, inGap: true }
+    const final = await runHistoryImport(resumed, {
+      ...store.deps,
+      history,
+      stopped: () => false,
+      keepFrom: () => day0 + 2 * DAY_MS,
+    })
+    expect(final.finishedAt).toBeDefined()
+    expect(store.written.map(({ timestamp }) => timestamp)).toEqual(later.map(({ timestamp }) => timestamp))
   })
 
   it('leaves a deleted span deleted', async () => {

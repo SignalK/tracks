@@ -230,9 +230,9 @@ describe('an unusable data directory', () => {
   })
 })
 
-// The own vessel's track is never aged out -- it is the one worth keeping, and
-// a year of it is a few megabytes. Only other vessels are pruned, which a busy
-// harbour makes necessary. There is deliberately no setting for the first.
+// The own vessel's track is never aged out by default -- it is the one worth
+// keeping, and a year of it is a few megabytes. Only other vessels are pruned,
+// which a busy harbour makes necessary. The danger zone can age it out too.
 describe('own vessel retention', () => {
   it('keeps the own track however old, while pruning other vessels', async () => {
     vi.useFakeTimers()
@@ -255,6 +255,33 @@ describe('own vessel retention', () => {
       await expect(plugin.getTracks()?.get(self)).resolves.toHaveLength(2)
       // The other vessel, silent for three days, is gone.
       await expect(plugin.getTracks()?.get(other)).rejects.toThrow()
+    } finally {
+      await plugin.stop()
+      vi.useRealTimers()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('deletes the own track past the days the danger zone keeps it', async () => {
+    vi.useFakeTimers()
+    const dir = mkdtempSync(join(tmpdir(), 'sk-tracks-own-'))
+    const { app, emit } = createApp(dir)
+    const plugin = ThePlugin(app)
+    try {
+      await plugin.start({ resolution: 0, aisRetentionDays: 0, dangerZone: { ownRetentionDays: 2 } })
+      const self = SELF_CONTEXT as ContextPosition['context']
+      const other = 'vessels.urn:mrn:imo:mmsi:987654321' as ContextPosition['context']
+      const day = 24 * 60 * 60 * 1000
+      emit(self, [60, 24], Date.now() - 3 * day)
+      emit(self, [60.1, 24.1], Date.now() - day)
+      emit(other, [61, 25], Date.now() - 3 * day)
+
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+
+      const kept = await plugin.getTracks()?.get(self)
+      expect(kept?.map(([lat]) => lat)).toEqual([60.1])
+      // The own retention is the own vessel's alone.
+      await expect(plugin.getTracks()?.get(other)).resolves.toHaveLength(1)
     } finally {
       await plugin.stop()
       vi.useRealTimers()

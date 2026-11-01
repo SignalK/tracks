@@ -39,6 +39,12 @@ export interface HistoryImportDeps {
   stopped: () => boolean
   /** Told of the state after each day. */
   progress?: (state: HistoryImportState) => void
+  /**
+   * The oldest time to import: the own vessel's retention deletes what lies
+   * before it within the hour. The import starts at the day it falls in, and
+   * skips ahead to it when it moved past the day the import is at.
+   */
+  keepFrom?: () => number
   now?: () => number
 }
 
@@ -195,9 +201,17 @@ export async function importDay(
  * Read once at a coarse bucket from the epoch, and moved back by one bucket
  * for a provider that stamps buckets on their end.
  */
-export async function historyStart(until: number, history: HistoryImportDeps['history']): Promise<number | undefined> {
-  const seconds = Math.max(FINEST_SECONDS, Math.ceil(until / 1000 / START_PROBE_BUCKETS))
-  const probe = await history(0, until, seconds)
+export async function historyStart(
+  until: number,
+  history: HistoryImportDeps['history'],
+  from = 0,
+): Promise<number | undefined> {
+  // A retention cutoff past the import's start leaves nothing to find.
+  if (from >= until) {
+    return undefined
+  }
+  const seconds = Math.max(FINEST_SECONDS, Math.ceil((until - from) / 1000 / START_PROBE_BUCKETS))
+  const probe = await history(from, until, seconds)
   if (probe.length === 0) {
     return undefined
   }
@@ -205,7 +219,7 @@ export async function historyStart(until: number, history: HistoryImportDeps['hi
   for (const { timestamp } of probe) {
     earliest = Math.min(earliest, timestamp)
   }
-  return Math.max(0, earliest - seconds * 1000)
+  return Math.max(from, earliest - seconds * 1000)
 }
 
 /**
@@ -220,6 +234,10 @@ export async function runHistoryImport(
   deps: HistoryImportDeps,
 ): Promise<HistoryImportState> {
   const now = deps.now ?? Date.now
+  const firstKept = (): number => {
+    const from = deps.keepFrom?.() ?? Number.NEGATIVE_INFINITY
+    return from === Number.NEGATIVE_INFINITY ? from : startOfDay(from)
+  }
   // Cleared here rather than by the caller: whatever failed before is being
   // tried again.
   let current: HistoryImportState = { ...state }
@@ -230,20 +248,40 @@ export async function runHistoryImport(
   }
   try {
     if (current.nextDay === undefined) {
-      const start = await historyStart(current.startedAt, deps.history)
+      // Not from the epoch with a retention set: what lies before its cutoff
+      // is never imported, and a provider may refuse so long a range.
+      // From the exact cutoff, so a cutoff later than the import's start on
+      // the same day probes nothing; the day it starts at is still whole.
+      const cutoff = deps.keepFrom?.() ?? Number.NEGATIVE_INFINITY
+      const start = await historyStart(current.startedAt, deps.history, Math.max(0, cutoff))
       if (start === undefined) {
         await advance({ ...current, finishedAt: now() })
         return current
       }
-      await advance({ ...current, firstDay: startOfDay(start), nextDay: startOfDay(start) })
+      const firstDay = Math.max(startOfDay(start), firstKept())
+      await advance({ ...current, firstDay, nextDay: firstDay })
     }
     while (current.nextDay! < current.startedAt) {
       if (deps.stopped()) {
         return current
       }
+      if (current.nextDay! < firstKept()) {
+        // A gap open at the end of a skipped day is not open at the next one.
+        current = { ...current, nextDay: firstKept() }
+        delete current.inGap
+        continue
+      }
       const from = current.nextDay!
       const to = Math.min(from + DAY_MS, current.startedAt)
       const day = await importDay(from, to, deps, current.inGap === true)
+      // The day starts before the cutoff on the first day kept, and the
+      // next prune would delete what lies before it.
+      const keepFrom = deps.keepFrom?.() ?? Number.NEGATIVE_INFINITY
+      if (keepFrom > from) {
+        day.runs = day.runs
+          .map((run) => run.filter(({ timestamp }) => timestamp >= keepFrom))
+          .filter((run) => run.length > 0)
+      }
       const next: HistoryImportState = {
         ...current,
         nextDay: to,

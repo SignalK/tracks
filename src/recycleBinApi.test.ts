@@ -350,7 +350,7 @@ describe('an import of the own vessel', () => {
       // 3 recorded, 16 in the 17-minute gap, and 2 in the 3-minute one.
       const times = [...Array.from({ length: 19 }, (_, i) => t0 + (i + 1) * MINUTE), t0 + 21 * MINUTE, t0 + 22 * MINUTE]
       const kept = await importOwn(h, ownPassage(times), 'keep')
-      expect(kept).toEqual({ id: `recorded:${SELF_CONTEXT}`, overlapping: 5 })
+      expect(kept).toEqual({ id: `recorded:${SELF_CONTEXT}`, overlapping: 5, expired: 0 })
       expect(await timesOf(provider, SELF_CONTEXT)).toEqual(
         [...Array.from({ length: 20 }, (_, i) => t0 + i * MINUTE), t0 + 20 * MINUTE, t0 + 23 * MINUTE].map(iso),
       )
@@ -367,7 +367,7 @@ describe('an import of the own vessel', () => {
         geometry: { type: 'MultiLineString', coordinates: [coordinates.slice(0, 3), coordinates.slice(1)] },
         properties: { coordTimes: [times.slice(0, 3).map(iso), times.slice(1).map(iso)], context: SELF_CONTEXT },
       }
-      expect(await importOwn(h, seams, 'keep')).toEqual({ id: `recorded:${SELF_CONTEXT}`, overlapping: 2 })
+      expect(await importOwn(h, seams, 'keep')).toEqual({ id: `recorded:${SELF_CONTEXT}`, overlapping: 2, expired: 0 })
       expect(await timesOf(provider, SELF_CONTEXT)).toEqual(times.map(iso))
     }))
 
