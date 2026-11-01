@@ -33,5 +33,28 @@ export default tseslint.config(
     ],
     ...tseslint.configs.disableTypeChecked,
   },
+  {
+    // The repository is TypeScript only: a JavaScript source would ship
+    // unchecked by tsc.
+    files: ['**/*.{js,mjs,cjs,jsx}'],
+    ...tseslint.configs.disableTypeChecked,
+    plugins: {
+      local: {
+        rules: {
+          'no-javascript': {
+            meta: { type: 'problem', schema: [] },
+            create: (context) => ({
+              Program: (node) =>
+                context.report({
+                  node,
+                  message: 'Write this in TypeScript: the repository has no JavaScript sources.',
+                }),
+            }),
+          },
+        },
+      },
+    },
+    rules: { ...tseslint.configs.disableTypeChecked.rules, 'local/no-javascript': 'error' },
+  },
   prettier,
 )
