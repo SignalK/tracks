@@ -12,6 +12,7 @@ export type StoreMethod =
   | 'getAllTracks'
   | 'getFilteredTracks'
   | 'getFilteredTimedTracks'
+  | 'getFilteredTimedTracksJson'
   | 'summarize'
   | 'timeExtent'
   | 'countTimed'

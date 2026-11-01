@@ -155,7 +155,7 @@ describe('GET /tracks', () => {
   it('answers 500, and logs why, when the store fails to read the list', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])
     vi.spyOn(AsyncTrackStore.prototype, 'getFilteredTracks').mockRejectedValue(new Error('disk I/O error'))
-    vi.spyOn(AsyncTrackStore.prototype, 'getFilteredTimedTracks').mockRejectedValue(new Error('disk I/O error'))
+    vi.spyOn(AsyncTrackStore.prototype, 'getFilteredTimedTracksJson').mockRejectedValue(new Error('disk I/O error'))
 
     for (const query of ['', '?times']) {
       const res = await request(h.app).get(`${API}/tracks${query}`).expect(500)
@@ -457,6 +457,68 @@ describe('GET /tracks?times', () => {
 
     expect(Object.keys(timed.body).sort()).toEqual(Object.keys(plain.body).sort())
     expect(Object.keys(plain.body)).toEqual([SELF_CONTEXT])
+  })
+
+  it('answers each vessel in the shape and member order of the untimed list', async () => {
+    const res = await request(seeded().app).get(`${API}/tracks?${SINCE}&times`).expect(200)
+
+    expect(res.type).toBe('application/json')
+    expect(res.text).toBe(
+      JSON.stringify({
+        [SELF_CONTEXT]: {
+          type: 'MultiLineString',
+          coordinates: [
+            [
+              [24.9, 60.1],
+              [25.0, 60.2],
+            ],
+          ],
+          times: [['2026-08-14T09:00:00.000Z', '2026-08-14T09:01:00.000Z']],
+          isSelf: true,
+          name: 'Own Ship',
+        },
+        [OTHER_CONTEXT]: {
+          type: 'MultiLineString',
+          coordinates: [[[24.7, 60.3]]],
+          times: [['2026-08-14T09:02:00.000Z']],
+          isSelf: false,
+          name: 'AIS 987654321',
+        },
+      }),
+    )
+  })
+
+  it('answers the same from a store without getFilteredTimedTracksJson', async () => {
+    const url = `${API}/tracks?${SINCE}&times`
+    const fromWorker = await request(seeded().app).get(url).expect(200)
+    const proto: { getFilteredTimedTracksJson?: unknown } = AsyncTrackStore.prototype
+    const original = proto.getFilteredTimedTracksJson
+    proto.getFilteredTimedTracksJson = undefined
+    const read = vi.spyOn(AsyncTrackStore.prototype, 'getFilteredTimedTracks')
+    try {
+      const fallback = await request(seeded().app).get(url).expect(200)
+      expect(read).toHaveBeenCalled()
+      expect(fallback.type).toBe('application/json')
+      expect(fallback.text).toBe(fromWorker.text)
+    } finally {
+      proto.getFilteredTimedTracksJson = original
+    }
+  })
+
+  it('answers an empty object when no vessel has positions in the window', async () => {
+    const res = await request(seeded().app).get(`${API}/tracks?times&from=2026-08-13T00:00:00Z&to=2026-08-13T01:00:00Z`)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({})
+  })
+
+  it('answers 503 for a radius query with no self position', async () => {
+    const h = (harness = createHarness({}))
+    h.emit(OTHER_CONTEXT, [60.2, 24.8])
+
+    const res = await request(h.app).get(`${API}/tracks?radius=1000&times`).expect(503)
+
+    expect(res.body.message).toMatch(/No position for the own vessel/)
   })
 
   it('applies the time window to the listing', async () => {
