@@ -35,10 +35,14 @@ function column(
   return values
 }
 
-function packCoordinates(positions: LatLngTuple[], transfer: ArrayBuffer[]): Float64Array {
-  const coordinates = new Float64Array(positions.length * 2)
-  for (let i = 0; i < positions.length; i++) {
-    const [lat, lon] = positions[i]!
+function packCoordinates(
+  count: number,
+  position: (index: number) => LatLngTuple,
+  transfer: ArrayBuffer[],
+): Float64Array {
+  const coordinates = new Float64Array(count * 2)
+  for (let i = 0; i < count; i++) {
+    const [lat, lon] = position(i)
     coordinates[2 * i] = lat
     coordinates[2 * i + 1] = lon
   }
@@ -48,7 +52,7 @@ function packCoordinates(positions: LatLngTuple[], transfer: ArrayBuffer[]): Flo
 
 /** Packs `positions`, adding the buffers to transfer to `transfer`. */
 export function packPositions(positions: LatLngTuple[], transfer: ArrayBuffer[]): PackedTrack {
-  return { coordinates: packCoordinates(positions, transfer) }
+  return { coordinates: packCoordinates(positions.length, (i) => positions[i]!, transfer) }
 }
 
 export function unpackPositions({ coordinates }: PackedTrack): LatLngTuple[] {
@@ -63,10 +67,7 @@ export function packTimed(points: TimedPosition[], transfer: ArrayBuffer[]): Pac
   for (let i = 0; i < points.length; i++) timestamps[i] = points[i]!.timestamp
   transfer.push(timestamps.buffer)
   const packed: PackedTimedTrack = {
-    coordinates: packCoordinates(
-      points.map(({ position }) => position),
-      transfer,
-    ),
+    coordinates: packCoordinates(points.length, (i) => points[i]!.position, transfer),
     timestamps,
   }
   const pauseBefore = column(points, (point) => point.pauseBefore, transfer)
