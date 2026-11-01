@@ -361,6 +361,8 @@ export interface GpxUploadStatus {
   imported: number
   overlapping: number
   untimed: number
+  /** Points left out because they are older than the own vessel's retention keeps. */
+  expired: number
   startedAt: string
   updatedAt: string
 }
@@ -370,6 +372,11 @@ export interface GpxUploadDeps {
   save: (state: GpxUploadState, parts: UploadPart[]) => Promise<GpxUploadState>
   /** Told after a slice replaced part of the recording. */
   replaced: () => void
+  /**
+   * The oldest time a slice writes: the own vessel's retention deletes what
+   * lies before it within the hour. Everything when unset.
+   */
+  keepFrom?: () => number
   now?: () => number
 }
 
@@ -505,6 +512,7 @@ export class GpxUpload {
       imported,
       overlapping,
       untimed,
+      expired = 0,
       startedAt,
       updatedAt,
     } = this.state
@@ -521,6 +529,7 @@ export class GpxUpload {
       imported,
       overlapping,
       untimed,
+      expired,
       startedAt: new Date(startedAt).toISOString(),
       updatedAt: new Date(updatedAt).toISOString(),
     }
@@ -577,19 +586,30 @@ export class GpxUpload {
     try {
       const end = offset + bytes.length === this.state.size
       const read = await this.reader.read(bytes, end)
-      const parts = [...read.parts].map(([segment, points]): UploadPart => ({
+      const readParts = [...read.parts].map(([segment, points]): UploadPart => ({
         segment,
         // Within a segment only: a segment is a stretch of recording, and
         // TimeZero's exports overlap where their blocks of points join.
         points: points.sort((a, b) => a.timestamp - b.timestamp),
         continues: segment === this.state.lastSegment,
       }))
-      const lastSegment = parts.at(-1)?.segment ?? this.state.lastSegment
+      const lastSegment = readParts.at(-1)?.segment ?? this.state.lastSegment
+      // A part left with no points is still saved: the store ends the
+      // segment before it there, so the slice after does not take that
+      // segment's state for its own.
+      const keepFrom = this.deps.keepFrom?.() ?? Number.NEGATIVE_INFINITY
+      let expired = 0
+      const parts = readParts.map((part): UploadPart => {
+        const points = part.points.filter(({ timestamp }) => timestamp >= keepFrom)
+        expired += part.points.length - points.length
+        return points.length === part.points.length ? part : { ...part, points }
+      })
       const next: GpxUploadState = {
         ...this.state,
         ...(lastSegment === undefined ? {} : { lastSegment }),
         ...(read.checkpoint === undefined ? {} : { checkpoint: read.checkpoint }),
         untimed: this.state.untimed + read.untimed,
+        expired: (this.state.expired ?? 0) + expired,
         updatedAt: this.now(),
         ...(read.error !== undefined ? { state: 'failed', error: read.error } : end ? { state: 'finished' } : {}),
       }

@@ -13,6 +13,7 @@ import type { GpxUploadState, TimedPosition, UploadCheckpoint, UploadPart } from
 
 const GPX_NS = 'http://www.topografix.com/GPX/1/1'
 const t0 = Date.UTC(2025, 6, 1, 12)
+const DAY = 24 * 60 * 60 * 1000
 const iso = (ms: number) => new Date(ms).toISOString()
 const START: UploadCheckpoint = { offset: 0, open: [], segments: 0 }
 
@@ -255,6 +256,37 @@ describe('an upload', () => {
     await upload.append(0, bytes.subarray(0, cut))
     await upload.append(cut, bytes.subarray(cut))
     expect(writes[1]![0]).toMatchObject({ segment: 1, continues: true })
+  })
+
+  it('leaves out what is older than the own vessel retention keeps, and counts it', async () => {
+    const { writes, save } = saving()
+    const upload = new GpxUpload(start(), { save, replaced: () => undefined, keepFrom: () => t0 + 1000 })
+    await upload.append(0, bytes)
+    expect(upload.status).toMatchObject({ state: 'finished', imported: 2, expired: 2 })
+    // A part left empty still reaches the store, which ends its segment there.
+    expect(writes[0]!.map(({ segment, points }) => [segment, points.map(({ timestamp }) => timestamp)])).toEqual([
+      [1, [t0 + 1000]],
+      [2, [t0 + 600_000]],
+      [3, []],
+    ])
+  })
+
+  it('saves the parts of a slice with nothing the retention keeps, empty', async () => {
+    const { writes, save } = saving()
+    const upload = new GpxUpload(start(), { save, replaced: () => undefined, keepFrom: () => t0 + DAY })
+    await upload.append(0, bytes)
+    expect(upload.status).toMatchObject({ state: 'finished', imported: 0, expired: 4 })
+    expect(writes[0]!.map(({ segment, points }) => [segment, points.length])).toEqual([
+      [1, 0],
+      [2, 0],
+      [3, 0],
+    ])
+  })
+
+  it('reports no expired points without a retention', async () => {
+    const upload = new GpxUpload(start(), { ...saving(), replaced: () => undefined })
+    await upload.append(0, bytes)
+    expect(upload.status.expired).toBe(0)
   })
 
   it('refuses a slice out of step, or past the file', async () => {

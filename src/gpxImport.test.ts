@@ -178,6 +178,24 @@ describe('the GPX upload route', () => {
       expect(stored.at(-1)!.timestamp).toBe(t0 + 50 * MINUTE + 1199 * 1000)
     }))
 
+  it('leaves out of the own recording what is older than the danger zone keeps it, and counts it', async () => {
+    const h = createHarness({ config: { dangerZone: { ownRetentionDays: 1 } } })
+    try {
+      const now = Date.now()
+      const old = now - 3 * 24 * 60 * MINUTE
+      const res = await upload(h, gpxFile(trk('Morning', [old, now - 2 * MINUTE, now - MINUTE])), '?self=true')
+      expect(res.status).toBe(201)
+      expect(res.body).toMatchObject({ overlappingPoints: 0, expiredPoints: 1 })
+      const stored = await h.store()!.getTimed(SELF_CONTEXT)
+      expect(stored.map(({ timestamp }) => timestamp)).toEqual([now - 2 * MINUTE, now - MINUTE])
+      // Another boat's track is an import of its own, which no retention reaches.
+      const other = await upload(h, gpxFile(trk('Friend', [old, old + MINUTE])))
+      expect(other.body).toMatchObject({ expiredPoints: 0 })
+    } finally {
+      await h.stop()
+    }
+  })
+
   it('reports the points it left out where the recording already has positions', () =>
     withHarness(async (h) => {
       h.seedTrack(SELF_CONTEXT, [[60, 24]], [t0])

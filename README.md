@@ -11,7 +11,8 @@ trails through the plugin's v1 routes.
 ## What it does
 
 - **Records the own vessel and AIS targets.** The own vessel's track is kept for good, other
-  vessels' for 7 days by default. Turn **Record other vessels (AIS)** off to record the own vessel
+  vessels' for 7 days by default. A setting in the danger zone can delete the own track after a
+  number of days, permanently. Turn **Record other vessels (AIS)** off to record the own vessel
   only. Base stations and aids to navigation are not recorded.
 - **Leaves out glitches.** A position that would mean an impossible speed, such as a GPS fix
   far off for a moment, is not recorded.
@@ -90,6 +91,7 @@ back.
 | Pause recording while navigation.state is one of            | The states in which the own vessel is not recorded.                  | moored, not-under-way, aground |
 | Own vessel resolution by navigation.state                   | A different resolution for each state.                               | every second while anchored    |
 | Resolution for other vessels                                | The resolution for AIS targets.                                      | the track resolution           |
+| Danger zone: Days to keep the own vessel's track            | Deletes older own positions for good, no recycle bin. 0 keeps them.  | 0                              |
 
 The plugin's configuration page explains each setting.
 

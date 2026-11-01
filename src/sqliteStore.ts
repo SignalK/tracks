@@ -3508,10 +3508,12 @@ export class SqliteTrackStore implements TrackStore {
       let replaced = state.replaced ?? []
       let binned = continues ? state.binned : undefined
       for (const [p, { points }] of parts.entries()) {
+        // Before the check below: a part with no points left still ends the
+        // segment before it.
+        if (p > 0) binned = undefined
         const first = points[0]?.timestamp
         const last = points.at(-1)?.timestamp
         if (first === undefined || last === undefined) continue
-        if (p > 0) binned = undefined
         // A segment's span takes in the time between its slices as well.
         const span: Span = [Math.min(first, binned?.from ?? first), Math.max(last, binned?.to ?? last)]
         let entry = binned?.id === undefined ? undefined : { id: binned.id, deletedAt: binned.deletedAt ?? now }

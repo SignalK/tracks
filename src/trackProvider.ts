@@ -64,6 +64,8 @@ export interface TrackProviderDeps {
   importable: (context: string) => Promise<boolean>
   /** Called after a delete, so whatever caches the deleted spans reloads them. */
   deleted: () => void
+  /** The oldest time a track written into the own vessel's recording keeps; see KeepTrackDeps. */
+  keepFrom?: () => number
   /** The most positions read for a recorded track's answer to a counted query; MAX_TRACK_POINTS unless set. */
   maxTrackPoints?: number
 }
@@ -551,6 +553,7 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
         selfContext: deps.selfContext(),
         importable: deps.importable,
         deleted: deps.deleted,
+        ...(deps.keepFrom === undefined ? {} : { keepFrom: deps.keepFrom() }),
       },
       onOverlap,
     )
@@ -951,12 +954,19 @@ export interface KeepTrackDeps {
   /** Whether the history import could bring the vessel's track back; see TrackProviderDeps. */
   importable: (context: string) => Promise<boolean>
   deleted: () => void
+  /**
+   * The oldest time a track written into the own vessel's recording keeps:
+   * the own vessel's retention deletes what lies before it within the hour.
+   */
+  keepFrom?: number
 }
 
 export interface KeptTrack {
   id: string
   /** Points left out because the vessel already had positions there. */
   overlapping: number
+  /** Points left out because they are older than the own vessel's retention keeps. */
+  expired: number
 }
 
 /**
@@ -968,28 +978,35 @@ export interface KeptTrack {
  * recording has nothing (see `fillGaps`), judged as the store writes
  * it; with `replace`, in place of what was recorded over the same time. Everything else is kept as an import: another vessel's track is not
  * this boat's recording, and an untimed one cannot be placed in it.
+ * What lies before `keepFrom` is left out of the recording and counted as
+ * `expired`; an import of another vessel is never cut, since no retention
+ * reaches it.
  */
 export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOverlap: OnOverlap): Promise<KeptTrack> {
   const context = track.context === undefined ? undefined : resolveSelf(deps.selfContext)(track.context)
   if (context === deps.selfContext && isTimed(track)) {
-    const segments = track.segments.map((points) =>
-      points.map(({ position, timestamp }): TimedPosition => ({ position, timestamp: timestamp! })),
-    )
+    const keepFrom = deps.keepFrom ?? Number.NEGATIVE_INFINITY
+    let expired = 0
+    const segments = track.segments.map((points) => {
+      const kept = points.filter(({ timestamp }) => timestamp! >= keepFrom)
+      expired += points.length - kept.length
+      return kept.map(({ position, timestamp }): TimedPosition => ({ position, timestamp: timestamp! }))
+    })
     if (onOverlap === 'keep') {
       // Judged inside the write, with nothing read first: another upload or a
       // restore could write into a gap between a read and the write. Not
       // recordTrack, which bins what lies in each span.
       const overlapping = await deps.store.fillTrack(context, segments)
-      return { id: recordedId(context), overlapping }
+      return { id: recordedId(context), overlapping, expired }
     }
     // As a delete does: the binned span stays where the store held nothing,
     // so a history import later leaves the old passage out too.
     await deps.store.recordTrack(context, segments, Date.now(), await deps.importable(context))
     deps.deleted()
-    return { id: recordedId(context), overlapping: 0 }
+    return { id: recordedId(context), overlapping: 0, expired }
   }
   await deps.store.storeImport(track)
-  return { id: track.id, overlapping: 0 }
+  return { id: track.id, overlapping: 0, expired: 0 }
 }
 
 /** v2 accepts the `self` alias; the store keys on the qualified context. */

@@ -39,6 +39,12 @@ export interface HistoryImportDeps {
   stopped: () => boolean
   /** Told of the state after each day. */
   progress?: (state: HistoryImportState) => void
+  /**
+   * The oldest time to import: the own vessel's retention deletes what lies
+   * before it within the hour. The import starts at the day it falls in, and
+   * skips ahead to it when it moved past the day the import is at.
+   */
+  keepFrom?: () => number
   now?: () => number
 }
 
@@ -220,6 +226,10 @@ export async function runHistoryImport(
   deps: HistoryImportDeps,
 ): Promise<HistoryImportState> {
   const now = deps.now ?? Date.now
+  const firstKept = (): number => {
+    const from = deps.keepFrom?.() ?? Number.NEGATIVE_INFINITY
+    return from === Number.NEGATIVE_INFINITY ? from : startOfDay(from)
+  }
   // Cleared here rather than by the caller: whatever failed before is being
   // tried again.
   let current: HistoryImportState = { ...state }
@@ -235,11 +245,18 @@ export async function runHistoryImport(
         await advance({ ...current, finishedAt: now() })
         return current
       }
-      await advance({ ...current, firstDay: startOfDay(start), nextDay: startOfDay(start) })
+      const firstDay = Math.max(startOfDay(start), firstKept())
+      await advance({ ...current, firstDay, nextDay: firstDay })
     }
     while (current.nextDay! < current.startedAt) {
       if (deps.stopped()) {
         return current
+      }
+      if (current.nextDay! < firstKept()) {
+        // A gap open at the end of a skipped day is not open at the next one.
+        current = { ...current, nextDay: firstKept() }
+        delete current.inGap
+        continue
       }
       const from = current.nextDay!
       const to = Math.min(from + DAY_MS, current.startedAt)

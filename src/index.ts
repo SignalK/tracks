@@ -230,6 +230,11 @@ interface TracksPluginConfig {
   otherVesselsResolution?: number
   /** Metres a stored position older than a day may lie off its track and be deleted. 0 deletes none. */
   storageTolerance?: number
+  /** Settings that delete what cannot be brought back, apart from the rest. */
+  dangerZone?: {
+    /** Days the own vessel's positions are kept. 0 keeps them indefinitely. */
+    ownRetentionDays?: number
+  }
 }
 
 const toLngLat = ([lat, lng]: LatLngTuple): LngLatTuple => [lng, lat]
@@ -521,6 +526,13 @@ export default function ThePlugin(app: App): Plugin {
   let binRetentionMs = DEFAULT_RECYCLE_BIN_DAYS * DAY_MS
   /** How long other vessels' positions are kept, as set; 0 keeps them. */
   let aisRetentionDays = DEFAULT_AIS_RETENTION_DAYS
+  /** How long the own vessel's positions are kept, in milliseconds; 0 keeps them. */
+  let ownRetentionMs = 0
+  /**
+   * The oldest time an import into the own vessel's recording writes: what
+   * lies before it, the next prune would delete again.
+   */
+  const keepFrom = (): number => (ownRetentionMs > 0 ? Date.now() - ownRetentionMs : Number.NEGATIVE_INFINITY)
   let recordOtherVessels = true
   /** The configuration the plugin runs with, while it runs. */
   let startedWith: TracksPluginConfig | undefined
@@ -604,6 +616,7 @@ export default function ThePlugin(app: App): Plugin {
       replaced: () => {
         deletedSpans = undefined
       },
+      keepFrom,
     })
 
   /** The upload the store holds, if any. */
@@ -641,6 +654,7 @@ export default function ThePlugin(app: App): Plugin {
         )[state.context] ?? [],
       deleted: () => deletedSpansOf(state.context),
       save: async (next, runs, since) => store.saveHistoryImport!(next, runs, since),
+      keepFrom,
       // A restart replaces the store, and the new one goes on by itself.
       stopped: () => run.stop || tracks !== store,
       progress: (next) => {
@@ -692,6 +706,7 @@ export default function ThePlugin(app: App): Plugin {
       const segmentGapMinutes = toNumber(config.segmentGapMinutes) ?? DEFAULT_SEGMENT_GAP_MINUTES
       segmentGap = segmentGapMinutes > 0 ? segmentGapMinutes * 60 * 1000 : 0
       binRetentionMs = Math.max(1, toNumber(config.recycleBinDays) ?? DEFAULT_RECYCLE_BIN_DAYS) * DAY_MS
+      ownRetentionMs = Math.max(0, toNumber(config.dangerZone?.ownRetentionDays) ?? 0) * DAY_MS
       deletedSpans = undefined
 
       // Rebuilt on every start so a changed ceiling takes effect, and so the
@@ -737,11 +752,11 @@ export default function ThePlugin(app: App): Plugin {
           {
             file: join(dataDir, 'tracks.db'),
             resolution: toNumber(resolution) ?? DEFAULT_RESOLUTION,
-            // The own vessel's track is never aged out: it is the one worth
-            // keeping, and a thousand hours under way at the default
-            // resolution take about 80 MB. Other vessels are pruned by
-            // aisRetentionDays.
-            retention: 0,
+            // The own vessel's track is kept indefinitely unless the danger
+            // zone says otherwise: it is the one worth keeping, and a thousand
+            // hours under way at the default resolution take about 80 MB.
+            // Other vessels are pruned by aisRetentionDays.
+            retention: ownRetentionMs,
             binRetention: binRetentionMs,
             storageTolerance: Math.max(0, toNumber(config.storageTolerance) ?? DEFAULT_STORAGE_TOLERANCE),
             maxSpeedKnots,
@@ -899,6 +914,7 @@ export default function ThePlugin(app: App): Plugin {
         deleted: () => {
           deletedSpans = undefined
         },
+        keepFrom,
       })
       app.registerTrackApiProvider?.(trackProvider)
       // A history import a stop or a restart broke off goes on by itself.
@@ -1465,7 +1481,7 @@ export default function ThePlugin(app: App): Plugin {
             return
           }
           const converted = read.map((gpx) => fromGpxTrack(gpx, context ?? gpx.context))
-          const kept: { id: string; overlapping: number }[] = []
+          const kept: { id: string; overlapping: number; expired: number }[] = []
           try {
             for (const { track } of converted) {
               kept.push(await provider.importTrack(track, onOverlap))
@@ -1481,6 +1497,7 @@ export default function ThePlugin(app: App): Plugin {
             ids: kept.map(({ id }) => `${PLUGIN_ID}:${id}`),
             skippedPoints: converted.reduce((sum, { skippedPoints }) => sum + skippedPoints, 0),
             overlappingPoints: kept.reduce((sum, { overlapping }) => sum + overlapping, 0),
+            expiredPoints: kept.reduce((sum, { expired }) => sum + expired, 0),
           })
         })()
       })
@@ -2017,6 +2034,22 @@ export default function ThePlugin(app: App): Plugin {
           title: 'Resolution for other vessels (milliseconds)',
           description:
             'Spacing of recorded fixes for AIS and other vessels. Leave empty to use the track resolution. Their navigation.state is not used: it is what the transponder was last set to, and often stale.',
+        },
+        dangerZone: {
+          type: 'object',
+          title: 'Danger zone',
+          description:
+            'Settings here delete data for good. Nothing deleted by them goes to the recycle bin, and nothing can bring it back.',
+          properties: {
+            ownRetentionDays: {
+              type: 'integer',
+              minimum: 0,
+              title: "Days to keep the own vessel's track",
+              description:
+                "0 (the default) keeps the own vessel's track indefinitely. Any other number PERMANENTLY DELETES the own vessel's positions once they are older than that many days, every hour, with no recycle bin and no way to restore them. That includes what GPX imports and the history import wrote into the own vessel's track; both leave out anything older than this. Other boats' imported tracks are not affected. To keep the own track, archive it elsewhere first: a GPX export, a backup of tracks.db, or a history provider.",
+              default: 0,
+            },
+          },
         },
       },
     },

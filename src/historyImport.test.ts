@@ -206,6 +206,40 @@ describe('runHistoryImport', () => {
     expect(store.written).toHaveLength(3600)
   })
 
+  it('starts at the day the own vessel retention keeps from', async () => {
+    const held = fixes(day0 + 12 * HOUR, day0 + 13 * HOUR)
+    const later = fixes(day0 + 2 * DAY_MS + 12 * HOUR, day0 + 2 * DAY_MS + 13 * HOUR)
+    const { history, calls } = fakeHistory([...held, ...later])
+    const store = fakeStore()
+    const keepFrom = () => day0 + DAY_MS + 6 * HOUR
+    const final = await runHistoryImport(begin(day0 + 3 * DAY_MS), {
+      ...store.deps,
+      history,
+      stopped: () => false,
+      keepFrom,
+    })
+    expect(final.firstDay).toBe(day0 + DAY_MS)
+    expect(store.written.map(({ timestamp }) => timestamp)).toEqual(later.map(({ timestamp }) => timestamp))
+    // The days before it are never read.
+    expect(calls.slice(1).some(({ from }) => from < day0 + DAY_MS)).toBe(false)
+  })
+
+  it('skips ahead when the retention has moved past the day a resumed import is at', async () => {
+    const held = fixes(day0 + 12 * HOUR, day0 + 13 * HOUR)
+    const later = fixes(day0 + 2 * DAY_MS + 12 * HOUR, day0 + 2 * DAY_MS + 13 * HOUR)
+    const { history } = fakeHistory([...held, ...later])
+    const store = fakeStore()
+    const resumed: HistoryImportState = { ...begin(day0 + 3 * DAY_MS), firstDay: day0, nextDay: day0, inGap: true }
+    const final = await runHistoryImport(resumed, {
+      ...store.deps,
+      history,
+      stopped: () => false,
+      keepFrom: () => day0 + 2 * DAY_MS,
+    })
+    expect(final.finishedAt).toBeDefined()
+    expect(store.written.map(({ timestamp }) => timestamp)).toEqual(later.map(({ timestamp }) => timestamp))
+  })
+
   it('leaves a deleted span deleted', async () => {
     const deleted = [{ from: day0 + 9 * HOUR + 30 * MINUTE, to: day0 + 10 * HOUR }]
     const { history } = fakeHistory(fixes(day0 + 9 * HOUR, day0 + 11 * HOUR))

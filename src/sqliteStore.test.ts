@@ -4295,6 +4295,31 @@ describe('a GPX file saved in slices', () => {
     }
   })
 
+  // As the upload saves a segment whose points the own vessel's retention all
+  // left out: the segment before ends there, and the one it begins bins into
+  // an entry of its own when its points come in the next slice.
+  it('ends a segment at a part left with no points', () => {
+    const store = newStore()
+    try {
+      store.fillTrack(ctx, [run(60, t0, 121, SECOND, 500)])
+      const first = run(61, t0, 61)
+      const second = run(62, t0 + 80 * SECOND, 41)
+      const state = saveSlices(store, uploading('replace'), [
+        [[1, first.slice(0, 40)]],
+        [
+          [1, first.slice(40)],
+          [2, []],
+        ],
+      ])
+      expect(state.binned).toBeUndefined()
+      saveSlices(store, state, [[[2, second]]])
+      expect(store.binEntries().map(({ pointCount }) => pointCount)).toEqual(expect.arrayContaining([60, 40]))
+      expect(store.binEntries()).toHaveLength(2)
+    } finally {
+      store.close()
+    }
+  })
+
   it.each([
     ['restored', (store: SqliteTrackStore, id: number) => store.restoreFromBin(id)],
     ['purged', (store: SqliteTrackStore, id: number) => store.purgeFromBin(id)],
