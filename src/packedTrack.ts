@@ -8,7 +8,8 @@ import type { LatLngTuple, TimedPosition } from './types.js'
  * instead, and only the receiving side builds the objects.
  *
  * `pauseBefore` and `span` hold `NaN` where a point has none, and each of the
- * optional columns is left out when no point has a value for it.
+ * optional columns is left out when no point has a value for it. A
+ * `breakBefore` of `false` comes back absent, which means the same.
  */
 export interface PackedTrack {
   /** Latitude and longitude of each point in turn. */

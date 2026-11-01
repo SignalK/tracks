@@ -24,6 +24,18 @@ describe('packed tracks', () => {
     expect(unpackTimed(packed)).toStrictEqual([{ position: [60, 24], timestamp: 100 }])
   })
 
+  it('drops an explicit breakBefore: false, which means what its absence does', () => {
+    const points: TimedPosition[] = [
+      { position: [60, 24], timestamp: 100, breakBefore: false },
+      { position: [60.5, 24.5], timestamp: 200, breakBefore: true },
+    ]
+    const unpacked = unpackTimed(packTimed(points, []))
+    expect(unpacked[0]).toStrictEqual({ position: [60, 24], timestamp: 100 })
+    expect(unpacked[0]).not.toHaveProperty('breakBefore')
+    expect(unpacked[1]?.breakBefore).toBe(true)
+    expect(Object.keys(packTimed([points[0]!], []))).not.toContain('breakBefore')
+  })
+
   it('gives back positions without times', () => {
     const positions: LatLngTuple[] = [
       [60, 24],
