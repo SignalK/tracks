@@ -141,6 +141,28 @@ export interface UploadCheckpoint {
 /** From and to, both included, in milliseconds. */
 export type Span = [from: number, to: number]
 
+/** An upload as the routes answer it. */
+export interface GpxUploadStatus {
+  id: string
+  filename: string
+  size: number
+  tracks: string[]
+  onOverlap: OnOverlap
+  /** What the client said tells the file from another of its name and size. */
+  fingerprint?: string
+  /** Bytes taken so far: where the next slice starts. */
+  received: number
+  state: GpxUploadState['state']
+  error?: string
+  imported: number
+  overlapping: number
+  untimed: number
+  /** Points left out because they are older than the own vessel's retention keeps. */
+  expired: number
+  startedAt: string
+  updatedAt: string
+}
+
 /**
  * A GPX file uploaded in slices into the own vessel's recording; see
  * gpxUpload.ts. Saved with each slice's points, so a restart goes on from
@@ -155,7 +177,7 @@ export interface GpxUploadState {
   /** Names of the file's tracks to import, `''` for one without a name. */
   tracks: string[]
   onOverlap: OnOverlap
-  /** Tells the file from another of the same name and size, as the client reckons it; see public/upload.js. */
+  /** Tells the file from another of the same name and size, as the client reckons it; see web/src/upload.ts. */
   fingerprint?: string
   /** Whether a replaced span keeps its recycle bin entry where nothing was recorded; see `keepTrack`. */
   keepEmpty: boolean

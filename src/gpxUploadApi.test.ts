@@ -2,7 +2,7 @@ import request from 'supertest'
 import { describe, expect, it } from 'vitest'
 import { createHarness, SELF_CONTEXT } from './harness.test-utils.js'
 import type { TestHarness } from './harness.test-utils.js'
-import type { GpxUploadStatus } from './gpxUpload.js'
+import type { GpxUploadStatus } from './types.js'
 
 const UPLOAD = '/plugins/tracks/imports/upload'
 const t0 = Date.UTC(2025, 6, 1, 12)
