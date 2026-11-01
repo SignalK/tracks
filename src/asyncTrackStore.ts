@@ -11,12 +11,15 @@ import type {
   ImportFilter,
   LatLngTuple,
   TimedPosition,
+  TimedTrackCollection,
   TimeWindow,
+  TrackCollection,
   TrackParams,
   UploadPart,
 } from './types.js'
 import type { TrackQuery } from './timeWindow.js'
-import type { Operation, StoreMethod, WorkerMessage } from './trackStoreProtocol.js'
+import type { Operation, PackedReads, StoreMethod, WorkerMessage } from './trackStoreProtocol.js'
+import { unpackPositions, unpackTimed } from './packedTrack.js'
 interface Pending {
   operation: Operation
   bytes: number
@@ -349,20 +352,47 @@ export class AsyncTrackStore implements TrackStore {
       }
     }
   }
-  get(context: Context, window?: TimeWindow) {
-    return this.enqueue('get', [context, window])
+  /** A read the worker answers in packed form (`PackedReads`). */
+  private packed<K extends keyof PackedReads>(
+    method: K,
+    args: Parameters<SqliteTrackStore[K]>,
+  ): Promise<PackedReads[K]> {
+    return this.enqueue(method, args) as Promise<unknown> as Promise<PackedReads[K]>
   }
-  getTimed(context: Context, window?: TimeWindow) {
-    return this.enqueue('getTimed', [context, window])
+  get(context: Context, window?: TimeWindow): Promise<LatLngTuple[]> {
+    return this.packed('get', [context, window]).then(unpackPositions)
   }
-  getAllTracks(query?: TrackQuery) {
-    return this.enqueue('getAllTracks', [query])
+  getTimed(context: Context, window?: TimeWindow): Promise<TimedPosition[]> {
+    return this.packed('getTimed', [context, window]).then(unpackTimed)
   }
-  getFilteredTracks(params: TrackParams, selfPosition?: LatLngTuple, _debug?: Debug, query?: TrackQuery) {
-    return this.enqueue('getFilteredTracks', [params, selfPosition, undefined, query])
+  getAllTracks(query?: TrackQuery): Promise<{ context: string; track: LatLngTuple[] }[]> {
+    return this.packed('getAllTracks', [query]).then((tracks) =>
+      tracks.map(({ context, track }) => ({ context, track: unpackPositions(track) })),
+    )
   }
-  getFilteredTimedTracks(params: TrackParams, selfPosition?: LatLngTuple, _debug?: Debug, query?: TrackQuery) {
-    return this.enqueue('getFilteredTimedTracks', [params, selfPosition, undefined, query])
+  getFilteredTracks(
+    params: TrackParams,
+    selfPosition?: LatLngTuple,
+    _debug?: Debug,
+    query?: TrackQuery,
+  ): Promise<TrackCollection> {
+    return this.packed('getFilteredTracks', [params, selfPosition, undefined, query]).then((tracks) => {
+      const unpacked: TrackCollection = {}
+      for (const [context, track] of Object.entries(tracks)) unpacked[context] = unpackPositions(track)
+      return unpacked
+    })
+  }
+  getFilteredTimedTracks(
+    params: TrackParams,
+    selfPosition?: LatLngTuple,
+    _debug?: Debug,
+    query?: TrackQuery,
+  ): Promise<TimedTrackCollection> {
+    return this.packed('getFilteredTimedTracks', [params, selfPosition, undefined, query]).then((tracks) => {
+      const unpacked: TimedTrackCollection = {}
+      for (const [context, points] of Object.entries(tracks)) unpacked[context] = unpackTimed(points)
+      return unpacked
+    })
   }
   summarize(contexts: Context[] | undefined, window?: TimeWindow) {
     return this.enqueue('summarize', [contexts, window])

@@ -105,6 +105,45 @@ describe('worker-owned SQLite', () => {
     }
   })
 
+  it('keeps the pauses and breaks of a shaped read across the worker', async () => {
+    const original = new SqliteTrackStore({ file: join(dir, 'baseline.db'), resolution: 0 }, debug)
+    const worker = create()
+    try {
+      // In the box, out of it for two hours, and back: a clipped read reads
+      // the two stretches apart and breaks the line between them, and a
+      // thinned one notes the longest pause among the points it drops.
+      const track: LatLngTuple[] = []
+      const times: number[] = []
+      const HOUR = 3_600_000
+      for (let t = 0; t <= 2 * HOUR + 10_000; t += 1000) {
+        const inside = t < 5000 || t > 2 * HOUR
+        track.push(inside ? [60, 24 + t * 1e-9] : [61, 25])
+        times.push(t)
+      }
+      for (const store of [original, worker]) store.initialTrack('self', track, times)
+      const params = {
+        bbox: { sw: [59.9, 23.9] as LatLngTuple, ne: [60.1, 24.1] as LatLngTuple },
+        radius: null,
+        contexts: ['self'],
+        clip: true,
+      }
+      const clipped = await worker.getFilteredTimedTracks(params)
+      expect(clipped).toStrictEqual(await original.getFilteredTimedTracks(params))
+      expect(clipped['self']?.some((point) => point.breakBefore)).toBe(true)
+      const query = { resolution: 30_000 }
+      const thinned = await worker.getFilteredTimedTracks({ bbox: null, radius: null }, undefined, undefined, query)
+      expect(thinned).toStrictEqual(
+        await original.getFilteredTimedTracks({ bbox: null, radius: null }, undefined, undefined, query),
+      )
+      expect(thinned['self']?.some((point) => point.pauseBefore !== undefined)).toBe(true)
+      expect(await worker.getFilteredTracks({ bbox: null, radius: null })).toStrictEqual(
+        await original.getFilteredTracks({ bbox: null, radius: null }),
+      )
+    } finally {
+      original.close()
+    }
+  })
+
   it('keeps HTTP responsive while the writer waits for a database lock', async () => {
     const store = create()
     await store.ready
