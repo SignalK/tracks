@@ -83,9 +83,11 @@ export interface TrackStore {
 
   /**
    * As `getFilteredTimedTracks`, segmented at `segmentGap`, as each vessel's
-   * JSON `"coordinates":…,"times":…` members (`timedTracksJson`).
+   * JSON `"coordinates":…,"times":…` members (`timedTracksJson`). A store
+   * without it is answered from `getFilteredTimedTracks` on the caller's
+   * thread.
    */
-  getFilteredTimedTracksJson(
+  getFilteredTimedTracksJson?(
     params: TrackParams,
     selfPosition: LatLngTuple | undefined,
     query: TrackQuery | undefined,

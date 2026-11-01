@@ -40,6 +40,7 @@ import {
   UploadFormatError,
 } from './gpxUpload.js'
 import type { SliceReservation } from './gpxUpload.js'
+import { timedTracksJson } from './timedTracksJson.js'
 import { DEFAULT_WINDOW_MS, parseTrackQuery, TimeWindowError, TrackStream } from './timeWindow.js'
 import type { StreamedPoint, TrackQuery } from './timeWindow.js'
 import type {
@@ -54,6 +55,7 @@ import type {
   Position,
   StoredImport,
   TimedPosition,
+  TimedTrackCollection,
   TimeExtent,
   TrackCollection,
   TrackParams,
@@ -1307,9 +1309,12 @@ export default function ThePlugin(app: App): Plugin {
         // list reads the last day, and every vessel the store keeps would
         // otherwise come back, most of them as an empty line.
         const result: Promise<Buffer | AllTracksResult> = query.times
-          ? tracks
-              .getFilteredTimedTracksJson(params, selfPosition, query, segmentGap)
-              .then((fragments) => frameTimedTracks(fragments))
+          ? (
+              tracks.getFilteredTimedTracksJson?.(params, selfPosition, query, segmentGap) ??
+              tracks
+                .getFilteredTimedTracks(params, selfPosition, app.debug, query)
+                .then((tc: TimedTrackCollection) => timedTracksJson(tc, segmentGap))
+            ).then((fragments) => frameTimedTracks(fragments))
           : tracks.getFilteredTracks(params, selfPosition, app.debug, query).then((tc: TrackCollection) =>
               withPoints(tc).reduce<AllTracksResult>((acc, [context, track]) => {
                 acc[context] = {

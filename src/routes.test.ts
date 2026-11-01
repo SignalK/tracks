@@ -488,6 +488,23 @@ describe('GET /tracks?times', () => {
     )
   })
 
+  it('answers the same from a store without getFilteredTimedTracksJson', async () => {
+    const url = `${API}/tracks?${SINCE}&times`
+    const fromWorker = await request(seeded().app).get(url).expect(200)
+    const proto: { getFilteredTimedTracksJson?: unknown } = AsyncTrackStore.prototype
+    const original = proto.getFilteredTimedTracksJson
+    proto.getFilteredTimedTracksJson = undefined
+    const read = vi.spyOn(AsyncTrackStore.prototype, 'getFilteredTimedTracks')
+    try {
+      const fallback = await request(seeded().app).get(url).expect(200)
+      expect(read).toHaveBeenCalled()
+      expect(fallback.type).toBe('application/json')
+      expect(fallback.text).toBe(fromWorker.text)
+    } finally {
+      proto.getFilteredTimedTracksJson = original
+    }
+  })
+
   it('answers an empty object when no vessel has positions in the window', async () => {
     const res = await request(seeded().app).get(`${API}/tracks?times&from=2026-08-13T00:00:00Z&to=2026-08-13T01:00:00Z`)
 
