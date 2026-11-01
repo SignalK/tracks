@@ -787,9 +787,9 @@ describe('track names', () => {
   })
 })
 
-// The webapp cannot reach `toGpx` -- it ships as static files with no bundler
-// -- so the conversion lives behind a route rather than being duplicated in
-// the page, where it would drift from the module.
+// The webapp imports no server code, so it cannot call `toGpx`: the
+// conversion lives behind a route rather than being duplicated in the page,
+// where it would drift from the module.
 describe('GET /vessels/:vesselId/track.gpx', () => {
   it('serves the track as a GPX document', async () => {
     const h = withTracks([SELF_CONTEXT, [60.1, 24.9]])

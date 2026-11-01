@@ -5,10 +5,10 @@
  * track's metadata and no coordinates — the same query the API already serves,
  * so listing hundreds of tracks costs nothing like fetching them.
  *
- * Plain modules and no build step: the plugin ships `public/` as static files
- * and the server mounts it directly, so anything needing a bundler would mean
- * a second build output for a page this size.
+ * It imports nothing at run time: the tests run it as a script,
+ * against stand-ins for the document and fetch.
  */
+import type { ListedTrack, SettingsAnswer } from './api.js'
 
 /**
  * How far back the list of other vessels reaches when the plugin does not say
@@ -26,8 +26,8 @@ const LIST_DAYS = 30
 // The two APIs spell a duration differently: v2 takes ISO 8601, v1 takes a
 // number with a unit suffix. One spelling for both sent `P30D` to the v1
 // export route, which rejected it and made every GPX download a 400.
-const v2Days = (days) => `P${days}D`
-const v1Days = (days) => `${days}d`
+const v2Days = (days: number) => `P${days}D`
+const v1Days = (days: number) => `${days}d`
 
 /** This plugin's id, which the server stamps on its tracks as `providerId`. */
 const PROVIDER_ID = 'tracks'
@@ -49,7 +49,7 @@ const REQUEST_TIMEOUT_MS = 30_000
 const OWN_WAIT_MS = REQUEST_TIMEOUT_MS / 3
 
 /** Relative, because the server mounts this under /@signalk/tracks-plugin. */
-const tracksUrl = (days) => `../../signalk/v2/api/tracks?geometry=false&duration=${v2Days(days)}`
+const tracksUrl = (days: number) => `../../signalk/v2/api/tracks?geometry=false&duration=${v2Days(days)}`
 /**
  * The own vessel's tracks alone, asked for before the whole list: one vessel
  * answers at once, while every AIS target a busy receiver heard in a month
@@ -64,12 +64,28 @@ const TRACK_URL = '../../signalk/v2/api/tracks/'
 /** Every import, in the shape of the list's rows; the window above misses old and untimed ones. */
 const IMPORTS_URL = '../../plugins/tracks/imports'
 
-const status = document.getElementById('status')
+/** Which list a track goes in. */
+type Kind = 'own' | 'others' | 'imported'
+
+/** The page's element with this id, which index.html carries: one missing is a broken page. */
+function byId(id: string): HTMLElement {
+  const element = document.getElementById(id)
+  if (element === null) {
+    throw new Error(`#${id} is missing from the page`)
+  }
+  return element
+}
+
+const status = byId('status')
 
 /** A list of tracks, and the note above it that says what it shows. */
-function listOf(tableId, noteId) {
-  const table = document.getElementById(tableId)
-  return { table, tbody: table.querySelector('tbody'), note: document.getElementById(noteId) }
+function listOf(tableId: string, noteId: string) {
+  const table = byId(tableId)
+  const tbody = table.querySelector('tbody')
+  if (tbody === null) {
+    throw new Error(`#${tableId} has no body`)
+  }
+  return { table, tbody, note: byId(noteId) }
 }
 
 /**
@@ -77,16 +93,32 @@ function listOf(tableId, noteId) {
  * are kept for different times, and one list under one window read as though
  * all three were kept for it.
  */
-const lists = {
+const lists: Record<Kind, ReturnType<typeof listOf>> = {
   own: listOf('own-tracks', 'own-note'),
   others: listOf('other-tracks', 'others-note'),
   imported: listOf('imported-tracks', 'imported-note'),
 }
 
+/** A list's answer: `features` holds a track's properties, or whatever a malformed entry is. */
+interface TrackList {
+  type: 'FeatureCollection'
+  features: ({ properties?: ListedTrack } | null | undefined)[]
+}
+
+/**
+ * How the plugin is set for other vessels: the days it keeps them, 0 for
+ * indefinitely, and whether it records them, each undefined when it does not
+ * say.
+ */
+interface OthersSettings {
+  days: number | undefined
+  recorded: boolean | undefined
+}
+
 /** How far back the list of other vessels reaches, once the settings are read. */
 let listDays = LIST_DAYS
 
-function kindOf(properties) {
+function kindOf(properties: ListedTrack): Kind {
   const id = localId(properties)
   if (typeof id === 'string' && id.startsWith('imported:')) {
     return 'imported'
@@ -102,7 +134,7 @@ function kindOf(properties) {
  * recognises is the client's job, and it has to agree with what v1 returns or
  * the same track reads differently depending on which screen it is on.
  */
-function label({ context, contextName, isSelf }) {
+function label({ context, contextName, isSelf }: ListedTrack): string {
   if (isSelf) {
     return 'Own Ship'
   }
@@ -114,12 +146,12 @@ function label({ context, contextName, isSelf }) {
 }
 
 /** ISO-8601 from the API, rendered in the viewer's own locale and zone. */
-function when(iso) {
-  const at = new Date(iso)
+function when(iso: string | undefined): string {
+  const at = new Date(iso ?? Number.NaN)
   return Number.isNaN(at.getTime()) ? '—' : at.toLocaleString()
 }
 
-function row(properties) {
+function row(properties: ListedTrack): HTMLTableRowElement {
   const tr = document.createElement('tr')
   const name = document.createElement('td')
   name.textContent = label(properties)
@@ -146,12 +178,12 @@ function row(properties) {
 }
 
 /**
- * A button asking `bin.js` to delete this track.
+ * A button asking `bin.ts` to delete this track.
  *
  * Handed over as an event rather than handled here, so the list stays a page
  * that only reads; a track that cannot be addressed gets none.
  */
-function deleteCell(properties) {
+function deleteCell(properties: ListedTrack): HTMLTableCellElement {
   const td = document.createElement('td')
   // The server names a track `providerId:trackId`; one that hands out the
   // provider's own ids has no route to delete them by.
@@ -175,7 +207,7 @@ function deleteCell(properties) {
  * response with a Content-Disposition on it, and the server sets one. Doing it
  * by hand would mean holding a whole track in memory to build a blob.
  */
-function exportCell(properties) {
+function exportCell(properties: ListedTrack): HTMLTableCellElement {
   const { providerId, context, isSelf } = properties
   const td = document.createElement('td')
   const link = document.createElement('a')
@@ -205,7 +237,7 @@ function exportCell(properties) {
   return td
 }
 
-function cell(text, className) {
+function cell(text: string | number, className?: string): HTMLTableCellElement {
   const td = document.createElement('td')
   // textContent, never innerHTML: a vessel name arrives from an AIS
   // transmission and is not ours to trust as markup.
@@ -216,7 +248,7 @@ function cell(text, className) {
   return td
 }
 
-function show(message, state) {
+function show(message: string, state?: string): void {
   status.textContent = message
   if (state) {
     status.dataset.state = state
@@ -230,11 +262,11 @@ function show(message, state) {
  * predates the route, or keeps it to administrators. The list then shows what
  * the Track API returns, as it always has.
  */
-async function allImports(signal) {
+async function allImports(signal: AbortSignal): Promise<ListedTrack[]> {
   try {
     const response = await fetch(IMPORTS_URL, { credentials: 'include', signal })
-    const body = response.ok ? await response.json() : undefined
-    return Array.isArray(body) ? body : []
+    const body = response.ok ? ((await response.json()) as unknown) : undefined
+    return Array.isArray(body) ? (body as ListedTrack[]) : []
   } catch {
     return []
   }
@@ -244,7 +276,7 @@ async function allImports(signal) {
  * A track's id without the provider prefix, which a server older than the
  * Track API's write routes leaves off; the import listing always carries it.
  */
-function localId(properties) {
+function localId(properties: ListedTrack | undefined): string | undefined {
   const { id, providerId } = properties ?? {}
   return typeof id === 'string' && typeof providerId === 'string' && id.startsWith(`${providerId}:`)
     ? id.slice(providerId.length + 1)
@@ -255,7 +287,11 @@ function localId(properties) {
  * Whether the server names tracks `providerId:trackId`. Its listing shows it;
  * with nothing listed, asking it for one import by that name does.
  */
-async function namesByProvider(listed, unlisted, signal) {
+async function namesByProvider(
+  listed: (ListedTrack | undefined)[],
+  unlisted: ListedTrack[],
+  signal: AbortSignal,
+): Promise<boolean> {
   if (listed.length > 0) {
     return listed.some(
       (properties) =>
@@ -264,11 +300,12 @@ async function namesByProvider(listed, unlisted, signal) {
         properties.id.startsWith(`${properties.providerId}:`),
     )
   }
-  if (unlisted.length === 0) {
+  const first = unlisted[0]
+  if (first === undefined) {
     return false
   }
   try {
-    const response = await fetch(`${TRACK_URL}${encodeURIComponent(unlisted[0].id)}`, {
+    const response = await fetch(`${TRACK_URL}${encodeURIComponent(String(first.id))}`, {
       credentials: 'include',
       signal,
     })
@@ -282,9 +319,10 @@ async function namesByProvider(listed, unlisted, signal) {
  * Whether a listed entry can be shown. Skipped rather than thrown on: one
  * malformed feature should not blank a list that is otherwise fine.
  */
-function listable(properties) {
+function listable(properties: ListedTrack | undefined): properties is ListedTrack {
   return (
-    properties &&
+    properties !== undefined &&
+    properties !== null &&
     // An import may name no vessel; it is still listed, so it can be deleted.
     (typeof properties.context === 'string' || typeof properties.name === 'string') &&
     Number.isFinite(properties.pointCount)
@@ -295,9 +333,9 @@ function listable(properties) {
  * Puts the entries that can be shown in their lists, newest first: the track
  * someone came to look at is almost always the one that just finished.
  */
-function draw(entries) {
+function draw(entries: (ListedTrack | undefined)[]): ListedTrack[] {
   const sorted = entries.filter(listable).sort((a, b) => String(b.to ?? '').localeCompare(String(a.to ?? '')))
-  for (const [kind, { table, tbody }] of Object.entries(lists)) {
+  for (const [kind, { table, tbody }] of Object.entries(lists) as [Kind, ReturnType<typeof listOf>][]) {
     const rows = sorted.filter((properties) => kindOf(properties) === kind)
     // Replaced even with nothing, so the own vessel's rows shown while the
     // list loaded do not outlive a list that has none.
@@ -307,15 +345,15 @@ function draw(entries) {
   return sorted
 }
 
-const daysText = (days) => `${days} day${days === 1 ? '' : 's'}`
+const daysText = (days: number) => `${days} day${days === 1 ? '' : 's'}`
 
 /**
  * The notes over the lists, for what they turned out to hold. `own` says
  * whether the own vessel's request answered, and with its recording: when it
  * did not, its row is the list's window of it.
  */
-function describe(sorted, others, own) {
-  const has = (kind) => sorted.some((properties) => kindOf(properties) === kind)
+function describe(sorted: ListedTrack[], others: OthersSettings, own: { whole: boolean; answered: boolean }): void {
+  const has = (kind: Kind) => sorted.some((properties) => kindOf(properties) === kind)
   const window = `the last ${daysText(listDays)}`
   lists.own.note.textContent = own.whole
     ? 'Its whole recording.'
@@ -341,14 +379,14 @@ function describe(sorted, others, own) {
  * indefinitely, and whether it records them, each undefined when it does not
  * say.
  */
-async function othersSettings(signal) {
+async function othersSettings(signal: AbortSignal): Promise<OthersSettings> {
   try {
     const response = await fetch(SETTINGS_URL, { credentials: 'include', signal })
-    const body = response.ok ? await response.json() : undefined
+    const body = response.ok ? ((await response.json()) as SettingsAnswer | null) : undefined
     const days = body?.aisRetentionDays
     const recorded = body?.recordOtherVessels
     return {
-      days: Number.isFinite(days) && days >= 0 ? days : undefined,
+      days: typeof days === 'number' && Number.isFinite(days) && days >= 0 ? days : undefined,
       recorded: typeof recorded === 'boolean' ? recorded : undefined,
     }
   } catch {
@@ -357,10 +395,10 @@ async function othersSettings(signal) {
 }
 
 /** The own vessel's listed tracks, or undefined when that request fails: the whole list reports it. */
-async function ownTracks(signal) {
+async function ownTracks(signal: AbortSignal): Promise<(ListedTrack | undefined)[] | undefined> {
   try {
     const response = await fetch(OWN_TRACKS_URL, { credentials: 'include', signal })
-    const body = response.ok ? await response.json() : undefined
+    const body = response.ok ? ((await response.json()) as Partial<TrackList> | null) : undefined
     return body?.type === 'FeatureCollection' && Array.isArray(body.features)
       ? body.features.map((feature) => feature?.properties)
       : undefined
@@ -369,7 +407,7 @@ async function ownTracks(signal) {
   }
 }
 
-async function load() {
+async function load(): Promise<void> {
   // Bounded, because an unsettled fetch is the one failure the page cannot
   // recover from: every other path ends in an error message, while a stalled
   // server or proxy leaves it on "Loading…" indefinitely, which reads as a
@@ -400,7 +438,7 @@ async function load() {
       tick()
     }
     const others = await settings
-    listDays = others.days > 0 ? others.days : LIST_DAYS
+    listDays = others.days !== undefined && others.days > 0 ? others.days : LIST_DAYS
     await list(deadline, own, others)
   } finally {
     clearInterval(ticker)
@@ -408,9 +446,13 @@ async function load() {
   }
 }
 
-async function list(deadline, own, others) {
+async function list(
+  deadline: AbortSignal,
+  own: (ListedTrack | undefined)[] | undefined,
+  others: OthersSettings,
+): Promise<void> {
   const imports = allImports(deadline)
-  let response
+  let response: Response
   try {
     response = await fetch(tracksUrl(listDays), { credentials: 'include', signal: deadline })
   } catch {
@@ -428,9 +470,9 @@ async function list(deadline, own, others) {
     return
   }
 
-  let body
+  let body: Partial<TrackList> | null
   try {
-    body = await response.json()
+    body = (await response.json()) as Partial<TrackList> | null
   } catch {
     // A 200 carrying something that is not JSON: a proxy's error page, or a
     // body that stops mid-stream, which the deadline above aborts here rather
@@ -452,7 +494,7 @@ async function list(deadline, own, others) {
   // The own vessel's whole recording came with its own request, so the list's
   // window of it is left out, unless that request found nothing.
   const whole = (own ?? []).some((properties) => listable(properties) && kindOf(properties) === 'own')
-  const seen = new Set()
+  const seen = new Set<string>()
   // An import of the own vessel can come with both requests; shown once. Told
   // apart by provider too, since two providers can give a track the same id.
   const listed = [
@@ -463,7 +505,7 @@ async function list(deadline, own, others) {
   ].filter((properties) => {
     const id = localId(properties)
     if (typeof id !== 'string') return true
-    const key = `${properties.providerId ?? ''}:${id}`
+    const key = `${properties?.providerId ?? ''}:${id}`
     if (seen.has(key)) return false
     seen.add(key)
     return true
@@ -475,7 +517,10 @@ async function list(deadline, own, others) {
   // suit there rather than offer a delete that cannot work.
   const older = (await namesByProvider(listed, unlisted, deadline))
     ? unlisted
-    : unlisted.map((properties) => ({ ...properties, id: localId(properties), providerId: undefined }))
+    : unlisted.map((properties) => {
+        const id = localId(properties)
+        return { ...properties, ...(id === undefined ? {} : { id }), providerId: undefined }
+      })
   describe(draw([...listed, ...older]), others, { whole, answered: own !== undefined })
   show('')
   status.hidden = true

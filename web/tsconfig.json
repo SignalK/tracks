@@ -1,0 +1,14 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // The page runs in a browser: DOM in, node's globals out, so code that
+    // would only work on the server fails the check rather than the page.
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": [],
+    "noEmit": true,
+    "declaration": false,
+    "rootDir": ".."
+  },
+  "include": ["src"],
+  "exclude": []
+}

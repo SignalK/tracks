@@ -5,7 +5,9 @@
  * which the server enforces: the import writes into the recording. It runs on
  * the server, day by day, so the page starts it and shows how far it got.
  */
+import type { HistoryImportAnswer, Refusal } from './api.js'
 import { refusal } from './bin.js'
+import { byId } from './dom.js'
 
 /** Relative, because the server mounts this page under /@signalk/tracks-plugin. */
 const HISTORY_IMPORT_URL = '../../plugins/tracks/history-import'
@@ -13,14 +15,14 @@ const HISTORY_IMPORT_URL = '../../plugins/tracks/history-import'
 /** How often the page asks how far a running import got. */
 export const POLL_MS = 5000
 
-const positions = (count) => `${count} position${count === 1 ? '' : 's'}`
+const positions = (count: number) => `${count} position${count === 1 ? '' : 's'}`
 
 /**
  * A date in the viewer's locale. The import goes by UTC days, so the day it
  * got to is shown in UTC, as the plugin status shows it; when it finished is
  * an instant, shown in the viewer's zone.
  */
-const day = (iso, timeZone) => {
+const day = (iso: string, timeZone?: string) => {
   const at = new Date(iso)
   return Number.isNaN(at.getTime()) ? '—' : at.toLocaleDateString(undefined, timeZone ? { timeZone } : {})
 }
@@ -29,7 +31,14 @@ const day = (iso, timeZone) => {
  * What the page says of the import, and what its button offers, from the
  * route's answer; undefined where there is nothing to import from or to show.
  */
-export function historyView({ provider, state }) {
+/** What the page shows of the import: its text, the button's label (none hides it) and a status state. */
+export interface HistoryView {
+  text: string
+  button?: string | undefined
+  state?: string
+}
+
+export function historyView({ provider, state }: HistoryImportAnswer): HistoryView | undefined {
   if (!state) {
     return provider ? { text: 'Not imported yet.', button: 'Import' } : undefined
   }
@@ -57,22 +66,22 @@ export function historyView({ provider, state }) {
   return { text: `The import stopped${where}, and goes on shortly. ${filled}.`, button: resume }
 }
 
-async function messageOf(response) {
+async function messageOf(response: Response): Promise<string | undefined> {
   try {
-    const body = await response.json()
+    const body = (await response.json()) as Refusal | null
     return body?.message ?? body?.error
   } catch {
     return undefined
   }
 }
 
-export function start() {
-  const section = document.getElementById('history')
-  const status = document.getElementById('history-status')
-  const button = document.getElementById('history-start')
-  let timer
+export function start(): Promise<void> {
+  const section = byId('history')
+  const status = byId('history-status')
+  const button = byId<HTMLButtonElement>('history-start')
+  let timer: ReturnType<typeof setTimeout> | undefined
 
-  function show(text, state) {
+  function show(text: string, state?: string): void {
     status.textContent = text
     if (state) {
       status.dataset.state = state
@@ -81,7 +90,7 @@ export function start() {
     }
   }
 
-  async function load() {
+  async function load(): Promise<void> {
     clearTimeout(timer)
     let response
     try {
@@ -99,9 +108,9 @@ export function start() {
       if (!section.hidden) timer = setTimeout(load, POLL_MS)
       return
     }
-    let body
+    let body: HistoryImportAnswer | null
     try {
-      body = await response.json()
+      body = (await response.json()) as HistoryImportAnswer | null
     } catch {
       if (!section.hidden) timer = setTimeout(load, POLL_MS)
       return
@@ -115,7 +124,7 @@ export function start() {
     button.hidden = view.button === undefined
     button.textContent = view.button ?? ''
     button.disabled = false
-    if (body.state?.running) {
+    if (body?.state?.running) {
       timer = setTimeout(load, POLL_MS)
     }
   }

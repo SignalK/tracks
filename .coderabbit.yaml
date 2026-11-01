@@ -45,6 +45,19 @@ reviews:
         a new query parameter — since those constrain implementations that do not
         exist yet.
 
+        ## TypeScript and ES modules only
+        Every source in this repository is strict TypeScript in ES module
+        syntax: the plugin in `src/`, the webapp in `web/`, the tests and the
+        tool configs. Flag any new `.js`, `.mjs`, `.cjs` or `.jsx` file, any
+        CommonJS (`require`, `module.exports`, `__dirname`), `any` where a real
+        type or `unknown` plus narrowing would do, and `// @ts-ignore` or
+        `// @ts-expect-error` used to silence a real error. A JSON body is
+        read as `unknown` or a declared shape and narrowed before use. Builds
+        are Vite 8 with `vite-plugin-checker`, schemas TypeBox 1.x from the
+        unscoped `typebox` package; flag a change that moves away from
+        either, such as `@sinclair/typebox` or a build that skips the
+        checker.
+
         ## Echo comments
         Flag any comment that merely restates what the code already says.
         Examples of echo comments to flag:
@@ -117,6 +130,16 @@ reviews:
           returns, is in `src/harness.test-utils.ts`, which a diff seldom
           touches: read it before reporting one. CI's `npm run test:ci`
           type-checks the tests, so a member that is not there fails the build.
+
+        - `public/` missing from the repository. It is the webapp's build
+          output, written from `web/` by `npm run build` and gitignored; the
+          `files` allowlist ships it from there.
+        - `web/src/tracks.ts` defining its own `byId()` rather than importing
+          `web/src/dom.ts`. It imports nothing at run time because its tests
+          run it as a script.
+        - `checksVoidReturn: { arguments: false }` for `web/src` in
+          `eslint.config.ts`. The page's DOM handlers are async on purpose,
+          handle their own failures, and the tests await what they return.
 
         ## Scope
         Focus on files changed since main. Think carefully about how changes

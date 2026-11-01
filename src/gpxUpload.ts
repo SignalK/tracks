@@ -6,6 +6,7 @@ import { dateTime, decimal, escapeXml, GPX_NAMESPACE, inRange } from './gpx.js'
 import type {
   Context,
   GpxUploadState,
+  GpxUploadStatus,
   OnOverlap,
   OpenTag,
   TimedPosition,
@@ -343,28 +344,6 @@ export class GpxReader {
     if (!part) this.parts.set(segments, (part = []))
     part.push({ position: point, timestamp })
   }
-}
-
-/** An upload as the routes answer it. */
-export interface GpxUploadStatus {
-  id: string
-  filename: string
-  size: number
-  tracks: string[]
-  onOverlap: OnOverlap
-  /** What the client said tells the file from another of its name and size. */
-  fingerprint?: string
-  /** Bytes taken so far: where the next slice starts. */
-  received: number
-  state: GpxUploadState['state']
-  error?: string
-  imported: number
-  overlapping: number
-  untimed: number
-  /** Points left out because they are older than the own vessel's retention keeps. */
-  expired: number
-  startedAt: string
-  updatedAt: string
 }
 
 export interface GpxUploadDeps {

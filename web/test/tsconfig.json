@@ -1,0 +1,8 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // The tests drive the page from node and read the package around it.
+    "types": ["node"]
+  },
+  "include": ["."]
+}
