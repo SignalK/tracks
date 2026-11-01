@@ -93,7 +93,7 @@ async function renderShippedPage(source: string): Promise<{ requested: string[] 
   const run = new Function(
     'document',
     'fetch',
-    `return (async () => { ${source.replace(/^void load\(\)$/m, '')} await load() })()`,
+    `return (async () => { ${source.replace(/^(?:void )?load\(\);?$/m, '')} await load() })()`,
   ) as (d: unknown, f: unknown) => Promise<void>
 
   await run({ getElementById: () => shared, createElement: stub }, (url: string) => {

@@ -3,7 +3,7 @@ import prettier from 'eslint-config-prettier'
 import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
-  { ignores: ['dist', '.vitest-worker', 'coverage'] },
+  { ignores: ['dist', 'public', '.vitest-worker', 'coverage'] },
   eslint.configs.recommended,
   tseslint.configs.recommendedTypeChecked,
   {
@@ -15,37 +15,23 @@ export default tseslint.config(
     },
   },
   {
-    files: ['**/*.test.ts', '**/*.test-utils.ts', 'vite.config.ts', 'vitest.e2e.config.ts', 'eslint.config.ts'],
-    ...tseslint.configs.disableTypeChecked,
+    // The page's event handlers are async and handle their own failures; the
+    // browser ignores what a listener returns, and the tests await it.
+    files: ['web/src/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-misused-promises': ['error', { checksVoidReturn: { arguments: false } }],
+    },
   },
   {
-    // The webapp ships as plain static files with no build step, so it is not
-    // part of the TypeScript project and cannot be type-checked -- but it is
-    // still code worth linting, and it runs in a browser rather than node.
-    files: ['public/**/*.js'],
+    files: [
+      '**/*.test.ts',
+      '**/*.test-utils.ts',
+      'vite.config.ts',
+      'vite.web.config.ts',
+      'vitest.e2e.config.ts',
+      'eslint.config.ts',
+    ],
     ...tseslint.configs.disableTypeChecked,
-    languageOptions: {
-      // projectService would otherwise look for these in tsconfig and fail.
-      parserOptions: { projectService: false, project: false },
-      globals: {
-        AbortController: 'readonly',
-        AbortSignal: 'readonly',
-        clearInterval: 'readonly',
-        clearTimeout: 'readonly',
-        confirm: 'readonly',
-        console: 'readonly',
-        CustomEvent: 'readonly',
-        document: 'readonly',
-        DOMException: 'readonly',
-        fetch: 'readonly',
-        location: 'readonly',
-        setInterval: 'readonly',
-        setTimeout: 'readonly',
-        TextDecoder: 'readonly',
-        URL: 'readonly',
-        URLSearchParams: 'readonly',
-      },
-    },
   },
   prettier,
 )

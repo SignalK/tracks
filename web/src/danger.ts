@@ -9,6 +9,7 @@
  * imported and tested without a document.
  */
 import { messageOf, refusal } from './bin.js'
+import { byId, within } from './dom.js'
 
 /** The word typed to confirm, which the route asks for too. */
 export const CONFIRMATION = 'DELETE'
@@ -24,20 +25,20 @@ const DATABASE_URL = `../../plugins/tracks/database?confirm=${CONFIRMATION}`
 const DELETE_WAIT_MS = 60_000
 
 /** Spaces around the word are forgiven, its case is not. */
-export function confirmed(typed) {
+export function confirmed(typed: string): boolean {
   return typed.trim() === CONFIRMATION
 }
 
-export function start() {
-  const open = document.getElementById('reset-open')
-  const dialog = document.getElementById('reset-dialog')
-  const form = dialog.querySelector('form')
-  const button = form.querySelector('button[value="reset"]')
+export function start(): void {
+  const open = byId('reset-open')
+  const dialog = byId<HTMLDialogElement>('reset-dialog')
+  const form = within<HTMLFormElement>(dialog, 'form')
+  const button = within<HTMLButtonElement>(form, 'button[value="reset"]')
   // Not a submit button: Enter in the field submits with the form's first
   // one, and a Cancel there would close the dialog on the word just typed.
-  const cancel = form.querySelector('button[value="cancel"]')
-  const error = document.getElementById('reset-error')
-  const { confirm } = form.elements
+  const cancel = within<HTMLButtonElement>(form, 'button[value="cancel"]')
+  const error = byId('reset-error')
+  const { confirm } = form.elements as HTMLFormControlsCollection & { confirm: HTMLInputElement }
   // Once: a second click while the first is on its way would ask again, and
   // its refusal would read as though the first had failed.
   let pending = false
@@ -84,7 +85,7 @@ export function start() {
       // would take what it has recorded since.
       confirm.value = ''
       fail(
-        failure?.name === 'TimeoutError'
+        failure instanceof Error && failure.name === 'TimeoutError'
           ? 'The server did not answer. The database may still have been deleted: reload the page to see.'
           : 'The connection failed. The database may still have been deleted: reload the page to see.',
       )
@@ -102,7 +103,7 @@ export function start() {
     location.reload()
   })
 
-  function fail(message) {
+  function fail(message: string): void {
     error.textContent = message
     error.hidden = false
     pending = false

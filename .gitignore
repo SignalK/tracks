@@ -13,3 +13,6 @@ npm-debug.log*
 src/buildTypecheckProbe.generated.ts
 
 .vitest-worker
+
+# Built from web/ by `npm run build`.
+public

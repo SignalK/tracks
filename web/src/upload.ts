@@ -4,9 +4,95 @@
  * the server side). Neither holds more of the file than one slice: a
  * chartplotter's export of several years runs past a gigabyte.
  */
+import type { GpxUploadStatus, OnOverlap } from '../../src/types.js'
 
 /** Relative, because the server mounts this page under /@signalk/tracks-plugin. */
 export const UPLOAD_URL = '../../plugins/tracks/imports/upload'
+
+/** A track of the file, as the scan lists it to choose from (see `scanGpx`). */
+export interface ScannedTrack {
+  name: string
+  points: number
+  /** The times of its first and last point, as written; absent where it has none. */
+  from?: string
+  to?: string
+  /** The name of the own vessel's track it was elsewhere than at the same time (see `markElsewhere`). */
+  elsewhere?: string
+  partly?: boolean
+  foreign?: boolean
+}
+
+/** What `uploadGpx` sends, and where it reports to. */
+export interface UploadOptions {
+  /** The file, as much of a File as the upload reads. */
+  file: Blob & { name: string; lastModified?: number }
+  tracks: string[]
+  onOverlap: OnOverlap
+  onStatus: (status: GpxUploadStatus) => void
+  signal?: AbortSignal | undefined
+  request?: (url: string, init: RequestInit) => Promise<Response>
+  sleep?: ((ms: number) => Promise<void>) | undefined
+}
+
+/** A point sampled from a track: `[time, lat, lon]`. */
+type Sample = [time: number, lat: number, lon: number]
+
+/** A `<trk>`'s samples, by stretch of SAMPLE_MS. */
+interface Sampled {
+  stretches: Map<number, Sample>
+}
+
+interface SampledTrack {
+  group: ScannedTrack
+  sampled: Sampled
+}
+
+/** A `<trk>` named like the own vessel's. */
+interface OwnTrack {
+  name: string
+  stretches: Map<number, Sample>
+}
+
+/** Stretches two tracks lay far apart and near together in. */
+interface Count {
+  far: number
+  near: number
+}
+
+/** The `<trkseg>` open: the scopes its points are read under, and whether they are read at all. */
+interface Segment {
+  scopes: Scope[]
+  inGpx: boolean
+  plain: boolean
+}
+
+/** The `<trk>` being read: its scope, its name once read, and the track it adds to from its first segment. */
+interface OpenTrack {
+  scope: Scope
+  name?: string
+  group?: ScannedTrack
+}
+
+/** What the `<gpx>` start tag says (see rootOf). */
+interface Root {
+  creator: string | null
+  scope: Map<string, string> | null
+}
+
+/** Markup TAG does not read whole (see markupFrom). */
+interface Markup {
+  at: number
+  end: number
+  doctype: boolean
+}
+
+/** What the upload routes answer. */
+interface UploadAnswer {
+  upload?: GpxUploadStatus | null
+  message?: string
+}
+
+type Call = (url: string, init?: RequestInit) => Promise<Response>
 
 /** Bytes per request: well under the server's 8 MiB limit. */
 export const SLICE_BYTES = 4 * 1024 * 1024
@@ -23,28 +109,31 @@ const RETRIES = 8
 const RETRY_DELAY_MS = 2000
 const RETRY_DELAY_MAX_MS = 60_000
 
-const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
 
 /**
  * XML's predefined and numeric character references, decoded: the server
  * chooses a track by its name as the parser reads it, so the name chosen
  * here must be spelled the same.
  */
-function decodeEntities(value) {
-  return value.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|(amp|lt|gt|quot|apos));/g, (match, decimal, hex, named) => {
-    if (named !== undefined) return ENTITIES[named]
-    const code = decimal !== undefined ? Number(decimal) : Number.parseInt(hex, 16)
-    return code <= 0x10ffff ? String.fromCodePoint(code) : match
-  })
+function decodeEntities(value: string): string {
+  return value.replace(
+    /&(?:#(\d+)|#x([0-9a-fA-F]+)|(amp|lt|gt|quot|apos));/g,
+    (match, decimal: string | undefined, hex: string | undefined, named: string | undefined) => {
+      if (named !== undefined) return ENTITIES[named] ?? match
+      const code = decimal !== undefined ? Number(decimal) : Number.parseInt(hex ?? '', 16)
+      return code <= 0x10ffff ? String.fromCodePoint(code) : match
+    },
+  )
 }
 
 /** Named as TimeZero names the AIS targets it followed: `AIS <name>`, or the bare MMSI. */
-export function isOtherVessel(name) {
+export function isOtherVessel(name: string): boolean {
   return /^AIS\b/.test(name) || /^\d{9}$/.test(name)
 }
 
 /** Named as TimeZero names the own vessel's track, in English as this plugin's export does too, and in German. */
-export function isOwnVessel(name) {
+export function isOwnVessel(name: string): boolean {
   return name === 'Own Ship' || name === 'Eigenes Schiff'
 }
 
@@ -72,7 +161,7 @@ const OUTSIDE_TEXT_11 = /[^\t\n\r \u0085\u2028]/
 const XML_TARGET = /^<\?xml(?=[\t\n\r ?])/i
 
 /** Whether the document starting `text` declares itself XML 1.1, whose line ends the parser reads differently. */
-function isXml11(text) {
+function isXml11(text: string): boolean {
   return /^<\?xml[\t\n\r ]+version[\t\n\r ]*=[\t\n\r ]*(["'])1\.1\1/.test(text)
 }
 
@@ -81,7 +170,7 @@ function isXml11(text) {
  * line ends as line feeds, references decoded, a CDATA section's content as
  * it is and a comment or processing instruction left out.
  */
-function textOf(raw, xml11) {
+function textOf(raw: string, xml11: boolean): string {
   return raw
     .replace(xml11 ? LINE_END_11 : LINE_END, '\n')
     .split(MARKUP)
@@ -137,7 +226,7 @@ const MAX_OPEN_ELEMENTS = 4096
  * millions of attributes runs the expression out of stack. No GPX tag is
  * that long, and the server refuses one.
  */
-function nextTag(text) {
+function nextTag(text: string): RegExpExecArray | null {
   for (;;) {
     const from = TAG.lastIndex
     try {
@@ -154,9 +243,9 @@ function nextTag(text) {
 }
 
 /** The attributes of the start tag at `at` in `text`, or undefined where it cannot be read whole. */
-function attributesOf(text, at) {
+function attributesOf(text: string, at: number): Map<string, string> | undefined {
   START_TAG.lastIndex = at
-  let tag
+  let tag: RegExpExecArray | null
   try {
     tag = START_TAG.exec(text)
   } catch {
@@ -164,17 +253,25 @@ function attributesOf(text, at) {
     return undefined
   }
   if (!tag) return undefined
-  const attributes = new Map()
-  for (const [, name, double, single] of tag[1].matchAll(ATTRIBUTE)) attributes.set(name, double ?? single)
+  const attributes = new Map<string, string>()
+  for (const [, name, double, single] of (tag[1] ?? '').matchAll(ATTRIBUTE)) {
+    if (name !== undefined) attributes.set(name, double ?? single ?? '')
+  }
   return attributes
 }
 
 /** GPX's namespace, as `src/gpx.ts` has it: the server reads a point in it, or in none. */
 const GPX_NAMESPACE = 'http://www.topografix.com/GPX/1/1'
 
+/**
+ * The namespaces an element binds, by prefix, `''` for the default: undefined
+ * where it binds none, and null where its tag cannot be read whole.
+ */
+type Scope = Map<string, string> | null | undefined
+
 /** The namespaces these attributes bind, by prefix, `''` for the default. */
-function bindings(attributes) {
-  const bound = new Map()
+function bindings(attributes: Map<string, string>): Map<string, string> {
+  const bound = new Map<string, string>()
   for (const [name, value] of attributes) {
     if (name === 'xmlns') bound.set('', decodeEntities(value))
     else if (name.startsWith('xmlns:')) bound.set(name.slice(6), decodeEntities(value))
@@ -186,7 +283,7 @@ function bindings(attributes) {
  * The namespaces the start tag `tag`, at `at` in `text`, binds: undefined
  * where it binds none, and null where it cannot be read whole.
  */
-function scopeOf(text, at, tag) {
+function scopeOf(text: string, at: number, tag: string): Scope {
   if (!tag.includes('xmlns')) return undefined
   const attributes = attributesOf(text, at)
   return attributes === undefined ? null : bindings(attributes)
@@ -201,7 +298,7 @@ function scopeOf(text, at, tag) {
  * otherwise: an element the scan counts is not given up for it, only a point
  * it samples.
  */
-function inGpx(prefix, scopes, unread = false) {
+function inGpx(prefix: string | undefined, scopes: readonly Scope[], unread = false): boolean {
   for (const scope of scopes) {
     if (scope === null) return unread
     const namespace = scope?.get(prefix ?? '')
@@ -215,7 +312,7 @@ function inGpx(prefix, scopes, unread = false) {
  * `creator`, null where it names none and `''` where the tag cannot be read
  * whole, which may hide one; and the namespaces it binds (see scopeOf).
  */
-function rootOf(text, at) {
+function rootOf(text: string, at: number): Root {
   const attributes = attributesOf(text, at)
   if (attributes === undefined) return { creator: '', scope: null }
   const creator = attributes.get('creator')
@@ -228,7 +325,7 @@ function rootOf(text, at) {
  * creator (or name TimeZero), and this plugin's own (`gpx.ts`). In any other
  * program's file a track of that name was taken in from one of them.
  */
-export function namesOwnTrack(creator) {
+export function namesOwnTrack(creator: string | undefined): boolean {
   return creator === undefined || creator === '@signalk/tracks-plugin' || /^timezero\b/i.test(creator)
 }
 
@@ -237,16 +334,16 @@ export function namesOwnTrack(creator) {
 const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/
 const DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
 
-function coordinate(raw) {
+function coordinate(raw: string | undefined): number {
   const value = raw === undefined ? undefined : decodeEntities(raw)
   return value !== undefined && DECIMAL.test(value) ? Number(value) : Number.NaN
 }
 
-function inRange(lat, lon) {
+function inRange(lat: number, lon: number): boolean {
   return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
 }
 
-function timeOf(value) {
+function timeOf(value: string): number {
   const match = DATE_TIME.exec(value)
   if (!match) return Number.NaN
   const at = Date.parse(value)
@@ -286,7 +383,7 @@ const OWN_DOMINANCE = 2
 const EARTH_RADIUS_M = 6_371_008.8
 const RAD = Math.PI / 180
 
-function metresBetween(lat1, lon1, lat2, lon2) {
+function metresBetween(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const h =
     Math.sin(((lat2 - lat1) * RAD) / 2) ** 2 +
     Math.cos(lat1 * RAD) * Math.cos(lat2 * RAD) * Math.sin(((lon2 - lon1) * RAD) / 2) ** 2
@@ -294,23 +391,23 @@ function metresBetween(lat1, lon1, lat2, lon2) {
 }
 
 /** Whether two samples, `[time, lat, lon]`, lie further apart than one vessel sails between them. */
-function far(one, other) {
+function far(one: Sample, other: Sample): boolean {
   const reach = SAME_VESSEL_SLACK_M + (SAME_VESSEL_SPEED * Math.abs(one[0] - other[0])) / 1000
   return metresBetween(one[1], one[2], other[1], other[2]) > reach
 }
 
 /** Apart in at least APART_STRETCHES and most of the stretches two tracks share, or together in as many. */
-const apartIn = ({ far, near }) => far >= APART_STRETCHES && far > near
-const togetherIn = ({ far, near }) => near >= APART_STRETCHES && near > far
+const apartIn = ({ far, near }: Count) => far >= APART_STRETCHES && far > near
+const togetherIn = ({ far, near }: Count) => near >= APART_STRETCHES && near > far
 
 /** Where no `<trkseg>` of GPX's is open: no point is read there. */
-const NO_SEGMENT = { scopes: [], inGpx: false, plain: false }
+const NO_SEGMENT: Segment = { scopes: [], inGpx: false, plain: false }
 
 /** The most `<trk>` of the own name one stretch can hold before they are all doubted. */
 const MAX_OWN_TOGETHER = 16
 
 /** Counts of far and near stretches, kept per pair of keys. */
-function tally(counts, key, isFar) {
+function tally<K>(counts: Map<K, Count>, key: K, isFar: boolean): void {
   const count = counts.get(key) ?? { far: 0, near: 0 }
   if (isFar) count.far++
   else count.near++
@@ -322,10 +419,16 @@ function tally(counts, key, isFar) {
  * beside each `<trk>` named like the own vessel's, `own` holding them by
  * stretch: whether it was together with any, and those it was apart from.
  */
-function compare(stretches, own) {
-  const counts = new Map()
+function compare(
+  stretches: Map<number, Sample>,
+  own: Map<number, OwnTrack[]>,
+): { together: boolean; apartFrom: OwnTrack[] } {
+  const counts = new Map<OwnTrack, Count>()
   for (const [stretch, sample] of stretches) {
-    for (const ownTrack of own.get(stretch) ?? []) tally(counts, ownTrack, far(sample, ownTrack.stretches.get(stretch)))
+    for (const ownTrack of own.get(stretch) ?? []) {
+      const theirs = ownTrack.stretches.get(stretch)
+      if (theirs !== undefined) tally(counts, ownTrack, far(sample, theirs))
+    }
   }
   const counted = [...counts]
   return {
@@ -341,22 +444,24 @@ function compare(stretches, own) {
  * which is not plain, so none of them leaves a track unticked or counts
  * towards the own hours.
  */
-function disputed(own) {
-  const pairs = new Map()
-  const found = new Set()
+function disputed(own: Map<number, OwnTrack[]>): Set<OwnTrack> {
+  const pairs = new Map<OwnTrack, Map<OwnTrack, Count>>()
+  const found = new Set<OwnTrack>()
   for (const [stretch, tracks] of own) {
     // So many in ten minutes is no plotter's own track, and each pair would be compared.
     if (tracks.length > MAX_OWN_TOGETHER) {
       for (const track of tracks) found.add(track)
       continue
     }
-    for (let i = 0; i < tracks.length; i++) {
-      for (let j = i + 1; j < tracks.length; j++) {
-        const counts = pairs.get(tracks[i]) ?? new Map()
-        pairs.set(tracks[i], counts)
-        tally(counts, tracks[j], far(tracks[i].stretches.get(stretch), tracks[j].stretches.get(stretch)))
+    tracks.forEach((one, i) => {
+      const mine = one.stretches.get(stretch)
+      for (const other of tracks.slice(i + 1)) {
+        const counts = pairs.get(one) ?? new Map<OwnTrack, Count>()
+        pairs.set(one, counts)
+        const theirs = other.stretches.get(stretch)
+        if (mine !== undefined && theirs !== undefined) tally(counts, other, far(mine, theirs))
       }
-    }
+    })
   }
   for (const [one, counts] of pairs) {
     for (const [other, count] of counts) {
@@ -395,9 +500,9 @@ function disputed(own) {
  * a time the own vessel's is in the file only under another name, which is
  * then left unticked; the note on it says what to look at.
  */
-function markElsewhere(sampledTracks, ownNames) {
-  const own = new Map()
-  const others = new Map()
+function markElsewhere(sampledTracks: readonly SampledTrack[], ownNames: boolean): void {
+  const own = new Map<number, OwnTrack[]>()
+  const others = new Map<ScannedTrack, Sampled[]>()
   for (const { group, sampled } of sampledTracks) {
     if (isOwnVessel(group.name)) {
       const ownTrack = { name: group.name, stretches: sampled.stretches }
@@ -414,11 +519,11 @@ function markElsewhere(sampledTracks, ownNames) {
   }
   if (own.size === 0) return
   const doubted = disputed(own)
-  const hours = new Set()
+  const hours = new Set<number>()
   for (const [stretch, tracks] of own) {
     if (tracks.some((ownTrack) => !doubted.has(ownTrack))) hours.add(Math.floor(stretch / STRETCHES_PER_HOUR))
   }
-  const otherHours = new Set()
+  const otherHours = new Set<number>()
   for (const tracks of others.values()) {
     for (const { stretches } of tracks) {
       for (const stretch of stretches.keys()) otherHours.add(Math.floor(stretch / STRETCHES_PER_HOUR))
@@ -428,9 +533,9 @@ function markElsewhere(sampledTracks, ownNames) {
   for (const [group, tracks] of others) {
     const seen = tracks.map(({ stretches }) => compare(stretches, own))
     if (seen.some(({ together }) => together)) continue
-    const first = seen.find(({ apartFrom }) => apartFrom.length > 0)
+    const first = seen.find(({ apartFrom }) => apartFrom.length > 0)?.apartFrom[0]
     if (first === undefined) continue
-    group.elsewhere = first.apartFrom[0].name
+    group.elsewhere = first.name
     if (seen.some(({ apartFrom }) => apartFrom.length === 0)) group.partly = true
     else if (plain && seen.every(({ apartFrom }) => apartFrom.some((ownTrack) => !doubted.has(ownTrack)))) {
       group.foreign = true
@@ -439,15 +544,15 @@ function markElsewhere(sampledTracks, ownNames) {
 }
 
 /** Where the DOCTYPE at `at` in `text` ends, or -1 where `text` does not close it. */
-function doctypeEnd(text, at) {
+function doctypeEnd(text: string, at: number): number {
   let subset = false
   for (let i = at + 9; i < text.length; i++) {
-    let open
-    let close
+    let open: string | undefined
+    let close: string | undefined
     if (subset && text.startsWith('<!--', i)) [open, close] = ['<!--', '-->']
     else if (subset && text.startsWith('<?', i)) [open, close] = ['<?', '?>']
     else if (text[i] === '"' || text[i] === "'") open = close = text[i]
-    if (close !== undefined) {
+    if (open !== undefined && close !== undefined) {
       const found = text.indexOf(close, i + open.length)
       if (found < 0) return -1
       i = found + close.length - 1
@@ -463,7 +568,7 @@ function doctypeEnd(text, at) {
 }
 
 const MARKUP_START = /<[!?]/g
-const OPENERS = [
+const OPENERS: readonly (readonly [start: string, close: string])[] = [
   ['<![CDATA[', ']]>'],
   ['<!--', '-->'],
   ['<?', '?>'],
@@ -476,7 +581,7 @@ const OPENERS = [
  * match whole. Each is searched for its end once, so that markup inside an
  * unclosed one is not searched again and again.
  */
-function markupFrom(text, from) {
+function markupFrom(text: string, from: number): Markup | undefined {
   MARKUP_START.lastIndex = from
   for (let found = MARKUP_START.exec(text); found; found = MARKUP_START.exec(text)) {
     const at = found.index
@@ -507,15 +612,19 @@ function markupFrom(text, from) {
  * track's name is the `<name>` it has before its first segment, its text
  * without that of elements inside it, as the server reads it.
  */
-export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYTES) {
-  const tracks = new Map()
+export async function scanGpx(
+  file: Blob,
+  onProgress: (share: number) => void = () => {},
+  chunkBytes = SCAN_BYTES,
+): Promise<ScannedTrack[]> {
+  const tracks = new Map<string, ScannedTrack>()
   // Each <trk>'s first point in each stretch of SAMPLE_MS it has points in.
-  const samples = new Map()
-  const sampledTracks = []
+  const samples = new Map<OpenTrack, Sampled>()
+  const sampledTracks: SampledTrack[] = []
   // What the first <gpx> says (see rootOf), undefined before it.
-  let root
+  let root: Root | undefined
   // Tracks named like an AIS target, which are never compared.
-  const targets = new Set()
+  const targets = new Set<ScannedTrack>()
   const decoder = new TextDecoder()
   let xml11 = false
   let begun = false
@@ -523,12 +632,12 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let late = false
   let lateKnown = false
   let carry = ''
-  let track
+  let track: OpenTrack | undefined
   // Elements open in the document: GPX's are told by where they are, from the root down.
   let level = 0
   // The qualified names of the elements open, for an end tag that does not
   // match its start tag: the server refuses such a file, so none of it is listed.
-  const opened = []
+  const opened: string[] = []
   let malformed = false
   // Ended early at a tag or markup longer than the server takes: what came before is listed.
   let stopped = false
@@ -536,35 +645,35 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
   let rooted = false
   let doctyped = false
   // The element whose text is read, 'name' or 'time', and how many elements are open outside it.
-  let capture
+  let capture: 'name' | 'time' | undefined
   let captureLevel = 0
   let text = ''
   // Where the start tag of the point being read is, and that it is one the
   // server reads, for its position once its time is known: plain values, as
   // a gigabyte holds millions of points.
-  let pointText
+  let pointText = ''
   let pointAt = 0
   let inPoint = false
   // What that point's tag binds, undefined where it binds nothing.
-  let pointScope
+  let pointScope: Scope
   // The prefix of that point's <time> and what it binds, and the <trkseg> it is in.
-  let timePrefix
-  let timeScope
+  let timePrefix: string | undefined
+  let timeScope: Scope
   let segment = NO_SEGMENT
-  const sampledOf = (key) => {
+  const sampledOf = (key: OpenTrack, group: ScannedTrack) => {
     let sampled = samples.get(key)
     if (sampled === undefined) {
       sampled = { stretches: new Map() }
       samples.set(key, sampled)
-      sampledTracks.push({ group: key.group, sampled })
+      sampledTracks.push({ group, sampled })
     }
     return sampled
   }
   // A time in UTC shares its first 15 characters with every other in its
   // ten minutes, so most points need no parse.
-  let lastPrefix
-  let lastStretch
-  const stretchOf = (time) => {
+  let lastPrefix: string | undefined
+  let lastStretch = Number.NaN
+  const stretchOf = (time: string) => {
     const utc = time.length >= 20 && time.endsWith('Z')
     if (utc && lastPrefix !== undefined && time.startsWith(lastPrefix)) return lastStretch
     const stretch = Math.floor(timeOf(time) / SAMPLE_MS)
@@ -575,9 +684,9 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     return stretch
   }
   // The <trk> and stretch last found sampled: most points follow one in the same ten minutes.
-  let doneKey
-  let doneStretch
-  const sample = (key, time) => {
+  let doneKey: OpenTrack | undefined
+  let doneStretch: number | undefined
+  const sample = (key: OpenTrack, group: ScannedTrack, time: string) => {
     const stretch = stretchOf(time)
     if (stretch === doneStretch && key === doneKey) return
     if (Number.isNaN(stretch)) return
@@ -596,20 +705,21 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     const lat = coordinate(attributes.get('lat'))
     const lon = coordinate(attributes.get('lon'))
     if (Number.isNaN(at) || !inRange(lat, lon)) return
-    sampledOf(key).stretches.set(stretch, [at, lat, lon])
+    sampledOf(key, group).stretches.set(stretch, [at, lat, lon])
     doneKey = key
     doneStretch = stretch
   }
   // An element in the current <trk> ends, `level` elements open outside it.
-  const close = (name) => {
+  const close = (open: OpenTrack, name: string) => {
     if (capture !== undefined && level === captureLevel) {
       if (capture === 'name') {
-        track.name ??= textOf(text, xml11)
-      } else {
+        open.name ??= textOf(text, xml11)
+      } else if (open.group !== undefined) {
+        // A <time> is captured only in a point, inside a segment that has its track's group.
         const time = textOf(text, xml11)
-        track.group.from ??= time
-        track.group.to = time
-        if (!targets.has(track.group)) sample(track, time)
+        open.group.from ??= time
+        open.group.to = time
+        if (!targets.has(open.group)) sample(open, open.group, time)
       }
       capture = undefined
     } else if (name === 'trkseg' && level === 2) {
@@ -619,7 +729,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
       inPoint = false
     }
   }
-  const group = (name) => {
+  const group = (name: string) => {
     let found = tracks.get(name)
     if (!found) {
       tracks.set(name, (found = { name, points: 0 }))
@@ -638,13 +748,14 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
     // The chunk up to the first markup it does not close, which is read whole with the next chunk.
     let scanned = chunk
     // The next markup the tags have not reached, found once rather than at every tag.
-    let markup
-    const markupAfter = (from) => {
+    let markup: Markup | undefined
+    const markupAfter = (from: number) => {
       markup = markupFrom(chunk, from)
       if (markup?.end === -1) scanned = chunk.slice(0, markup.at)
     }
     markupAfter(0)
-    const outside = (from, to) => level === 0 && (xml11 ? OUTSIDE_TEXT_11 : OUTSIDE_TEXT).test(chunk.slice(from, to))
+    const outside = (from: number, to: number) =>
+      level === 0 && (xml11 ? OUTSIDE_TEXT_11 : OUTSIDE_TEXT).test(chunk.slice(from, to))
     TAG.lastIndex = 0
     for (;;) {
       const match = nextTag(scanned)
@@ -697,7 +808,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         }
         level--
         if (track && level === 1) track = undefined
-        else if (track) close(name)
+        else if (track) close(track, name ?? '')
         continue
       }
       if (level === 0) {
@@ -720,18 +831,18 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
         segment = NO_SEGMENT
       } else if (track && level === 2 && name === 'trkseg') {
         const scope = scopeOf(chunk, match.index, match[0])
-        const scopes = [scope, track.scope, root.scope]
+        const scopes = [scope, track.scope, root?.scope]
         if (inGpx(prefix, scopes, true)) {
           track.group ??= group(track.name ?? '')
           segment = { scopes, inGpx: !empty, plain: inGpx(undefined, scopes, true) }
         }
       } else if (track && level === 2 && name === 'name' && track.group === undefined && capture === undefined) {
-        if (inGpx(prefix, [scopeOf(chunk, match.index, match[0]), track.scope, root.scope], true)) {
+        if (inGpx(prefix, [scopeOf(chunk, match.index, match[0]), track.scope, root?.scope], true)) {
           capture = 'name'
           captureLevel = level
           text = ''
         }
-      } else if (track && level === 3 && name === 'trkpt' && segment.inGpx) {
+      } else if (track?.group && level === 3 && name === 'trkpt' && segment.inGpx) {
         // Most points bind no namespace and have no prefix: their segment's default says.
         const scope = prefix !== undefined || match[0].includes('xmlns') ? scopeOf(chunk, match.index, match[0]) : false
         if (scope === false ? segment.plain : inGpx(prefix, [scope, ...segment.scopes], true)) {
@@ -761,7 +872,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
           break read
         }
         opened.push(prefix === undefined ? name : `${prefix}:${name}`)
-      } else if (track) close(name)
+      } else if (track) close(track, name)
     }
     // A tag cut by the end of the chunk is read whole with the next one, and
     // markup the chunk does not close is carried from its start, as long as
@@ -791,7 +902,7 @@ export async function scanGpx(file, onProgress = () => {}, chunkBytes = SCAN_BYT
 const FINGERPRINT_BYTES = 64 * 1024
 
 /** cyrb53, a fast 53-bit string hash: enough to tell two files apart by chance, not against intent. */
-function hash53(bytes) {
+function hash53(bytes: Uint8Array): string {
   let h1 = 0xdeadbeef
   let h2 = 0x41c6ce57
   for (const byte of bytes) {
@@ -811,16 +922,16 @@ function hash53(bytes) {
  * SubtleCrypto, which a page served over plain http, as most boats serve
  * it, does not have.
  */
-export async function fingerprintOf(file) {
+export async function fingerprintOf(file: Blob & { lastModified?: number }): Promise<string> {
   const head = new Uint8Array(await file.slice(0, FINGERPRINT_BYTES).arrayBuffer())
   const tail = new Uint8Array(await file.slice(Math.max(0, file.size - FINGERPRINT_BYTES)).arrayBuffer())
   return `${file.lastModified ?? 0}:${hash53(head)}:${hash53(tail)}`
 }
 
 /** The answer's body, or what it says in place of one. */
-async function bodyOf(response) {
+async function bodyOf(response: Response): Promise<UploadAnswer> {
   try {
-    return await response.json()
+    return (await response.json()) as UploadAnswer
   } catch {
     return { message: `The server answered ${response.status}.` }
   }
@@ -835,14 +946,19 @@ const STOP_ATTEMPTS = 5
  * until another takes its place, which it allows after IDLE_TIMEOUT_MS
  * without a slice.
  */
-async function stopUpload(call, url, onStatus, wait) {
+async function stopUpload(
+  call: Call,
+  url: string,
+  onStatus: (status: GpxUploadStatus) => void,
+  wait: (ms: number) => Promise<void>,
+): Promise<never> {
   let ended = false
   for (let attempt = 0; attempt < STOP_ATTEMPTS && !ended; attempt++) {
     if (attempt > 0) await wait(RETRY_DELAY_MS)
     const response = await call(url, { method: 'DELETE' }).catch(() => undefined)
     const upload = response && (await bodyOf(response)).upload
     if (upload) onStatus(upload)
-    ended = response?.ok === true || (upload !== undefined && upload.state !== 'receiving')
+    ended = response?.ok === true || (!!upload && upload.state !== 'receiving')
   }
   if (!ended) {
     throw new Error(
@@ -853,10 +969,10 @@ async function stopUpload(call, url, onStatus, wait) {
 }
 
 /** What `promise` comes to, or undefined as soon as `signal` aborts. */
-function unlessAborted(promise, signal) {
+function unlessAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T | undefined> {
   if (!signal) return promise
   if (signal.aborted) return Promise.resolve(undefined)
-  return new Promise((resolve, reject) => {
+  return new Promise<T | undefined>((resolve, reject) => {
     const aborted = () => resolve(undefined)
     signal.addEventListener('abort', aborted, { once: true })
     promise.then(
@@ -864,17 +980,17 @@ function unlessAborted(promise, signal) {
         signal.removeEventListener('abort', aborted)
         resolve(value)
       },
-      (err) => {
+      (err: unknown) => {
         signal.removeEventListener('abort', aborted)
-        reject(err)
+        reject(err instanceof Error ? err : new Error(String(err)))
       },
     )
   })
 }
 
 /** Wait `ms`, or less once `signal` aborts. */
-function pause(ms, signal) {
-  return new Promise((resolve) => {
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
     if (signal?.aborted) return resolve()
     const done = () => {
       clearTimeout(timer)
@@ -899,31 +1015,42 @@ const FINAL = new Set([400, 401, 403, 413, 415, 422])
  * up the slice on its way and ends the upload on the server; what the server
  * wrote stays.
  */
-export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, request = fetch, sleep }) {
-  const wait = sleep ?? ((ms) => pause(ms))
+export async function uploadGpx({
+  file,
+  tracks,
+  onOverlap,
+  onStatus,
+  signal,
+  request = fetch,
+  sleep,
+}: UploadOptions): Promise<GpxUploadStatus> {
+  const wait = sleep ?? ((ms: number) => pause(ms))
   // Stop does not wait out a retry's delay.
-  const backOff = (ms) => (sleep ? unlessAborted(sleep(ms), signal) : pause(ms, signal))
-  const call = (url, init = {}) => request(url, { credentials: 'include', ...init })
+  const backOff = (ms: number) => (sleep ? unlessAborted(sleep(ms), signal) : pause(ms, signal))
+  const call: Call = (url, init = {}) => request(url, { credentials: 'include', ...init })
   const current = async () => {
     const response = await call(UPLOAD_URL)
     return response.ok ? (await bodyOf(response)).upload : undefined
   }
 
   const fingerprint = await fingerprintOf(file)
-  let status = await unlessAborted(
+  const existing = await unlessAborted(
     current().catch(() => undefined),
     signal,
   )
   if (signal?.aborted) throw stopped()
   const same =
-    status?.state === 'receiving' &&
-    status.filename === file.name &&
-    status.size === file.size &&
-    status.fingerprint === fingerprint &&
-    status.onOverlap === onOverlap &&
-    status.tracks.length === tracks.length &&
-    status.tracks.every((name) => tracks.includes(name))
-  if (!same) {
+    existing?.state === 'receiving' &&
+    existing.filename === file.name &&
+    existing.size === file.size &&
+    existing.fingerprint === fingerprint &&
+    existing.onOverlap === onOverlap &&
+    existing.tracks.length === tracks.length &&
+    existing.tracks.every((name) => tracks.includes(name))
+  let status: GpxUploadStatus
+  if (same) {
+    status = existing
+  } else {
     const starting = call(UPLOAD_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -953,7 +1080,7 @@ export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, req
   const url = `${UPLOAD_URL}/${encodeURIComponent(status.id)}`
 
   let failures = 0
-  const retry = async (error) => {
+  const retry = async (error: Error) => {
     if (++failures > RETRIES) throw error
     await backOff(Math.min(RETRY_DELAY_MS * 2 ** (failures - 1), RETRY_DELAY_MAX_MS))
   }
@@ -962,7 +1089,7 @@ export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, req
       await stopUpload(call, url, onStatus, wait)
     }
     const offset = status.received
-    let response
+    let response: Response
     try {
       response = await call(`${url}?offset=${offset}`, {
         method: 'PUT',
@@ -970,7 +1097,7 @@ export async function uploadGpx({ file, tracks, onOverlap, onStatus, signal, req
         body: file.slice(offset, offset + SLICE_BYTES),
         // Stop does not wait for a slice that is stuck on its way: the
         // server goes on from what it wrote either way.
-        signal,
+        signal: signal ?? null,
       })
     } catch {
       if (signal?.aborted) continue

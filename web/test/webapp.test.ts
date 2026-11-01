@@ -1,23 +1,34 @@
 import { existsSync, readFileSync } from 'node:fs'
+import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { toGpx } from './gpx.js'
-import { trackLabel } from './utils.js'
-import { parseDuration } from './timeWindow.js'
-// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
-import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '../public/bin.js'
-// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
-import { imported, progress, start as startImport, trackChoice, uploaded } from '../public/import.js'
-// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
-import { fingerprintOf, scanGpx, SLICE_BYTES, uploadGpx } from '../public/upload.js'
-import { GpxReader } from './gpxUpload.js'
-// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
-import { confirmed, start as startDanger } from '../public/danger.js'
-// @ts-expect-error -- plain JavaScript shipped as-is, with no declarations
-import { historyView, POLL_MS, start as startHistory } from '../public/history.js'
+import { toGpx } from '../../src/gpx.js'
+import { trackLabel } from '../../src/utils.js'
+import { parseDuration } from '../../src/timeWindow.js'
+import { deletedPart, label as binLabel, localInput, refusal, spanQuery } from '../src/bin.js'
+import { imported, progress, start as startImport, trackChoice, uploaded } from '../src/import.js'
+import { fingerprintOf, scanGpx, SLICE_BYTES, uploadGpx } from '../src/upload.js'
+import { GpxReader } from '../../src/gpxUpload.js'
+import { confirmed, start as startDanger } from '../src/danger.js'
+import { historyView, POLL_MS, start as startHistory } from '../src/history.js'
 
 /**
- * The webapp ships as plain static files with no build step, so it cannot
- * import from `src/`. Its label function therefore duplicates `trackLabel()`,
+ * tracks.ts as a script body the tests can run against stand-ins for the
+ * document and fetch: compiled, its type imports gone, and without the call
+ * that starts it, so a test starts it and waits for it.
+ */
+function script(source: string): string {
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2024, module: ts.ModuleKind.ESNext },
+  })
+  return outputText.replace(/^export \{\};$/m, '').replace(/^void load\(\);$/m, '')
+}
+
+/** The page's static files, which the build copies as they are into `public/`, the webapp root. */
+const STATIC = 'web/static'
+
+/**
+ * The page imports nothing from `src/` at run time, which would pull server
+ * code into the browser. Its label function therefore duplicates `trackLabel()`,
  * and the two must agree: the same track showing as `AIS Ariadne` on one
  * screen and `987654321` on another is the kind of thing nobody reports as a
  * bug but everybody notices.
@@ -52,15 +63,16 @@ describe('the app icon', () => {
     expect(declared).toBeDefined()
 
     // Resolved the way the admin UI resolves it: against public/, which is
-    // what the server mounts at the webapp's URL root.
-    const onDisk = `public/${declared!.replace(/^\.\//, '')}`
+    // what the server mounts at the webapp's URL root, and the build fills
+    // from web/static.
+    const onDisk = `${STATIC}/${declared!.replace(/^\.\//, '')}`
 
     expect(existsSync(onDisk)).toBe(true)
   })
 
   it('links the same file as the page favicon', () => {
     const declared = pkg.signalk?.appIcon!.replace(/^\.\//, '')
-    const html = readFileSync('public/index.html', 'utf8')
+    const html = readFileSync(`${STATIC}/index.html`, 'utf8')
     const href = /<link[^>]+rel="icon"[^>]+href="([^"]+)"/.exec(html)?.[1]
 
     expect(href).toBeDefined()
@@ -84,7 +96,7 @@ describe('the app icon', () => {
 
     // Webapp root: what the admin UI and the page favicon resolve.
     expect(pkg.files).toContain('public')
-    expect(existsSync(`public/${basename}`)).toBe(true)
+    expect(existsSync(`${STATIC}/${basename}`)).toBe(true)
   })
 
   // Same discipline as the icon, applied before it can break: the App Store
@@ -109,7 +121,7 @@ describe('the app icon', () => {
     // plugin list showed the new one.
     const basename = pkg.signalk!.appIcon!.replace(/^\.\//, '')
 
-    expect(readFileSync(basename, 'utf8')).toBe(readFileSync(`public/${basename}`, 'utf8'))
+    expect(readFileSync(basename, 'utf8')).toBe(readFileSync(`${STATIC}/${basename}`, 'utf8'))
   })
 })
 
@@ -262,7 +274,7 @@ async function render(
     createElement: element,
   }
 
-  const source = readFileSync(new URL('../public/tracks.js', import.meta.url), 'utf8')
+  const source = script(readFileSync(new URL('../src/tracks.ts', import.meta.url), 'utf8'))
   // The page's own deadline is left alone; only the clock behind it is
   // substituted, so nothing here depends on how the constant is spelled.
   const abortSignal =
@@ -271,12 +283,11 @@ async function render(
       : options.speedUp !== undefined
         ? { timeout: (ms: number) => AbortSignal.timeout(ms / options.speedUp!) }
         : AbortSignal
-  const run = new Function(
-    'document',
-    'fetch',
-    'AbortSignal',
-    `return (async () => { ${source.replace(/^void load\(\)$/m, '')} await load() })()`,
-  ) as (d: unknown, f: unknown, a: unknown) => Promise<void>
+  const run = new Function('document', 'fetch', 'AbortSignal', `return (async () => { ${source} await load() })()`) as (
+    d: unknown,
+    f: unknown,
+    a: unknown,
+  ) => Promise<void>
 
   const requested: string[] = []
   // What happened to the two track requests, in order: asked, read or aborted.
@@ -453,7 +464,7 @@ describe('the webapp asks the API for the right thing', () => {
 // The page is served from a scoped path, so an absolute or wrongly-relative
 // asset reference resolves outside the mount and silently loads nothing.
 describe('the page references its assets relatively', () => {
-  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8')
+  const html = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8')
   const mount = 'http://localhost/@signalk/tracks-plugin/index.html'
 
   it.each([
@@ -1246,7 +1257,7 @@ describe('the webapp offers to delete a track', () => {
 })
 
 describe('the recycle bin page', () => {
-  it('labels a track as tracks.js and the server do', () => {
+  it('labels a track as tracks.ts and the server do', () => {
     for (const properties of [
       { context: SELF, isSelf: true },
       { context: OTHER, contextName: 'Ariadne', isSelf: false },
@@ -1270,11 +1281,11 @@ describe('the recycle bin page', () => {
   })
 
   it('reaches the end of the second a span ends in, and refuses an empty span', () => {
-    const query = new URLSearchParams(spanQuery('2026-09-01T10:00:00', '2026-09-01T11:00:00').slice(1))
+    const query = new URLSearchParams(spanQuery('2026-09-01T10:00:00', '2026-09-01T11:00:00')!.slice(1))
     const from = Date.parse(query.get('from')!)
     expect(Date.parse(query.get('to')!) - from).toBe(60 * 60 * 1000 + 999)
     expect(spanQuery('', '')).toBeUndefined()
-    expect(new URLSearchParams(spanQuery('', '2026-09-01T11:00:00').slice(1)).has('from')).toBe(false)
+    expect(new URLSearchParams(spanQuery('', '2026-09-01T11:00:00')!.slice(1)).has('from')).toBe(false)
   })
 
   it('fills the inputs in the viewer’s zone, to the second', () => {
@@ -2861,7 +2872,7 @@ describe('a GPX file uploaded in slices', () => {
   }
 
   const blob = (size: number) => Object.assign(new Blob([new Uint8Array(size)]), { name: 'f.gpx' })
-  const options = { tracks: ['Own'], onOverlap: 'keep', onStatus: () => {}, sleep: async () => {} }
+  const options = { tracks: ['Own'], onOverlap: 'keep' as const, onStatus: () => {}, sleep: async () => {} }
 
   it('sends the file a slice at a time from where the server says it got to', async () => {
     const size = 2 * SLICE_BYTES + 5
@@ -3073,8 +3084,8 @@ describe('the history import section', () => {
       const view = historyView({ provider: true, state: running })
       const day = new Date(running.nextDay).toLocaleDateString(undefined, { timeZone: 'UTC' })
       expect(day).not.toBe(new Date(running.nextDay).toLocaleDateString())
-      expect(view.text).toBe(`Importing: 40% done, up to ${day}. 1234 positions filled so far.`)
-      expect(view.button).toBeUndefined()
+      expect(view?.text).toBe(`Importing: 40% done, up to ${day}. 1234 positions filled so far.`)
+      expect(view?.button).toBeUndefined()
     } finally {
       if (zone === undefined) delete process.env.TZ
       else process.env.TZ = zone
@@ -3087,17 +3098,17 @@ describe('the history import section', () => {
   it('offers to resume an import that stopped, and to import again once it finished', () => {
     const stopped = { ...running, running: false }
     const failed = historyView({ provider: true, state: { ...stopped, error: 'provider unavailable' } })
-    expect(failed.text).toMatch(/^The import stopped at .+: provider unavailable\. 1234 positions filled\.$/)
+    expect(failed?.text).toMatch(/^The import stopped at .+: provider unavailable\. 1234 positions filled\.$/)
     expect(failed).toMatchObject({ button: 'Resume', state: 'error' })
-    expect(historyView({ provider: true, state: stopped }).button).toBe('Resume')
+    expect(historyView({ provider: true, state: stopped })?.button).toBe('Resume')
     const done = historyView({ provider: true, state: { ...stopped, finishedAt: '2026-06-11T01:00:00.000Z' } })
-    expect(done.text).toMatch(/^Imported on .+: 1234 positions filled\.$/)
-    expect(done.button).toBe('Import again')
+    expect(done?.text).toMatch(/^Imported on .+: 1234 positions filled\.$/)
+    expect(done?.button).toBe('Import again')
     // Shown, but with nothing to read from there is nothing to offer.
     expect(
-      historyView({ provider: false, state: { ...stopped, finishedAt: running.startedAt } }).button,
+      historyView({ provider: false, state: { ...stopped, finishedAt: running.startedAt } })?.button,
     ).toBeUndefined()
-    expect(historyView({ provider: false, state: stopped }).button).toBeUndefined()
+    expect(historyView({ provider: false, state: stopped })?.button).toBeUndefined()
   })
 
   /** The section's elements, as stubs the script writes to. */
@@ -3403,7 +3414,7 @@ describe('the danger zone', () => {
   // Enter in the field submits with the form's first submit button: were that
   // Cancel, typing the word and pressing Enter would close the dialog.
   it('has Delete as its only submit button', () => {
-    const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8')
+    const html = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8')
     const form = /<dialog id="reset-dialog"[\s\S]*?<\/dialog>/.exec(html)![0]
     const submits = [...form.matchAll(/<button\b([^>]*)>/g)]
       .map(([, attributes]) => attributes!)

@@ -57,7 +57,7 @@ export default defineConfig({
       'src/utils.ts',
       'src/timeWindow.ts',
     ],
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'web/test/**/*.test.ts'],
     // e2e runs against a real Signal K server and a real QuestDB, which only
     // its own CI job provides. `npm run test:e2e` opts in.
     exclude: ['**/node_modules/**', '**/dist/**', 'src/**/*.e2e.test.ts'],

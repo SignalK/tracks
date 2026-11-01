@@ -49,9 +49,9 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "build": "vite build",
+    "build": "vite build && vite build --config vite.web.config.ts",
     "watch": "vite build --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p web && tsc -p web/test",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

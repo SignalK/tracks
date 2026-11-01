@@ -1120,9 +1120,9 @@ export default function ThePlugin(app: App): Plugin {
        * Written a day at a time by `GpxTrackWriter`, which shares its lines with
        * `toGpx`, so the export a user downloads is the same document the module
        * produces everywhere else.
-       * The webapp cannot reach that module — it ships as static files with no
-       * bundler — which is why the conversion lives behind a route instead of
-       * being duplicated in the page.
+       * The webapp imports no server code from `src/` at run time, which is
+       * why the conversion lives behind a route instead of being duplicated in
+       * the page.
        */
       const gpxHandler =
         (contextOf: (req: Request) => string): RequestHandler =>

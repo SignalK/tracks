@@ -8,13 +8,27 @@
  * Everything that touches the page runs from `start()`, so the pure helpers
  * can be imported and tested without a document.
  */
+import type { BinEntryJson, Labelled, ListedTrack, Refusal } from './api.js'
+import { byId, within } from './dom.js'
 
 /** Relative, because the server mounts this page under /@signalk/tracks-plugin. */
 const TRACKS_URL = '../../signalk/v2/api/tracks'
 const BIN_URL = '../../plugins/tracks/recycle-bin'
 
-/** The label for a track, matching `trackLabel()` on the server and `label()` in tracks.js. */
-export function label({ context, contextName, isSelf }) {
+/** What the list hands over with `tracks:delete`: the track to delete, and its label. */
+export interface DeleteTarget extends ListedTrack {
+  label: string
+}
+
+/** The delete dialog's fields, by name. */
+interface DeleteFields {
+  scope: RadioNodeList
+  from: HTMLInputElement
+  to: HTMLInputElement
+}
+
+/** The label for a track, matching `trackLabel()` on the server and `label()` in tracks.ts. */
+export function label({ context, contextName, isSelf }: Labelled): string {
   if (isSelf) {
     return 'Own Ship'
   }
@@ -26,7 +40,7 @@ export function label({ context, contextName, isSelf }) {
 }
 
 /** What a bin entry deleted, in the viewer's locale and zone. */
-export function deletedPart({ whole, from, to }) {
+export function deletedPart({ whole, from, to }: Pick<BinEntryJson, 'whole' | 'from' | 'to'>): string {
   if (whole) {
     return 'The whole track'
   }
@@ -48,7 +62,7 @@ export function deletedPart({ whole, from, to }) {
  * 12:00:00" taken literally would keep the last point the user meant to
  * delete.
  */
-export function spanQuery(from, to) {
+export function spanQuery(from: string, to: string): string | undefined {
   const params = new URLSearchParams()
   if (from) params.set('from', new Date(from).toISOString())
   if (to) params.set('to', new Date(new Date(to).getTime() + 999).toISOString())
@@ -57,12 +71,12 @@ export function spanQuery(from, to) {
 }
 
 /** An ISO time as a `datetime-local` value, in the viewer's zone. */
-export function localInput(iso) {
-  const at = new Date(iso)
+export function localInput(iso: string | undefined): string {
+  const at = new Date(iso ?? Number.NaN)
   if (Number.isNaN(at.getTime())) {
     return ''
   }
-  const pad = (n) => String(n).padStart(2, '0')
+  const pad = (n: number) => String(n).padStart(2, '0')
   return (
     `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}` +
     `T${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`
@@ -70,7 +84,7 @@ export function localInput(iso) {
 }
 
 /** Why a request was refused, in words a user can act on. */
-export function refusal(status) {
+export function refusal(status: number): string {
   if (status === 401 || status === 403) {
     return 'This needs an administrator login.'
   }
@@ -83,45 +97,44 @@ export function refusal(status) {
   return `The server answered ${status}.`
 }
 
-function when(iso) {
-  const at = new Date(iso)
+function when(iso: string | undefined): string {
+  const at = new Date(iso ?? Number.NaN)
   return Number.isNaN(at.getTime()) ? '—' : at.toLocaleString()
 }
 
 /** The message a refusing server sent with its answer, if it sent one. */
-export async function messageOf(response) {
+export async function messageOf(response: Response): Promise<string | undefined> {
   try {
-    const body = await response.json()
+    const body = (await response.json()) as Refusal | null
     return body?.error ?? body?.message
   } catch {
     return undefined
   }
 }
 
-function start() {
-  const dialog = document.getElementById('delete-dialog')
-  const form = dialog.querySelector('form')
-  const error = document.getElementById('delete-error')
-  const binStatus = document.getElementById('bin-status')
-  const binTable = document.getElementById('bin-table')
-  const binBody = binTable.querySelector('tbody')
-  let target
+function start(): void {
+  const dialog = byId<HTMLDialogElement>('delete-dialog')
+  const form = within<HTMLFormElement>(dialog, 'form')
+  const fields = form.elements as HTMLFormControlsCollection & DeleteFields
+  const error = byId('delete-error')
+  const binStatus = byId('bin-status')
+  const binTable = byId('bin-table')
+  const binBody = within<HTMLTableSectionElement>(binTable, 'tbody')
+  let target: DeleteTarget | undefined
 
   document.addEventListener('tracks:delete', (event) => {
-    target = event.detail
-    document.getElementById('delete-title').textContent = `Delete ${target.label}${
-      target.name ? ` (imported: ${target.name})` : ''
-    }`
+    target = (event as CustomEvent<DeleteTarget>).detail
+    byId('delete-title').textContent = `Delete ${target.label}${target.name ? ` (imported: ${target.name})` : ''}`
     // A recording goes on after it is deleted: what is recorded next is a new
     // track, so "whole" means up to now, and saying so avoids a surprise.
-    document.getElementById('delete-whole').textContent = target.id.startsWith(`${target.providerId}:recorded:`)
+    byId('delete-whole').textContent = (target.id ?? '').startsWith(`${target.providerId}:recorded:`)
       ? 'The whole track, up to now'
       : 'The whole track'
-    form.elements.scope.value = 'whole'
-    form.elements.from.value = localInput(target.from)
-    form.elements.to.value = localInput(target.to)
+    fields.scope.value = 'whole'
+    fields.from.value = localInput(target.from)
+    fields.to.value = localInput(target.to)
     // A track without times has no part to address by time.
-    for (const input of form.querySelectorAll('[value="span"], .span input')) {
+    for (const input of form.querySelectorAll<HTMLInputElement>('[value="span"], .span input')) {
       input.disabled = target.from === undefined
     }
     error.hidden = true
@@ -129,11 +142,11 @@ function start() {
   })
 
   form.addEventListener('submit', async (event) => {
-    if (event.submitter?.value !== 'delete') {
+    if ((event.submitter as HTMLButtonElement | null)?.value !== 'delete' || target === undefined) {
       return
     }
     event.preventDefault()
-    const { scope, from, to } = form.elements
+    const { scope, from, to } = fields
     let query = ''
     if (scope.value === 'span') {
       // Without a bound the request would delete the whole track, which is
@@ -147,7 +160,7 @@ function start() {
       query = span
     }
     // The server hands out ids already qualified by their provider.
-    const id = encodeURIComponent(target.id)
+    const id = encodeURIComponent(target.id ?? '')
     const url = `${TRACKS_URL}/${id}${query}`
     let response
     try {
@@ -166,7 +179,7 @@ function start() {
     location.reload()
   })
 
-  async function act(url, method) {
+  async function act(url: string, method: string): Promise<void> {
     let response
     try {
       response = await fetch(url, { method, credentials: 'include' })
@@ -181,7 +194,7 @@ function start() {
     location.reload()
   }
 
-  function showBin(message, state) {
+  function showBin(message: string, state?: string): void {
     binStatus.textContent = message
     if (state) {
       binStatus.dataset.state = state
@@ -190,14 +203,14 @@ function start() {
     }
   }
 
-  function cell(text, className) {
+  function cell(text: string | number, className?: string): HTMLTableCellElement {
     const td = document.createElement('td')
     td.textContent = String(text)
     if (className) td.className = className
     return td
   }
 
-  function button(text, onClick, className) {
+  function button(text: string, onClick: () => void, className?: string): HTMLButtonElement {
     const b = document.createElement('button')
     b.type = 'button'
     b.textContent = text
@@ -206,7 +219,7 @@ function start() {
     return b
   }
 
-  function binRow(entry) {
+  function binRow(entry: BinEntryJson): HTMLTableRowElement {
     const tr = document.createElement('tr')
     const name = cell(label(entry))
     if (entry.name) {
@@ -242,7 +255,7 @@ function start() {
     return tr
   }
 
-  async function loadBin() {
+  async function loadBin(): Promise<void> {
     let response
     try {
       response = await fetch(BIN_URL, { credentials: 'include', signal: AbortSignal.timeout(30_000) })
@@ -259,9 +272,9 @@ function start() {
       )
       return
     }
-    let entries
+    let entries: BinEntryJson[] | undefined
     try {
-      entries = await response.json()
+      entries = (await response.json()) as BinEntryJson[] | undefined
     } catch {
       entries = undefined
     }
