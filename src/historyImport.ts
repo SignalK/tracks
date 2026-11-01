@@ -250,7 +250,10 @@ export async function runHistoryImport(
     if (current.nextDay === undefined) {
       // Not from the epoch with a retention set: what lies before its cutoff
       // is never imported, and a provider may refuse so long a range.
-      const start = await historyStart(current.startedAt, deps.history, Math.max(0, firstKept()))
+      // From the exact cutoff, so a cutoff later than the import's start on
+      // the same day probes nothing; the day it starts at is still whole.
+      const cutoff = deps.keepFrom?.() ?? Number.NEGATIVE_INFINITY
+      const start = await historyStart(current.startedAt, deps.history, Math.max(0, cutoff))
       if (start === undefined) {
         await advance({ ...current, finishedAt: now() })
         return current

@@ -160,6 +160,34 @@ describe('historyStart from a cutoff', () => {
     expect(calls).toEqual([])
   })
 
+  it('probes nothing when the cutoff is later on the day the import started', async () => {
+    const { history, calls } = fakeHistory(fixes(day0, day0 + HOUR))
+    const store = fakeStore()
+    const final = await runHistoryImport(begin(day0 + 10 * HOUR), {
+      ...store.deps,
+      history,
+      stopped: () => false,
+      keepFrom: () => day0 + 12 * HOUR,
+    })
+    expect(final.finishedAt).toBeDefined()
+    expect(calls).toEqual([])
+    expect(store.written).toEqual([])
+  })
+
+  it('probes from the exact cutoff, and starts the import at its day', async () => {
+    const { history, calls } = fakeHistory(fixes(day0 + 13 * HOUR, day0 + 14 * HOUR))
+    const store = fakeStore()
+    const final = await runHistoryImport(begin(day0 + DAY_MS), {
+      ...store.deps,
+      history,
+      stopped: () => false,
+      keepFrom: () => day0 + 12 * HOUR,
+    })
+    expect(calls[0]!.from).toBe(day0 + 12 * HOUR)
+    expect(final.firstDay).toBe(day0)
+    expect(store.written).toHaveLength(3600)
+  })
+
   it('finishes an import whose start lies before the retention cutoff', async () => {
     const { history, calls } = fakeHistory(fixes(day0, day0 + HOUR))
     const store = fakeStore()
