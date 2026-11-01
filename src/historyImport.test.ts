@@ -146,6 +146,35 @@ describe('historyStart', () => {
 })
 
 describe('historyStart from a cutoff', () => {
+  it('starts at or before the first kept fix for an end-stamped provider', async () => {
+    const { history } = fakeHistory(fixes(day0 + 12 * HOUR, day0 + 13 * HOUR), { stampAtEnd: true })
+    const start = await historyStart(day0 + DAY_MS, history, day0)
+    expect(start).toBeDefined()
+    expect(start).toBeLessThanOrEqual(day0 + 12 * HOUR)
+  })
+
+  it('asks nothing when the cutoff is not before the end', async () => {
+    const { history, calls } = fakeHistory(fixes(day0, day0 + HOUR))
+    await expect(historyStart(day0 + DAY_MS, history, day0 + DAY_MS)).resolves.toBeUndefined()
+    await expect(historyStart(day0 + DAY_MS, history, day0 + 2 * DAY_MS)).resolves.toBeUndefined()
+    expect(calls).toEqual([])
+  })
+
+  it('finishes an import whose start lies before the retention cutoff', async () => {
+    const { history, calls } = fakeHistory(fixes(day0, day0 + HOUR))
+    const store = fakeStore()
+    const final = await runHistoryImport(begin(day0 + DAY_MS), {
+      ...store.deps,
+      history,
+      stopped: () => false,
+      keepFrom: () => day0 + 3 * DAY_MS,
+    })
+    expect(final.finishedAt).toBeDefined()
+    expect(final.error).toBeUndefined()
+    expect(calls).toEqual([])
+    expect(store.written).toEqual([])
+  })
+
   it('probes only from the cutoff on, at buckets sized for that range', async () => {
     const { history, calls } = fakeHistory(fixes(day0 + 12 * HOUR, day0 + 13 * HOUR))
     const start = await historyStart(day0 + DAY_MS, history, day0)

@@ -206,6 +206,10 @@ export async function historyStart(
   history: HistoryImportDeps['history'],
   from = 0,
 ): Promise<number | undefined> {
+  // A retention cutoff past the import's start leaves nothing to find.
+  if (from >= until) {
+    return undefined
+  }
   const seconds = Math.max(FINEST_SECONDS, Math.ceil((until - from) / 1000 / START_PROBE_BUCKETS))
   const probe = await history(from, until, seconds)
   if (probe.length === 0) {
