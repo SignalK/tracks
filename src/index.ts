@@ -1481,7 +1481,7 @@ export default function ThePlugin(app: App): Plugin {
             return
           }
           const converted = read.map((gpx) => fromGpxTrack(gpx, context ?? gpx.context))
-          const kept: { id: string; overlapping: number; expired: number }[] = []
+          const kept: { id?: string; overlapping: number; expired: number }[] = []
           try {
             for (const { track } of converted) {
               kept.push(await provider.importTrack(track, onOverlap))
@@ -1494,7 +1494,7 @@ export default function ThePlugin(app: App): Plugin {
           res.status(201).json({
             // As the Track API names them on a server with its write routes,
             // so a client can fetch or delete them there.
-            ids: kept.map(({ id }) => `${PLUGIN_ID}:${id}`),
+            ids: kept.flatMap(({ id }) => (id === undefined ? [] : [`${PLUGIN_ID}:${id}`])),
             skippedPoints: converted.reduce((sum, { skippedPoints }) => sum + skippedPoints, 0),
             overlappingPoints: kept.reduce((sum, { overlapping }) => sum + overlapping, 0),
             expiredPoints: kept.reduce((sum, { expired }) => sum + expired, 0),
@@ -1968,7 +1968,7 @@ export default function ThePlugin(app: App): Plugin {
           minimum: 0,
           title: "Days to keep other vessels' positions",
           description:
-            "The own vessel is never removed. Other vessels' positions are removed once older than this, and a vessel with none left is dropped: a busy harbour puts hundreds of AIS targets past the receiver in a day, and a neighbour that never leaves range would otherwise grow without bound. 0 keeps them indefinitely.",
+            "The own vessel is not affected: its track is kept unless the danger zone below says otherwise. Other vessels' positions are removed once older than this, and a vessel with none left is dropped: a busy harbour puts hundreds of AIS targets past the receiver in a day, and a neighbour that never leaves range would otherwise grow without bound. 0 keeps them indefinitely.",
           default: DEFAULT_AIS_RETENTION_DAYS,
         },
         segmentGapMinutes: {

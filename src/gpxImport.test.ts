@@ -191,6 +191,17 @@ describe('the GPX upload route', () => {
       // Another boat's track is an import of its own, which no retention reaches.
       const other = await upload(h, gpxFile(trk('Friend', [old, old + MINUTE])))
       expect(other.body).toMatchObject({ expiredPoints: 0 })
+      // Nothing of it kept, the track is not listed as imported.
+      const gone = await upload(h, gpxFile(trk('Last year', [old, old + MINUTE])), '?self=true')
+      expect(gone.status).toBe(201)
+      expect(gone.body).toMatchObject({ ids: [], expiredPoints: 2 })
+      await expect(
+        h.trackProvider()!.storeTrack!({
+          type: 'Feature',
+          geometry: { type: 'MultiLineString', coordinates: [[[24, 60]]] },
+          properties: { context: SELF_CONTEXT, coordTimes: [[iso(old)]] },
+        }),
+      ).rejects.toMatchObject({ isTrackRejected: true })
     } finally {
       await h.stop()
     }

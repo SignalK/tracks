@@ -261,6 +261,14 @@ export async function runHistoryImport(
       const from = current.nextDay!
       const to = Math.min(from + DAY_MS, current.startedAt)
       const day = await importDay(from, to, deps, current.inGap === true)
+      // The day starts before the cutoff on the first day kept, and the
+      // next prune would delete what lies before it.
+      const keepFrom = deps.keepFrom?.() ?? Number.NEGATIVE_INFINITY
+      if (keepFrom > from) {
+        day.runs = day.runs
+          .map((run) => run.filter(({ timestamp }) => timestamp >= keepFrom))
+          .filter((run) => run.length > 0)
+      }
       const next: HistoryImportState = {
         ...current,
         nextDay: to,

@@ -683,7 +683,11 @@ export function createTrackProvider(deps: TrackProviderDeps): TrackProvider {
     },
 
     async storeTrack(track: TrackImport): Promise<string> {
-      return (await importTrack(toImportedTrack(track), 'keep')).id
+      const { id } = await importTrack(toImportedTrack(track), 'keep')
+      if (id === undefined) {
+        throw new TrackRejectedError("Every point of this track is older than the own vessel's track is kept")
+      }
+      return id
     },
 
     importTrack,
@@ -962,7 +966,8 @@ export interface KeepTrackDeps {
 }
 
 export interface KeptTrack {
-  id: string
+  /** Absent when the retention left nothing of the track to keep. */
+  id?: string
   /** Points left out because the vessel already had positions there. */
   overlapping: number
   /** Points left out because they are older than the own vessel's retention keeps. */
@@ -992,6 +997,9 @@ export async function keepTrack(track: ImportedTrack, deps: KeepTrackDeps, onOve
       expired += points.length - kept.length
       return kept.map(({ position, timestamp }): TimedPosition => ({ position, timestamp: timestamp! }))
     })
+    if (segments.every((points) => points.length === 0)) {
+      return { overlapping: 0, expired }
+    }
     if (onOverlap === 'keep') {
       // Judged inside the write, with nothing read first: another upload or a
       // restore could write into a gap between a read and the write. Not
