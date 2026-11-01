@@ -40,7 +40,7 @@ import {
   UploadFormatError,
 } from './gpxUpload.js'
 import type { SliceReservation } from './gpxUpload.js'
-import { DEFAULT_WINDOW_MS, parseTrackQuery, segment, TimeWindowError, TrackStream } from './timeWindow.js'
+import { DEFAULT_WINDOW_MS, parseTrackQuery, TimeWindowError, TrackStream } from './timeWindow.js'
 import type { StreamedPoint, TrackQuery } from './timeWindow.js'
 import type {
   BinEntry,
@@ -54,7 +54,6 @@ import type {
   Position,
   StoredImport,
   TimedPosition,
-  TimedTrackCollection,
   TimeExtent,
   TrackCollection,
   TrackParams,
@@ -1252,6 +1251,25 @@ export default function ThePlugin(app: App): Plugin {
       /** Only the collection route filters spatially; see AGENTS.md on v1 vs v2. */
       const SPATIAL_PARAMS = ['bbox', 'radius'] as const
 
+      /**
+       * The list's `times` answer from the store's per-vessel members, in the
+       * shape `res.json` gives the rest: each vessel framed with its type,
+       * whether it is the own vessel and its name, if it has one.
+       */
+      const frameTimedTracks = (fragments: Record<string, Uint8Array>): Buffer => {
+        const parts: Uint8Array[] = []
+        let separator = '{'
+        for (const [context, members] of Object.entries(fragments)) {
+          parts.push(Buffer.from(`${separator}${JSON.stringify(context)}:{"type":"MultiLineString",`), members)
+          const name = nameOf(context)
+          const named = name === undefined ? '' : `,"name":${JSON.stringify(name)}`
+          parts.push(Buffer.from(`,"isSelf":${context === app.selfContext}${named}}`))
+          separator = ','
+        }
+        parts.push(Buffer.from(separator === '{' ? '{}' : '}'))
+        return Buffer.concat(parts)
+      }
+
       const allTracksHandler: RequestHandler = (req: Request, res: Response) => {
         app.debug(req.query)
         if (!tracks) {
@@ -1288,20 +1306,10 @@ export default function ThePlugin(app: App): Plugin {
         // A vessel with nothing in the window is left out. Without a window the
         // list reads the last day, and every vessel the store keeps would
         // otherwise come back, most of them as an empty line.
-        const result = query.times
-          ? tracks.getFilteredTimedTracks(params, selfPosition, app.debug, query).then((tc: TimedTrackCollection) =>
-              withPoints(tc).reduce<AllTracksResult>((acc, [context, points]) => {
-                const segments = segment(points, segmentGap)
-                acc[context] = {
-                  type: 'MultiLineString',
-                  coordinates: segments.map((s) => s.map(({ position }) => toLngLat(position))),
-                  times: segments.map(toIsoTimes),
-                  isSelf: context === app.selfContext,
-                  name: nameOf(context),
-                }
-                return acc
-              }, {}),
-            )
+        const result: Promise<Buffer | AllTracksResult> = query.times
+          ? tracks
+              .getFilteredTimedTracksJson(params, selfPosition, query, segmentGap)
+              .then((fragments) => frameTimedTracks(fragments))
           : tracks.getFilteredTracks(params, selfPosition, app.debug, query).then((tc: TrackCollection) =>
               withPoints(tc).reduce<AllTracksResult>((acc, [context, track]) => {
                 acc[context] = {
@@ -1316,7 +1324,12 @@ export default function ThePlugin(app: App): Plugin {
 
         result
           .then((trks) => {
-            res.json(trks)
+            if (Buffer.isBuffer(trks)) {
+              res.type('json')
+              res.send(trks)
+            } else {
+              res.json(trks)
+            }
           })
           .catch((err: unknown) => {
             // A radius query the server cannot measure is not a missing track.

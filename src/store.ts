@@ -82,6 +82,17 @@ export interface TrackStore {
   ): Promise<TimedTrackCollection>
 
   /**
+   * As `getFilteredTimedTracks`, segmented at `segmentGap`, as each vessel's
+   * JSON `"coordinates":…,"times":…` members (`timedTracksJson`).
+   */
+  getFilteredTimedTracksJson(
+    params: TrackParams,
+    selfPosition: LatLngTuple | undefined,
+    query: TrackQuery | undefined,
+    segmentGap: number,
+  ): Promise<Record<string, Uint8Array>>
+
+  /**
    * Tracks whose *last* position matches a spatial predicate.
    *
    * Matching on the last position rather than any position is what makes this

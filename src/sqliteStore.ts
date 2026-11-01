@@ -19,6 +19,7 @@ import { knotsBetween } from './glitchFilter.js'
 import type { Fix } from './glitchFilter.js'
 import { outsideSpans } from './recycleBin.js'
 import { significance } from './simplify.js'
+import { timedTracksJson } from './timedTracksJson.js'
 import { keeps, thin, Thinner } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
@@ -1902,6 +1903,15 @@ export class SqliteTrackStore implements TrackStore {
     return Object.fromEntries(
       Object.entries(timed).map(([context, points]) => [context, points.map(({ position }) => position)]),
     )
+  }
+
+  async getFilteredTimedTracksJson(
+    params: TrackParams,
+    selfPosition: LatLngTuple | undefined,
+    query: TrackQuery | undefined,
+    segmentGap: number,
+  ): Promise<Record<string, Uint8Array>> {
+    return timedTracksJson(await this.getFilteredTimedTracks(params, selfPosition, undefined, query), segmentGap)
   }
 
   /**

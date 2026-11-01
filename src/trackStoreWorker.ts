@@ -219,6 +219,12 @@ if (store) {
                 value = packed
                 break
               }
+              case 'getFilteredTimedTracksJson': {
+                const fragments = await target.getFilteredTimedTracksJson(...operation.args)
+                for (const fragment of Object.values(fragments)) transfer.push(fragment.buffer as ArrayBuffer)
+                value = fragments
+                break
+              }
               case 'summarize':
                 value = target.summarize(...operation.args)
                 break

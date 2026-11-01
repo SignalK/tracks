@@ -394,6 +394,14 @@ export class AsyncTrackStore implements TrackStore {
       return unpacked
     })
   }
+  getFilteredTimedTracksJson(
+    params: TrackParams,
+    selfPosition: LatLngTuple | undefined,
+    query: TrackQuery | undefined,
+    segmentGap: number,
+  ): Promise<Record<string, Uint8Array>> {
+    return this.enqueue('getFilteredTimedTracksJson', [params, selfPosition, query, segmentGap])
+  }
   summarize(contexts: Context[] | undefined, window?: TimeWindow) {
     return this.enqueue('summarize', [contexts, window])
   }

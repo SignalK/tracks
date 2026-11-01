@@ -1,6 +1,7 @@
 import { BehaviorSubject, combineLatest, connectable, firstValueFrom, ReplaySubject, Subject } from 'rxjs'
 import type { Connectable, Observable } from 'rxjs'
 import { map, scan, startWith, throttleTime } from 'rxjs/operators'
+import { timedTracksJson } from './timedTracksJson.js'
 import { thin } from './timeWindow.js'
 import type { TrackQuery } from './timeWindow.js'
 import type { TrackStore } from './store.js'
@@ -119,6 +120,15 @@ export class Tracks implements TrackStore {
     return Object.fromEntries(
       Object.entries(timed).map(([context, points]) => [context, points.map(({ position }) => position)]),
     )
+  }
+
+  async getFilteredTimedTracksJson(
+    params: TrackParams,
+    selfPosition: LatLngTuple | undefined,
+    query: TrackQuery | undefined,
+    segmentGap: number,
+  ): Promise<Record<string, Uint8Array>> {
+    return timedTracksJson(await this.getFilteredTimedTracks(params, selfPosition, undefined, query), segmentGap)
   }
 
   /**
