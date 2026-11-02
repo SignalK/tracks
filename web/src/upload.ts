@@ -937,6 +937,15 @@ async function bodyOf(response: Response): Promise<UploadAnswer> {
   }
 }
 
+/** Whether the tracks an upload carries, as the server reported them, are the ones chosen, in any order. */
+function sameTracks(carried: unknown, chosen: readonly string[]): boolean {
+  if (!Array.isArray(carried) || carried.length !== chosen.length) return false
+  const names: unknown[] = carried
+  if (!names.every((name): name is string => typeof name === 'string')) return false
+  const sorted = [...chosen].sort()
+  return [...names].sort().every((name, i) => name === sorted[i])
+}
+
 /** Tries at ending an upload, a retry delay apart: a slice still being written holds it. */
 const STOP_ATTEMPTS = 5
 
@@ -1045,8 +1054,7 @@ export async function uploadGpx({
     existing.size === file.size &&
     existing.fingerprint === fingerprint &&
     existing.onOverlap === onOverlap &&
-    existing.tracks.length === tracks.length &&
-    existing.tracks.every((name) => tracks.includes(name))
+    sameTracks(existing.tracks, tracks)
   let status: GpxUploadStatus
   if (same) {
     status = existing

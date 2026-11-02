@@ -102,6 +102,14 @@ function when(iso: string | undefined): string {
   return Number.isNaN(at.getTime()) ? '—' : at.toLocaleString()
 }
 
+/**
+ * The name of a thrown error, as a DOMException carries it too: `AbortError`
+ * for a stop, `TimeoutError` for a deadline.
+ */
+export function errorName(thrown: unknown): unknown {
+  return typeof thrown === 'object' && thrown !== null && 'name' in thrown ? thrown.name : undefined
+}
+
 /** The message a refusing server sent with its answer, if it sent one. */
 export async function messageOf(response: Response): Promise<string | undefined> {
   try {

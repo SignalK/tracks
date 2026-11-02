@@ -8,7 +8,7 @@
  * Everything that touches the page runs from `start()`, so the helper can be
  * imported and tested without a document.
  */
-import { messageOf, refusal } from './bin.js'
+import { errorName, messageOf, refusal } from './bin.js'
 import { byId, within } from './dom.js'
 
 /** The word typed to confirm, which the route asks for too. */
@@ -85,7 +85,7 @@ export function start(): void {
       // would take what it has recorded since.
       confirm.value = ''
       fail(
-        failure instanceof Error && failure.name === 'TimeoutError'
+        errorName(failure) === 'TimeoutError'
           ? 'The server did not answer. The database may still have been deleted: reload the page to see.'
           : 'The connection failed. The database may still have been deleted: reload the page to see.',
       )
