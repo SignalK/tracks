@@ -138,6 +138,16 @@ describe('the history import route', () => {
     )
   })
 
+  it('says, once finished, that history could not answer for the state', async () => {
+    await withHarness(
+      async (h) => {
+        await request(h.app).post('/plugins/tracks/history-import')
+        expect(await finished(h)).toMatchObject({ filled: 7200, stateUnreadable: true })
+      },
+      { history: { ...history, stateRejects: true } },
+    )
+  })
+
   it('asks history for no state when nothing pauses', async () => {
     const paths = new Set<string>()
     await withHarness(

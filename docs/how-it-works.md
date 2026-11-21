@@ -318,10 +318,14 @@ While paused, the plugin says so in its status on the server dashboard.
 
 The history import follows the same setting. It reads the own vessel's `navigation.state` from
 the provider and leaves out the time it was in one of these states, without reading the
-positions of that time at all. It reads the state in ten-minute steps and keeps the steps a
-departure or an arrival falls in, so a passage is not cut short. Where the provider holds no state, or cannot read one, the
-import brings in everything, and the plugin's status says so when it could not read it. How
-long the import left out shows in the plugin's status while it runs.
+positions of that time at all. It reads the state a minute at a time and keeps the minutes a
+departure or an arrival falls in, so a passage is not cut short. The state in force when the
+import starts is looked for as far back as the provider holds, also before a retention cutoff.
+Where the provider holds no state, or cannot read one, the
+import brings in everything, and when it could not read it the plugin's status and
+`GET /plugins/tracks/history-import` (`stateUnreadable`) say so, also once it has finished. How
+long the import left out, in milliseconds, is `paused` there, and shows in the plugin's status
+while it runs.
 
 ## Resolution by state
 

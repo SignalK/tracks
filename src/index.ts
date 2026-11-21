@@ -515,6 +515,8 @@ const historyImportJson = (state: HistoryImportState, running: boolean) => {
     filled: state.filled,
     ...(state.finishedAt === undefined ? {} : { finishedAt: iso(state.finishedAt) }),
     ...(state.error === undefined ? {} : { error: state.error }),
+    ...(state.paused === undefined ? {} : { paused: state.paused }),
+    ...(state.stateUnreadable ? { stateUnreadable: true } : {}),
   }
 }
 

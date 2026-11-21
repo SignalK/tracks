@@ -10,6 +10,7 @@ import {
   pausedSpans,
   PROBE_SECONDS,
   runHistoryImport,
+  STATE_SECONDS,
   startOfDay,
 } from './historyImport.js'
 import type { HistoryImportDeps, PauseDeps, TimedState } from './historyImport.js'
@@ -683,8 +684,8 @@ describe('runHistoryImport with pause states', () => {
       stopped: () => false,
     })
     // One coarse look back before the first day, then one read a day.
-    expect(states.calls.filter(({ seconds }) => seconds !== PROBE_SECONDS)).toHaveLength(1)
-    expect(states.calls.filter(({ seconds }) => seconds === PROBE_SECONDS)).toHaveLength(
+    expect(states.calls.filter(({ seconds }) => seconds !== STATE_SECONDS)).toHaveLength(1)
+    expect(states.calls.filter(({ seconds }) => seconds === STATE_SECONDS)).toHaveLength(
       (final.startedAt - final.firstDay!) / DAY_MS,
     )
     expect(store.written).toEqual([])
@@ -703,11 +704,45 @@ describe('runHistoryImport with pause states', () => {
       pause: states.pause,
       stopped: () => false,
     })
-    expect(states.calls.filter(({ seconds }) => seconds !== PROBE_SECONDS)).toHaveLength(2)
+    expect(states.calls.filter(({ seconds }) => seconds !== STATE_SECONDS)).toHaveLength(2)
     // Under way on the third day, which a stale 'moored' would have left out.
     expect(store.written.filter(({ timestamp }) => timestamp >= day0 + 2 * DAY_MS).length).toBeGreaterThan(
       (DAY_MS - 20 * MINUTE) / 1000,
     )
+  })
+
+  it('keeps a passage that leaves and returns within ten minutes', async () => {
+    const { history } = fakeHistory(fixes(day0, day0 + DAY_MS))
+    const store = fakeStore()
+    await runHistoryImport(begin(day0 + DAY_MS), {
+      ...store.deps,
+      history,
+      pause: fakeStates([
+        trip[0]!,
+        { timestamp: day0 + 14 * HOUR + 2 * MINUTE, state: 'motoring' },
+        { timestamp: day0 + 14 * HOUR + 7 * MINUTE, state: 'moored' },
+      ]).pause,
+      stopped: () => false,
+    })
+    const times = store.written.map(({ timestamp }) => timestamp)
+    expect(Math.min(...times)).toBeLessThanOrEqual(day0 + 14 * HOUR + 2 * MINUTE)
+    expect(Math.max(...times)).toBeGreaterThanOrEqual(day0 + 14 * HOUR + 7 * MINUTE - 1000)
+  })
+
+  it('finds a state reported before the retention cutoff, and reads no positions before it', async () => {
+    const { history, calls } = fakeHistory(fixes(day0, day0 + 2 * DAY_MS))
+    const store = fakeStore()
+    const final = await runHistoryImport(begin(day0 + 2 * DAY_MS), {
+      ...store.deps,
+      history,
+      // Moored three days before the cutoff, and nothing reported since.
+      pause: fakeStates(trip.slice(0, 1)).pause,
+      keepFrom: () => day0 + DAY_MS,
+      stopped: () => false,
+    })
+    expect(final.finishedAt).toBeDefined()
+    expect(store.written).toEqual([])
+    expect(calls.every(({ from }) => from >= day0 + DAY_MS)).toBe(true)
   })
 
   it('imports everything where history holds no state', async () => {
@@ -754,6 +789,12 @@ describe('runHistoryImport with pause states', () => {
 
 describe('importStatus with pause states', () => {
   const state = { ...begin(day0 + 10 * DAY_MS), firstDay: day0, nextDay: day0 + 4 * DAY_MS, filled: 1234 }
+
+  it('still says, once finished, that the state could not be read', () => {
+    expect(importStatus({ ...state, finishedAt: day0, stateUnreadable: true }, false)).toBe(
+      'History import finished, but navigation.state could not be read from history, so paused time was imported too',
+    )
+  })
 
   it('says how much was left out as paused, and when the state could not be read', () => {
     expect(importStatus({ ...state, paused: 3 * DAY_MS }, true)).toBe(

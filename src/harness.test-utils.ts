@@ -126,6 +126,8 @@ export interface HarnessOptions {
      * the same answer as a position read.
      */
     stateRows?: [string, string][]
+    /** Reject every read of `navigation.state`, as a provider that keeps no strings may. */
+    stateRejects?: boolean
     /** Called with every `getValues` query, so a test can see what was asked. */
     onValues?: (query: HistoryValuesQuery) => void
     /**
@@ -207,15 +209,16 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
                       delay > 0
                         ? new Promise((resolve) => setTimeout(() => resolve(value), delay))
                         : Promise.resolve(value)
-                    return options.history?.getValuesRejects === true
+                    const readsState = query.pathSpecs.some(({ path }) => path === 'navigation.state')
+                    return options.history?.getValuesRejects === true ||
+                      (options.history?.stateRejects === true && readsState)
                       ? Promise.reject(new Error('history provider unavailable'))
                       : later({
                           context: selfContext,
                           range: { from: '', to: '' },
                           values: [],
                           data:
-                            options.history?.stateRows !== undefined &&
-                            query.pathSpecs.some(({ path }) => path === 'navigation.state')
+                            options.history?.stateRows !== undefined && readsState
                               ? options.history.stateRows.filter(([time]) => {
                                   const at = Date.parse(time)
                                   return at >= Date.parse(query.from.toString()) && at < Date.parse(query.to.toString())
