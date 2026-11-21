@@ -120,6 +120,14 @@ export interface HarnessOptions {
     stampsAtEnd?: boolean
     /** Answer each `getValues` this long after it is asked, as a provider scanning years does. */
     valuesDelayMs?: number
+    /**
+     * What `getValues` returns for `navigation.state`, as `[time, state]`
+     * rows: those within the asked range. Without it, a state read gets
+     * the same answer as a position read.
+     */
+    stateRows?: [string, string][]
+    /** Reject every read of `navigation.state`, as a provider that keeps no strings may. */
+    stateRejects?: boolean
     /** Called with every `getValues` query, so a test can see what was asked. */
     onValues?: (query: HistoryValuesQuery) => void
     /**
@@ -136,6 +144,7 @@ export interface HistoryValuesQuery {
   context: string
   from: { toString: () => string }
   to: { toString: () => string }
+  pathSpecs: { path: string; aggregate: string }[]
   resolution?: number
 }
 
@@ -200,20 +209,27 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
                       delay > 0
                         ? new Promise((resolve) => setTimeout(() => resolve(value), delay))
                         : Promise.resolve(value)
-                    return options.history?.getValuesRejects === true
+                    const readsState = query.pathSpecs.some(({ path }) => path === 'navigation.state')
+                    return options.history?.getValuesRejects === true ||
+                      (options.history?.stateRejects === true && readsState)
                       ? Promise.reject(new Error('history provider unavailable'))
                       : later({
                           context: selfContext,
                           range: { from: '', to: '' },
                           values: [],
                           data:
-                            options.history?.aggregatesFirst === true
-                              ? firstPerBucket(
-                                  options.history.rows ?? [],
-                                  (query.resolution ?? 1) * 1000,
-                                  options.history.stampsAtEnd === true,
-                                )
-                              : (options.history?.rows ?? []),
+                            options.history?.stateRows !== undefined && readsState
+                              ? options.history.stateRows.filter(([time]) => {
+                                  const at = Date.parse(time)
+                                  return at >= Date.parse(query.from.toString()) && at < Date.parse(query.to.toString())
+                                })
+                              : options.history?.aggregatesFirst === true
+                                ? firstPerBucket(
+                                    options.history.rows ?? [],
+                                    (query.resolution ?? 1) * 1000,
+                                    options.history.stampsAtEnd === true,
+                                  )
+                                : (options.history?.rows ?? []),
                         })
                   },
                   getContexts: () => Promise.resolve(options.history?.contexts ?? []),

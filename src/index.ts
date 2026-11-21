@@ -26,6 +26,7 @@ import { AsyncTrackStore } from './asyncTrackStore.js'
 import type { TrackStore } from './store.js'
 import { DEFAULT_MAX_SPEED_KNOTS, GlitchFilter } from './glitchFilter.js'
 import { importStatus, runHistoryImport } from './historyImport.js'
+import type { TimedState } from './historyImport.js'
 import { SourceWatch } from './sourceWatch.js'
 import { DEFAULT_PAUSE_STATES, PAUSABLE_STATES, StateGate } from './stateGate.js'
 import { fromGpx, GpxTrackWriter, toGpx } from './gpx.js'
@@ -423,6 +424,25 @@ const positionQuery = (context: Context, from: number, to: number, seconds: numb
   resolution: seconds,
 })
 
+/** A read of a vessel's `navigation.state` over `[from, to]`, the last it reported in each bucket of `seconds`. */
+const stateQuery = (context: Context, from: number, to: number, seconds: number): HistoryValuesQuery => ({
+  ...positionQuery(context, from, to, seconds),
+  pathSpecs: [{ path: 'navigation.state', aggregate: 'last' }],
+})
+
+/** The states in a provider's answer; a bucket without one carries the state before it. */
+const historyStates = (response: HistoryValuesResponse | undefined): TimedState[] => {
+  const parsed: TimedState[] = []
+  for (const row of response?.data ?? []) {
+    const state: unknown = Array.isArray(row) ? row[1] : undefined
+    const timestamp = historyRowTimestamp(row)
+    if (typeof state === 'string' && timestamp > 0) {
+      parsed.push({ timestamp, state })
+    }
+  }
+  return parsed
+}
+
 /** The positions in a provider's answer, each standing for a bucket of `seconds`. */
 const historyRows = (response: HistoryValuesResponse | undefined, seconds: number): TimedPosition[] => {
   const parsed: TimedPosition[] = []
@@ -453,6 +473,14 @@ async function importedHistory(
   to: number,
   seconds: number,
 ): Promise<TimedPosition[]> {
+  // Not clipped to the range: a provider that stamps a bucket on its end puts
+  // the last one past it, and the import keeps only what falls in the
+  // stretches it asked about anyway.
+  return historyRows(await readHistory(app, positionQuery(context, from, to, seconds)), seconds)
+}
+
+/** One read for the history import, rejecting when there is no provider or it does not answer in time. */
+async function readHistory(app: App, query: HistoryValuesQuery): Promise<HistoryValuesResponse> {
   if (!app.getHistoryApi) {
     throw new Error('This server has no History API')
   }
@@ -460,14 +488,7 @@ async function importedHistory(
     app.getHistoryApi(app.config?.settings?.historyApi?.defaultProvider),
     HISTORY_QUERY_TIMEOUT_MS,
   )
-  const response = await withTimeout(
-    historyApi.getValues(positionQuery(context, from, to, seconds)),
-    IMPORT_READ_TIMEOUT_MS,
-  )
-  // Not clipped to the range: a provider that stamps a bucket on its end puts
-  // the last one past it, and the import keeps only what falls in the
-  // stretches it asked about anyway.
-  return historyRows(response, seconds)
+  return withTimeout(historyApi.getValues(query), IMPORT_READ_TIMEOUT_MS)
 }
 
 /** Whether a history provider is installed and answers: one the import can read, and a delete keep its span from. */
@@ -494,6 +515,8 @@ const historyImportJson = (state: HistoryImportState, running: boolean) => {
     filled: state.filled,
     ...(state.finishedAt === undefined ? {} : { finishedAt: iso(state.finishedAt) }),
     ...(state.error === undefined ? {} : { error: state.error }),
+    ...(state.paused === undefined ? {} : { paused: state.paused }),
+    ...(state.stateUnreadable ? { stateUnreadable: true } : {}),
   }
 }
 
@@ -640,6 +663,9 @@ export default function ThePlugin(app: App): Plugin {
     delete begun.error
     const run = { state: begun, running: true, stop: false }
     historyImport = run
+    // The gate the plugin started with: a change of settings restarts the
+    // plugin, and with it the import.
+    const gate = stateGate
     void runHistoryImport(state, {
       history: (from, to, seconds) => importedHistory(app, state.context, from, to, seconds),
       stored: async (from, to) =>
@@ -656,6 +682,15 @@ export default function ThePlugin(app: App): Plugin {
       deleted: () => deletedSpansOf(state.context),
       save: async (next, runs, since) => store.saveHistoryImport!(next, runs, since),
       keepFrom,
+      ...(gate.enabled
+        ? {
+            pause: {
+              states: async (from, to, seconds) =>
+                historyStates(await readHistory(app, stateQuery(state.context, from, to, seconds))),
+              pauses: (value) => gate.pauses(value),
+            },
+          }
+        : {}),
       // A restart replaces the store, and the new one goes on by itself.
       stopped: () => run.stop || tracks !== store,
       progress: (next) => {
@@ -2023,7 +2058,7 @@ export default function ThePlugin(app: App): Plugin {
           type: 'array',
           title: 'Pause recording while navigation.state is one of',
           description:
-            "Stops recording the own vessel while it is not going anywhere, so a winter on a mooring costs no rows. Needs navigation.state to be set, by signalk-autostate or by hand. By default it pauses while moored, not-under-way or aground; clear the list to always record. Note that 'anchored' is offered but rarely wanted: an anchor alarm watches exactly the track a vessel makes while swinging on its rode. AIS targets are never gated, since their status comes from the transponder and is often stale.",
+            "Stops recording the own vessel while it is not going anywhere, so a winter on a mooring costs no rows. Needs navigation.state to be set, by signalk-autostate or by hand. By default it pauses while moored, not-under-way or aground; clear the list to always record. The history import leaves out the same states, read from the provider's navigation.state. Note that 'anchored' is offered but rarely wanted: an anchor alarm watches exactly the track a vessel makes while swinging on its rode. AIS targets are never gated, since their status comes from the transponder and is often stale.",
           items: {
             type: 'string',
             enum: [...PAUSABLE_STATES],

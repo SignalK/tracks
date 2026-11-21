@@ -207,7 +207,9 @@ it is, and a deleted span stays deleted.
 The import runs on the server. How far it got shows in the webapp and in the plugin's status,
 and a stop or a restart breaks it off only until a minute after the plugin starts again, when
 it goes on with the next day. Started again once it has finished, it fills only what is still
-missing. A day under way at a second a position is up to 86,400 rows in the plugin's file.
+missing. A day under way at a second a position is up to 86,400 rows in the plugin's file. Time
+the own vessel spent in a state that pauses recording is left out, as described under
+[Pausing while not under way](#pausing-while-not-under-way).
 
 It needs administrator rights. `GET /plugins/tracks/history-import` says whether a provider is
 installed (`provider`) and how far the import got (`state`), and `POST` starts it, or resumes
@@ -313,6 +315,17 @@ is often stale, so a vessel under way still reporting `moored` would otherwise v
 track.
 
 While paused, the plugin says so in its status on the server dashboard.
+
+The history import follows the same setting. It reads the own vessel's `navigation.state` from
+the provider and leaves out the time it was in one of these states, so the positions of that time are not
+imported, and a day spent paused asks the provider for no positions at all. It reads the state a minute at a time and keeps the minutes a
+departure or an arrival falls in, so a passage is not cut short. The state in force when the
+import starts is looked for as far back as the provider holds, also before a retention cutoff.
+Where the provider holds no state, or cannot read one, the
+import brings in everything, and when it could not read it the plugin's status and
+`GET /plugins/tracks/history-import` (`stateUnreadable`) say so, also once it has finished. How
+long the import left out, in milliseconds, is `paused` there, and shows in the plugin's status
+while it runs.
 
 ## Resolution by state
 

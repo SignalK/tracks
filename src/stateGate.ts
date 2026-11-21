@@ -74,6 +74,11 @@ export class StateGate {
     return true
   }
 
+  /** Whether the own vessel's track pauses in `state`. */
+  pauses(state: string): boolean {
+    return this.pauseStates.has(state)
+  }
+
   /** The state last seen for the own vessel, or undefined if none yet. */
   get state(): string | undefined {
     return this.lastState
