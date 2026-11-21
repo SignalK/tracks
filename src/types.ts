@@ -108,6 +108,14 @@ export interface HistoryImportState {
   finishedAt?: number
   /** Why the import stopped before it finished; asked again, it goes on from `nextDay`. */
   error?: string
+  /**
+   * How long this run left out as paused by `navigation.state`, in
+   * milliseconds. Kept only while the import runs, as live recording keeps
+   * its count of skipped positions.
+   */
+  paused?: number
+  /** Set while the run could not read `navigation.state` from history, and imported paused time too. */
+  stateUnreadable?: boolean
 }
 
 /**

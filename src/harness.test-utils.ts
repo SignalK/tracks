@@ -120,6 +120,12 @@ export interface HarnessOptions {
     stampsAtEnd?: boolean
     /** Answer each `getValues` this long after it is asked, as a provider scanning years does. */
     valuesDelayMs?: number
+    /**
+     * What `getValues` returns for `navigation.state`, as `[time, state]`
+     * rows: those within the asked range. Without it, a state read gets
+     * the same answer as a position read.
+     */
+    stateRows?: [string, string][]
     /** Called with every `getValues` query, so a test can see what was asked. */
     onValues?: (query: HistoryValuesQuery) => void
     /**
@@ -136,6 +142,7 @@ export interface HistoryValuesQuery {
   context: string
   from: { toString: () => string }
   to: { toString: () => string }
+  pathSpecs: { path: string; aggregate: string }[]
   resolution?: number
 }
 
@@ -207,13 +214,19 @@ export function createHarness(options: HarnessOptions = {}): TestHarness {
                           range: { from: '', to: '' },
                           values: [],
                           data:
-                            options.history?.aggregatesFirst === true
-                              ? firstPerBucket(
-                                  options.history.rows ?? [],
-                                  (query.resolution ?? 1) * 1000,
-                                  options.history.stampsAtEnd === true,
-                                )
-                              : (options.history?.rows ?? []),
+                            options.history?.stateRows !== undefined &&
+                            query.pathSpecs.some(({ path }) => path === 'navigation.state')
+                              ? options.history.stateRows.filter(([time]) => {
+                                  const at = Date.parse(time)
+                                  return at >= Date.parse(query.from.toString()) && at < Date.parse(query.to.toString())
+                                })
+                              : options.history?.aggregatesFirst === true
+                                ? firstPerBucket(
+                                    options.history.rows ?? [],
+                                    (query.resolution ?? 1) * 1000,
+                                    options.history.stampsAtEnd === true,
+                                  )
+                                : (options.history?.rows ?? []),
                         })
                   },
                   getContexts: () => Promise.resolve(options.history?.contexts ?? []),

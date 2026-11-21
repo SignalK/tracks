@@ -6,11 +6,13 @@ import {
   historyStart,
   importStatus,
   occupied,
+  outside,
+  pausedSpans,
   PROBE_SECONDS,
   runHistoryImport,
   startOfDay,
 } from './historyImport.js'
-import type { HistoryImportDeps } from './historyImport.js'
+import type { HistoryImportDeps, PauseDeps, TimedState } from './historyImport.js'
 import type { DeletedSpan, HistoryImportState, LatLngTuple, TimedPosition } from './types.js'
 
 const SELF = 'vessels.urn:mrn:imo:mmsi:123456789'
@@ -543,5 +545,222 @@ describe('importStatus', () => {
       'History import stopped: provider unavailable. Resume it in the Tracks webapp.',
     )
     expect(importStatus({ ...state, finishedAt: day0 }, false)).toBeUndefined()
+  })
+})
+
+const PAUSE_STATES = new Set(['moored', 'not-under-way', 'aground'])
+const pauses = (state: string) => PAUSE_STATES.has(state)
+
+/**
+ * A provider's `navigation.state` history over `changes`, answering with
+ * `last`: the latest state reported in each bucket that holds one, stamped at
+ * the bucket's start or end, and nothing for the buckets between.
+ */
+function fakeStates(changes: TimedState[], { stampAtEnd = false, failing = false } = {}) {
+  const calls: { from: number; to: number; seconds: number }[] = []
+  const pause: PauseDeps = {
+    states: (from, to, seconds) => {
+      calls.push({ from, to, seconds })
+      if (failing) {
+        return Promise.reject(new Error('cannot aggregate a string'))
+      }
+      const width = seconds * 1000
+      const buckets = new Map<number, TimedState>()
+      for (const change of [...changes].sort((a, b) => a.timestamp - b.timestamp)) {
+        if (change.timestamp < from || change.timestamp >= to) continue
+        const bucket = from + Math.floor((change.timestamp - from) / width) * width
+        buckets.set(bucket, { timestamp: stampAtEnd ? bucket + width : bucket, state: change.state })
+      }
+      return Promise.resolve([...buckets.values()])
+    },
+    pauses,
+  }
+  return { pause, calls }
+}
+
+describe('pausedSpans', () => {
+  const W = PROBE_SECONDS * 1000
+
+  it('pauses from the start while the carried state pauses, until a bucket before it turns moving', () => {
+    const rows = [{ timestamp: 5 * HOUR, state: 'sailing' }]
+    expect(pausedSpans(rows, 0, DAY_MS, PROBE_SECONDS, 'moored', pauses)).toEqual({
+      spans: [{ from: 0, to: 5 * HOUR - W }],
+      last: 'sailing',
+    })
+  })
+
+  it('pauses a bucket after the state turns paused, to the end of the range', () => {
+    const rows = [{ timestamp: 5 * HOUR, state: 'moored' }]
+    expect(pausedSpans(rows, 0, DAY_MS, PROBE_SECONDS, 'motoring', pauses)).toEqual({
+      spans: [{ from: 5 * HOUR + W, to: DAY_MS }],
+      last: 'moored',
+    })
+  })
+
+  it('pauses nothing without a state, or with only moving ones', () => {
+    expect(pausedSpans([], 0, DAY_MS, PROBE_SECONDS, undefined, pauses)).toEqual({ spans: [], last: undefined })
+    expect(pausedSpans([{ timestamp: HOUR, state: 'anchored' }], 0, DAY_MS, PROBE_SECONDS, 'sailing', pauses)).toEqual({
+      spans: [],
+      last: 'anchored',
+    })
+  })
+
+  it('leaves a stretch shorter than the buckets either side of it moving', () => {
+    const rows = [
+      { timestamp: HOUR, state: 'moored' },
+      { timestamp: HOUR + W, state: 'sailing' },
+    ]
+    expect(pausedSpans(rows, 0, DAY_MS, PROBE_SECONDS, 'sailing', pauses).spans).toEqual([])
+  })
+
+  it('takes a bucket read before the range into account, and clips to the range', () => {
+    const rows = [{ timestamp: -W, state: 'moored' }]
+    expect(pausedSpans(rows, 0, HOUR, PROBE_SECONDS, 'sailing', pauses).spans).toEqual([{ from: 0, to: HOUR }])
+  })
+})
+
+describe('outside', () => {
+  it('cuts the spans out of the windows', () => {
+    const windows = [
+      { from: 0, to: 10 },
+      { from: 20, to: 30 },
+    ]
+    expect(outside(windows, [{ from: 5, to: 25 }])).toEqual([
+      { from: 0, to: 5 },
+      { from: 25, to: 30 },
+    ])
+    expect(outside(windows, [])).toEqual(windows)
+    expect(outside(windows, [{ from: -5, to: 40 }])).toEqual([])
+  })
+})
+
+describe('runHistoryImport with pause states', () => {
+  /** A boat moored since days before the import, out from 14:00 to 16:00 on day0. */
+  const trip = [
+    { timestamp: day0 - 3 * DAY_MS, state: 'moored' },
+    { timestamp: day0 + 14 * HOUR, state: 'sailing' },
+    { timestamp: day0 + 16 * HOUR, state: 'moored' },
+  ]
+  const atBerth = (from: number, to: number) =>
+    fixes(from, to).map((fix) => ({ ...fix, position: [60, 24] as LatLngTuple }))
+
+  for (const stampAtEnd of [false, true]) {
+    it(`imports the trip whole and leaves the berth out${stampAtEnd ? ', end-stamped' : ''}`, async () => {
+      const held = fixes(day0, day0 + 2 * DAY_MS)
+      const { history, calls } = fakeHistory(held, { stampAtEnd })
+      const store = fakeStore()
+      const final = await runHistoryImport(begin(day0 + 2 * DAY_MS), {
+        ...store.deps,
+        history,
+        pause: fakeStates(trip, { stampAtEnd }).pause,
+        stopped: () => false,
+      })
+      expect(final.finishedAt).toBeDefined()
+      const times = store.written.map(({ timestamp }) => timestamp)
+      // Up to a second late where a provider stamps its finest buckets on their end.
+      expect(Math.min(...times)).toBeLessThanOrEqual(day0 + 14 * HOUR + 1000)
+      expect(Math.max(...times)).toBeGreaterThanOrEqual(day0 + 16 * HOUR - 1000)
+      // A bucket or two either side of the trip, and nothing of the second day.
+      expect(Math.min(...times)).toBeGreaterThanOrEqual(day0 + 14 * HOUR - 3 * PROBE_SECONDS * 1000)
+      expect(Math.max(...times)).toBeLessThan(day0 + 16 * HOUR + 3 * PROBE_SECONDS * 1000)
+      // The provider is not asked for positions over the moored second day.
+      expect(
+        calls.filter(({ to, seconds }) => seconds <= PROBE_SECONDS && to > day0 + DAY_MS + 3 * PROBE_SECONDS * 1000),
+      ).toEqual([])
+      expect(final.paused).toBeGreaterThan(DAY_MS + 20 * HOUR)
+    })
+  }
+
+  it('carries a state across midnight within a run, looking back only once', async () => {
+    const held = atBerth(day0, day0 + 3 * DAY_MS)
+    const { history } = fakeHistory(held)
+    const states = fakeStates(trip.slice(0, 1))
+    const store = fakeStore()
+    const final = await runHistoryImport(begin(day0 + 3 * DAY_MS), {
+      ...store.deps,
+      history,
+      pause: states.pause,
+      stopped: () => false,
+    })
+    // One coarse look back before the first day, then one read a day.
+    expect(states.calls.filter(({ seconds }) => seconds !== PROBE_SECONDS)).toHaveLength(1)
+    expect(states.calls.filter(({ seconds }) => seconds === PROBE_SECONDS)).toHaveLength(
+      (final.startedAt - final.firstDay!) / DAY_MS,
+    )
+    expect(store.written).toEqual([])
+  })
+
+  it('looks back again after a day the recording held whole', async () => {
+    const held = fixes(day0, day0 + 3 * DAY_MS)
+    const { history } = fakeHistory(held)
+    const states = fakeStates([{ timestamp: day0 + DAY_MS + 12 * HOUR, state: 'sailing' }, ...trip.slice(0, 1)])
+    // The plugin recorded the second day itself, and with it the departure.
+    // Into the third day, so the recording leaves the second nothing to fill.
+    const store = fakeStore(fixes(day0 + DAY_MS, day0 + 2 * DAY_MS + 10 * MINUTE).filter((_, i) => i % 60 === 0))
+    await runHistoryImport(begin(day0 + 3 * DAY_MS), {
+      ...store.deps,
+      history,
+      pause: states.pause,
+      stopped: () => false,
+    })
+    expect(states.calls.filter(({ seconds }) => seconds !== PROBE_SECONDS)).toHaveLength(2)
+    // Under way on the third day, which a stale 'moored' would have left out.
+    expect(store.written.filter(({ timestamp }) => timestamp >= day0 + 2 * DAY_MS).length).toBeGreaterThan(
+      (DAY_MS - 20 * MINUTE) / 1000,
+    )
+  })
+
+  it('imports everything where history holds no state', async () => {
+    const { history } = fakeHistory(fixes(day0, day0 + DAY_MS))
+    const store = fakeStore()
+    const final = await runHistoryImport(begin(day0 + DAY_MS), {
+      ...store.deps,
+      history,
+      pause: fakeStates([]).pause,
+      stopped: () => false,
+    })
+    expect(store.written).toHaveLength(DAY_MS / 1000)
+    expect(final.paused).toBeUndefined()
+  })
+
+  it('imports everything, and says so, when history cannot answer for the state', async () => {
+    const { history } = fakeHistory(fixes(day0, day0 + DAY_MS))
+    const store = fakeStore()
+    const final = await runHistoryImport(begin(day0 + DAY_MS), {
+      ...store.deps,
+      history,
+      pause: fakeStates(trip, { failing: true }).pause,
+      stopped: () => false,
+    })
+    expect(final.error).toBeUndefined()
+    expect(store.written).toHaveLength(DAY_MS / 1000)
+    expect(final.stateUnreadable).toBe(true)
+  })
+
+  it('still fails a day the provider cannot read positions for', async () => {
+    const provider = fakeHistory(fixes(day0, day0 + DAY_MS))
+    const store = fakeStore()
+    let reads = 0
+    const final = await runHistoryImport(begin(day0 + DAY_MS), {
+      ...store.deps,
+      history: (from, to, seconds) =>
+        ++reads > 1 ? Promise.reject(new Error('timeout')) : provider.history(from, to, seconds),
+      pause: fakeStates([], { failing: true }).pause,
+      stopped: () => false,
+    })
+    expect(final.error).toBe('timeout')
+  })
+})
+
+describe('importStatus with pause states', () => {
+  const state = { ...begin(day0 + 10 * DAY_MS), firstDay: day0, nextDay: day0 + 4 * DAY_MS, filled: 1234 }
+
+  it('says how much was left out as paused, and when the state could not be read', () => {
+    expect(importStatus({ ...state, paused: 3 * DAY_MS }, true)).toBe(
+      'Importing history: 40% done, up to 2026-06-05, 1234 positions filled, 3.0 days left out as paused by navigation.state',
+    )
+    expect(importStatus({ ...state, stateUnreadable: true }, true)).toBe(
+      'Importing history: 40% done, up to 2026-06-05, 1234 positions filled. navigation.state could not be read from history, so paused time is imported too',
+    )
   })
 })

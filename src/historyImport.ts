@@ -45,7 +45,28 @@ export interface HistoryImportDeps {
    * skips ahead to it when it moved past the day the import is at.
    */
   keepFrom?: () => number
+  /**
+   * Leave out the time the own vessel's `navigation.state` history says it
+   * was paused, as live recording does. Absent when nothing pauses.
+   */
+  pause?: PauseDeps
   now?: () => number
+}
+
+/** The own vessel's state in one bucket of history: the last it reported there. */
+export interface TimedState {
+  timestamp: number
+  state: string
+}
+
+export interface PauseDeps {
+  /**
+   * The buckets of `seconds` over `[from, to)` in which history holds a
+   * `navigation.state`, rejecting when it cannot be read.
+   */
+  states: (from: number, to: number, seconds: number) => Promise<TimedState[]>
+  /** Whether live recording pauses in `state`. */
+  pauses: (state: string) => boolean
 }
 
 export const DAY_MS = 24 * 60 * 60 * 1000
@@ -140,6 +161,106 @@ export function occupied(
 }
 
 /**
+ * The stretches of `[from, to)` in which the own vessel was in a state that
+ * pauses recording, and the state in force at `to`.
+ *
+ * `rows` are the buckets of `seconds` that hold a state, each the last the
+ * vessel reported there; buckets without one carry the state before them,
+ * which is `carried` at the first. A stretch starts a bucket's width after
+ * the bucket it turns paused in and ends a width before the one it turns
+ * moving in, whichever end the provider stamps a bucket on, so a departure
+ * or an arrival inside a bucket is read as moving.
+ */
+export function pausedSpans(
+  rows: readonly TimedState[],
+  from: number,
+  to: number,
+  seconds: number,
+  carried: string | undefined,
+  pauses: (state: string) => boolean,
+): { spans: { from: number; to: number }[]; last: string | undefined } {
+  const width = seconds * 1000
+  const spans: { from: number; to: number }[] = []
+  let last = carried
+  let since = last !== undefined && pauses(last) ? from : undefined
+  const close = (end: number) => {
+    const start = Math.max(since!, from)
+    const stop = Math.min(end, to)
+    if (start < stop) {
+      spans.push({ from: start, to: stop })
+    }
+    since = undefined
+  }
+  for (const { timestamp, state } of [...rows].sort((a, b) => a.timestamp - b.timestamp)) {
+    if (pauses(state)) {
+      since ??= timestamp + width
+    } else if (since !== undefined) {
+      close(timestamp - width)
+    }
+    last = state
+  }
+  if (since !== undefined) {
+    close(to)
+  }
+  return { spans, last }
+}
+
+/** The parts of `windows` outside every one of `spans`, which must be sorted. */
+export function outside(
+  windows: readonly { from: number; to: number }[],
+  spans: readonly { from: number; to: number }[],
+): { from: number; to: number }[] {
+  const result: { from: number; to: number }[] = []
+  for (const window of windows) {
+    let start = window.from
+    for (const span of spans) {
+      if (span.to <= start || span.from >= window.to) {
+        continue
+      }
+      if (span.from > start) {
+        result.push({ from: start, to: span.from })
+      }
+      start = Math.max(start, span.to)
+    }
+    if (start < window.to) {
+      result.push({ from: start, to: window.to })
+    }
+  }
+  return result
+}
+
+/**
+ * The state the own vessel last reported before `before`, read in one coarse
+ * bucket per {@link START_PROBE_BUCKETS}th of `[from, before)`, or undefined
+ * when history holds none.
+ */
+export async function stateBefore(before: number, from: number, pause: PauseDeps): Promise<string | undefined> {
+  if (from >= before) {
+    return undefined
+  }
+  const seconds = Math.max(FINEST_SECONDS, Math.ceil((before - from) / 1000 / START_PROBE_BUCKETS))
+  const rows = await pause.states(from, before, seconds)
+  let latest: TimedState | undefined
+  for (const row of rows) {
+    if (latest === undefined || row.timestamp > latest.timestamp) {
+      latest = row
+    }
+  }
+  return latest?.state
+}
+
+/**
+ * What a day knows of the vessel's state: what was in force where it starts,
+ * with `known` false when nothing has been read yet and history must be
+ * asked further back, and `from`, where that look back may start.
+ */
+export interface DayState {
+  known: boolean
+  state?: string
+  from: number
+}
+
+/**
  * The runs one day of history fills, `[from, to)`, and whether the stretch it
  * filled up to the day's end goes on into the next.
  *
@@ -155,16 +276,32 @@ export function occupied(
 export async function importDay(
   from: number,
   to: number,
-  deps: Pick<HistoryImportDeps, 'history' | 'stored' | 'deleted'>,
+  deps: Pick<HistoryImportDeps, 'history' | 'stored' | 'deleted' | 'pause'>,
   inGap = false,
-): Promise<{ runs: TimedPosition[][]; inGap: boolean }> {
+  dayState?: DayState,
+): Promise<DayImport> {
   const around = await deps.stored(from - MIN_FILLED_GAP_MS, to + MIN_FILLED_GAP_MS)
   const stored = inGap ? around.filter(({ timestamp }) => timestamp >= from) : around
-  const free = freeWindows(stored, from, to, MIN_FILLED_GAP_MS)
-  if (free.length === 0) {
-    return { runs: [], inGap: false }
+  const recordable = freeWindows(stored, from, to, MIN_FILLED_GAP_MS)
+  if (recordable.length === 0) {
+    return { runs: [], inGap: false, paused: 0 }
   }
-  const goesOn = free.at(-1)!.to === to
+  const goesOn = recordable.at(-1)!.to === to
+  const pause = deps.pause && (await pausedOver(from, to, deps.pause, dayState))
+  const free = pause ? outside(recordable, pause.spans) : recordable
+  const length = (windows: { from: number; to: number }[]) =>
+    windows.reduce((sum, window) => sum + window.to - window.from, 0)
+  const paused = length(recordable) - length(free)
+  const result = (runs: TimedPosition[][]): DayImport => ({
+    runs,
+    inGap: goesOn,
+    paused,
+    ...(pause ? { state: pause.state } : {}),
+    ...(pause?.unreadable ? { stateUnreadable: true } : {}),
+  })
+  if (free.length === 0) {
+    return result([])
+  }
   const probe = await deps.history(free[0]!.from, free.at(-1)!.to, PROBE_SECONDS)
   const spans: { from: number; to: number }[] = []
   for (const span of occupied(probe, free, PROBE_SECONDS)) {
@@ -192,7 +329,45 @@ export async function importDay(
       span === undefined ? { position, timestamp } : { position, timestamp, span },
     ),
   )
-  return { runs, inGap: goesOn }
+  return result(runs)
+}
+
+/** One day's import: what it fills, and what it found of the vessel's state. */
+export interface DayImport {
+  runs: TimedPosition[][]
+  inGap: boolean
+  /** How long the day was left out as paused, in milliseconds. */
+  paused: number
+  /** The state in force where the day ends, once the day read it. */
+  state?: DayState
+  /** Set when history could not answer for the state, and the day was imported whole. */
+  stateUnreadable?: boolean
+}
+
+/**
+ * The stretches of `[from, to)` paused by the vessel's state history.
+ *
+ * Read at the probe bucket, from one bucket before the day so a bucket a
+ * provider stamps on its end at midnight is not lost between two days. A
+ * provider that cannot answer for the state, as one that keeps no strings,
+ * pauses nothing: the import then goes on as if there were no state history,
+ * and the positions are still read, so an outage still fails the day.
+ */
+async function pausedOver(
+  from: number,
+  to: number,
+  pause: PauseDeps,
+  dayState: DayState | undefined,
+): Promise<{ spans: { from: number; to: number }[]; state?: DayState; unreadable?: true }> {
+  const lookBack = dayState?.from ?? 0
+  try {
+    const carried = dayState?.known ? dayState.state : await stateBefore(from - PROBE_SECONDS * 1000, lookBack, pause)
+    const rows = await pause.states(from - PROBE_SECONDS * 1000, to, PROBE_SECONDS)
+    const { spans, last } = pausedSpans(rows, from, to, PROBE_SECONDS, carried, pause.pauses)
+    return { spans, state: { known: true, from: lookBack, ...(last === undefined ? {} : { state: last }) } }
+  } catch {
+    return { spans: [], unreadable: true }
+  }
 }
 
 /**
@@ -246,6 +421,12 @@ export async function runHistoryImport(
     current = { ...next, filled: await deps.save(next, runs, since) }
     deps.progress?.(current)
   }
+  // Where the state history may be looked back from: not before the
+  // retention cutoff, as for where history begins.
+  const lookBack = Math.max(0, deps.keepFrom?.() ?? Number.NEGATIVE_INFINITY)
+  // Carried from one day to the next within a run only; a day that did not
+  // read the state leaves the next to look back for it.
+  let dayState: DayState = { known: false, from: lookBack }
   try {
     if (current.nextDay === undefined) {
       // Not from the epoch with a retention set: what lies before its cutoff
@@ -269,11 +450,13 @@ export async function runHistoryImport(
         // A gap open at the end of a skipped day is not open at the next one.
         current = { ...current, nextDay: firstKept() }
         delete current.inGap
+        dayState = { known: false, from: lookBack }
         continue
       }
       const from = current.nextDay!
       const to = Math.min(from + DAY_MS, current.startedAt)
-      const day = await importDay(from, to, deps, current.inGap === true)
+      const day = await importDay(from, to, deps, current.inGap === true, dayState)
+      dayState = day.state ?? { known: false, from: lookBack }
       // The day starts before the cutoff on the first day kept, and the
       // next prune would delete what lies before it.
       const keepFrom = deps.keepFrom?.() ?? Number.NEGATIVE_INFINITY
@@ -286,6 +469,8 @@ export async function runHistoryImport(
         ...current,
         nextDay: to,
         filled: current.filled + day.runs.reduce((sum, run) => sum + run.length, 0),
+        ...(day.paused > 0 || current.paused !== undefined ? { paused: (current.paused ?? 0) + day.paused } : {}),
+        ...(day.stateUnreadable || current.stateUnreadable ? { stateUnreadable: true } : {}),
       }
       delete next.inGap
       await advance(day.inGap ? { ...next, inGap: true } : next, day.runs, current.inGap === true ? from : undefined)
@@ -315,5 +500,12 @@ export function importStatus(state: HistoryImportState, running: boolean): strin
   }
   const share = Math.floor((100 * (state.nextDay - state.firstDay)) / Math.max(1, state.startedAt - state.firstDay))
   const day = new Date(state.nextDay).toISOString().slice(0, 10)
-  return `Importing history: ${share}% done, up to ${day}, ${state.filled} positions filled`
+  const paused =
+    state.paused === undefined
+      ? ''
+      : `, ${(state.paused / DAY_MS).toFixed(1)} days left out as paused by navigation.state`
+  const unreadable = state.stateUnreadable
+    ? '. navigation.state could not be read from history, so paused time is imported too'
+    : ''
+  return `Importing history: ${share}% done, up to ${day}, ${state.filled} positions filled${paused}${unreadable}`
 }

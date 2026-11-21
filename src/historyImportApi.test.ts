@@ -108,6 +108,55 @@ describe('the history import route', () => {
     )
   })
 
+  it('leaves out what history says the vessel spent moored', async () => {
+    await withHarness(
+      async (h) => {
+        await request(h.app).post('/plugins/tracks/history-import')
+        const state = await finished(h)
+        expect(state.filled).toBe(0)
+        expect(await storedTimes(h)).toEqual([])
+      },
+      { history: { ...history, stateRows: [[iso(from - 5 * DAY_MS), 'moored']] } },
+    )
+  })
+
+  it('imports what history says the vessel spent under way', async () => {
+    await withHarness(
+      async (h) => {
+        await request(h.app).post('/plugins/tracks/history-import')
+        expect((await finished(h)).filled).toBe(7200)
+      },
+      {
+        history: {
+          ...history,
+          stateRows: [
+            [iso(from - 5 * DAY_MS), 'moored'],
+            [iso(from - HOUR), 'motoring'],
+          ],
+        },
+      },
+    )
+  })
+
+  it('asks history for no state when nothing pauses', async () => {
+    const paths = new Set<string>()
+    await withHarness(
+      async (h) => {
+        await request(h.app).post('/plugins/tracks/history-import')
+        expect((await finished(h)).filled).toBe(7200)
+        expect([...paths]).toEqual(['navigation.position'])
+      },
+      {
+        history: {
+          ...history,
+          stateRows: [[iso(from - 5 * DAY_MS), 'moored']],
+          onValues: (query) => query.pathSpecs.forEach(({ path }) => paths.add(path)),
+        },
+        config: { pauseWhenState: [] },
+      },
+    )
+  })
+
   it('fills nothing more when started again', async () => {
     await withHarness(
       async (h) => {
