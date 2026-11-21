@@ -323,13 +323,18 @@ export async function importDay(
       spans.push({ ...span })
     }
   }
-  const points: TimedPosition[] = []
+  let points: TimedPosition[] = []
   for (const span of spans) {
     for (const point of await deps.history(span.from, span.to, FINEST_SECONDS)) {
       if (point.timestamp >= span.from && point.timestamp < span.to) {
         points.push(point)
       }
     }
+  }
+  // A read joined across a stretch shorter than a probe bucket can take in
+  // a paused one between two free windows.
+  if (pause) {
+    points = outsideSpans(points, pause.spans)
   }
   // Asked after the provider, whose reads can take minutes: a span deleted
   // meanwhile stays deleted too.

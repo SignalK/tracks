@@ -317,8 +317,8 @@ track.
 While paused, the plugin says so in its status on the server dashboard.
 
 The history import follows the same setting. It reads the own vessel's `navigation.state` from
-the provider and leaves out the time it was in one of these states, without reading the
-positions of that time at all. It reads the state a minute at a time and keeps the minutes a
+the provider and leaves out the time it was in one of these states, so the positions of that time are not
+imported, and a day spent paused asks the provider for no positions at all. It reads the state a minute at a time and keeps the minutes a
 departure or an arrival falls in, so a passage is not cut short. The state in force when the
 import starts is looked for as far back as the provider holds, also before a retention cutoff.
 Where the provider holds no state, or cannot read one, the

@@ -729,6 +729,26 @@ describe('runHistoryImport with pause states', () => {
     expect(Math.max(...times)).toBeGreaterThanOrEqual(day0 + 14 * HOUR + 7 * MINUTE - 1000)
   })
 
+  it('imports nothing of a short stop between two stretches under way', async () => {
+    const { history } = fakeHistory(fixes(day0, day0 + DAY_MS))
+    const store = fakeStore()
+    await runHistoryImport(begin(day0 + DAY_MS), {
+      ...store.deps,
+      history,
+      pause: fakeStates([
+        { timestamp: day0 - DAY_MS, state: 'motoring' },
+        { timestamp: day0 + 12 * HOUR + 2 * MINUTE, state: 'moored' },
+        { timestamp: day0 + 12 * HOUR + 6 * MINUTE, state: 'motoring' },
+      ]).pause,
+      stopped: () => false,
+    })
+    const times = store.written.map(({ timestamp }) => timestamp)
+    // Paused a bucket after the stop begins until a bucket before it ends.
+    expect(times.filter((t) => t >= day0 + 12 * HOUR + 3 * MINUTE && t < day0 + 12 * HOUR + 5 * MINUTE)).toEqual([])
+    expect(times).toContain(day0 + 12 * HOUR + 2 * MINUTE)
+    expect(times).toContain(day0 + 12 * HOUR + 5 * MINUTE + 1000)
+  })
+
   it('finds a state reported before the retention cutoff, and reads no positions before it', async () => {
     const { history, calls } = fakeHistory(fixes(day0, day0 + 2 * DAY_MS))
     const store = fakeStore()
